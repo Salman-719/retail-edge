@@ -1,0 +1,30 @@
+# Web framework
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+
+# Database
+sqlalchemy==2.0.31
+asyncpg==0.29.0
+alembic==1.13.2
+
+# Redis
+redis==5.0.7
+
+# S3
+boto3==1.34.144
+
+# Config
+pydantic-settings==2.3.4
+
+# Vision / tracking (test mode for store onboarding)
+ultralytics==8.2.56
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+scipy==1.13.1
+Pillow==10.4.0
+matplotlib==3.8.4
+PyMuPDF==1.24.9
+aiofiles==23.2.1
+
+# HTTP client (for inter-service calls)
+httpx==0.27.0

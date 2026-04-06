@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+jobs:
+  # ── EEP unit tests ───────────────────────────────────────────────────────────
+  eep-tests:
+    name: EEP Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install EEP dependencies
+        working-directory: services/eep
+        run: |
+          pip install --upgrade pip
+          # Install a subset of requirements that don't need GPU/OpenCV system libs
+          pip install fastapi pydantic pydantic-settings sqlalchemy asyncpg \
+                      alembic numpy scipy pytest
+
+      - name: Install OpenCV headless
+        run: pip install opencv-python-headless
+
+      - name: Run unit tests
+        run: pytest tests/unit/ -v
+
+  # ── Frontend lint / build check ───────────────────────────────────────────────
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm install
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  # ── Docker Compose smoke test ─────────────────────────────────────────────────
+  docker-smoke:
+    name: Docker Compose Smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy env file
+        run: cp .env.example .env
+
+      - name: Start infrastructure (postgres, redis, minio only)
+        run: |
+          docker compose up -d postgres redis minio
+          sleep 10
+
+      - name: Health check postgres
+        run: docker compose exec -T postgres pg_isready -U retailvision
+
+      - name: Health check redis
+        run: docker compose exec -T redis redis-cli ping
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
