@@ -48,6 +48,60 @@ services:
       timeout: 20s
       retries: 3
 
+  # ─── Monitoring ───────────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.1
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-retailvision_dev}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: unless-stopped
+
+  # ─── Frontend ─────────────────────────────────────────────────────────────────
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - eep
+
   # ─── Services ─────────────────────────────────────────────────────────────────
 
   eep:
@@ -65,6 +119,8 @@ services:
       S3_BUCKET: ${S3_BUCKET:-retailvision}
       SERVICE_NAME: eep
       PORT: 8000
+      IEP1_URL: http://iep1-ingestion:8001
+      IEP2_URL: http://iep2-vision:8002
     depends_on:
       postgres:
         condition: service_healthy
@@ -72,6 +128,10 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      iep1-ingestion:
+        condition: service_started
+      iep2-vision:
+        condition: service_started
     volumes:
       - eep_tmp:/tmp/retailvision
 
@@ -84,13 +144,19 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
       REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
+      S3_BUCKET: ${S3_BUCKET:-retailvision}
       SERVICE_NAME: iep1-ingestion
       PORT: 8001
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+      minio:
         condition: service_healthy
+    volumes:
+      - iep1_tmp:/tmp/retailvision
 
   iep2-vision:
     build:
@@ -112,6 +178,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - iep2_tmp:/tmp/retailvision
 
   iep3-alerts:
     build:
@@ -171,3 +241,7 @@ volumes:
   redis_data:
   minio_data:
   eep_tmp:
+  iep1_tmp:
+  iep2_tmp:
+  prometheus_data:
+  grafana_data:

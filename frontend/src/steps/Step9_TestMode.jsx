@@ -274,7 +274,7 @@ export default function Step9_TestMode() {
           const finalResults = {
             ...data,
             trajectoryMeters: trajectory,
-            heatmapUrl: `http://localhost:8000/api/stores/${activeStoreId}/cameras/${cam.id}/tracking/heatmap`,
+            heatmapUrl: `/api/stores/${activeStoreId}/cameras/${cam.id}/tracking/heatmap`,
           }
           setResults(finalResults)
           setViewMode('heatmap')

@@ -27,6 +27,15 @@ async def create_zone(store_id: str, payload: ZoneCreate, db: AsyncSession = Dep
     store = await db.get(models.Store, store_id)
     if not store:
         raise HTTPException(404, "Store not found")
+    if payload.id:
+        existing = await db.get(models.Zone, payload.id)
+        if existing and existing.store_id == store_id:
+            existing.name = payload.name
+            existing.type = payload.type
+            existing.points = [p.model_dump() for p in payload.points]
+            await db.flush()
+            await db.refresh(existing)
+            return existing
     zone = models.Zone(
         id=payload.id,
         store_id=store_id,
@@ -79,6 +88,14 @@ async def create_obstacle(store_id: str, payload: ObstacleCreate, db: AsyncSessi
     store = await db.get(models.Store, store_id)
     if not store:
         raise HTTPException(404, "Store not found")
+    if payload.id:
+        existing = await db.get(models.Obstacle, payload.id)
+        if existing and existing.store_id == store_id:
+            existing.name = payload.name
+            existing.points = [p.model_dump() for p in payload.points]
+            await db.flush()
+            await db.refresh(existing)
+            return existing
     obs = models.Obstacle(
         id=payload.id,
         store_id=store_id,

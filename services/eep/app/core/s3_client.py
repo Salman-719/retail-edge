@@ -23,7 +23,7 @@ class S3Client:
             )
         return self._client
 
-    async def ensure_bucket(self):
+    def ensure_bucket(self):
         client = self._get_client()
         try:
             client.head_bucket(Bucket=settings.S3_BUCKET)

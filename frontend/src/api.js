@@ -118,16 +118,37 @@ export async function createCamera(cam) {
   }))
 }
 
+export async function updateCamera(cameraId, patch) {
+  return _json(await fetch(`${base()}/cameras/${cameraId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  }))
+}
+
+export async function deleteCamera(cameraId) {
+  const r = await fetch(`${base()}/cameras/${cameraId}`, { method: 'DELETE' })
+  if (!r.ok) throw new Error(await r.text())
+}
+
+export async function updateObstacle(obsId, patch) {
+  return _json(await fetch(`${base()}/obstacles/${obsId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  }))
+}
+
 export async function uploadVideo(cameraId, file) {
   const fd = new FormData()
   fd.append('file', file)
   const data = await _json(await fetch(`${base()}/cameras/${cameraId}/video`, { method: 'POST', body: fd }))
   return {
     videoPath: data.video_s3_key,
-    duration: data.duration,
-    fps: data.fps,
-    width: data.width,
-    height: data.height,
+    duration: data.video_duration,
+    fps: data.video_fps,
+    width: data.video_width,
+    height: data.video_height,
   }
 }
 
@@ -185,7 +206,7 @@ export async function getTrackingProgress(storeId, cameraId) {
 }
 
 export function trackingStreamUrl(storeId, cameraId, key = 0) {
-  return `http://localhost:8000/api/stores/${storeId}/cameras/${cameraId}/tracking/stream?k=${key}`
+  return `/api/stores/${storeId}/cameras/${cameraId}/tracking/stream?k=${key}`
 }
 
 export async function getTrajectory(storeId, cameraId) {
@@ -217,21 +238,33 @@ export async function saveProject(data) {
     }
   }
 
-  // 2. Zones — upsert by posting (backend ignores duplicate ids if already there)
+  // 2. Zones — upsert, then purge any DB zones not in local state
   for (const zone of data.zones ?? []) {
-    try { await createZone(zone) } catch (_) { /* already exists — ok */ }
+    try { await createZone(zone) } catch (_) {}
   }
+  try {
+    const dbZones = await fetch(`${base()}/zones`).then(r => r.ok ? r.json() : [])
+    const localIds = new Set((data.zones ?? []).map(z => z.id))
+    for (const z of dbZones) {
+      if (!localIds.has(z.id)) await deleteZone(z.id).catch(() => {})
+    }
+  } catch (_) {}
 
-  // 3. Obstacles
+  // 3. Obstacles — upsert, then purge
   for (const obs of data.obstacles ?? []) {
-    try { await createObstacle(obs) } catch (_) { /* already exists */ }
+    try { await createObstacle(obs) } catch (_) {}
   }
+  try {
+    const dbObs = await fetch(`${base()}/obstacles`).then(r => r.ok ? r.json() : [])
+    const localIds = new Set((data.obstacles ?? []).map(o => o.id))
+    for (const o of dbObs) {
+      if (!localIds.has(o.id)) await deleteObstacle(o.id).catch(() => {})
+    }
+  } catch (_) {}
 
-  // 4. Cameras
+  // 4. Cameras — upsert, then purge
   for (const cam of data.cameras ?? []) {
-    try { await createCamera(cam) } catch (_) { /* already exists */ }
-
-    // 4b. Calibration
+    try { await createCamera(cam) } catch (_) {}
     if (cam.homographyMatrix && cam.correspondences?.length >= 4) {
       try {
         await computeHomography(
@@ -239,9 +272,16 @@ export async function saveProject(data) {
           cam.correspondences.map(c => c.camPx),
           cam.correspondences.map(c => c.floorM),
         )
-      } catch (_) { /* ok if fails */ }
+      } catch (_) {}
     }
   }
+  try {
+    const dbCams = await fetch(`${base()}/cameras`).then(r => r.ok ? r.json() : [])
+    const localIds = new Set((data.cameras ?? []).map(c => c.id))
+    for (const c of dbCams) {
+      if (!localIds.has(c.id)) await deleteCamera(c.id).catch(() => {})
+    }
+  } catch (_) {}
 
   if (errors.length) throw new Error(errors.join('; '))
   return { ok: true }

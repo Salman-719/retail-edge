@@ -1,5 +1,4 @@
 """Heatmap generation — zone-coloured overlay on floor plan image."""
-import io
 import numpy as np
 import cv2
 from typing import List, Dict, Optional
@@ -38,9 +37,8 @@ def generate_heatmap_bytes(
     zones: List[Dict],
     zone_occupancy: Dict,
     pixels_per_meter: float,
-    origin_px: Dict = None,
+    origin_px: Optional[Dict] = None,
 ) -> bytes:
-    """Generate heatmap and return PNG bytes."""
     if origin_px is None:
         origin_px = {"x": 0, "y": 0}
 
@@ -62,13 +60,11 @@ def generate_heatmap_bytes(
         pts_arr = np.array(pts_px, dtype=np.int32)
 
         fill_color = _zone_color_bgr(percent)
-
         overlay = result.copy()
         cv2.fillPoly(overlay, [pts_arr], fill_color)
         cv2.addWeighted(overlay, 0.38, result, 0.62, 0, result)
         cv2.polylines(result, [pts_arr], isClosed=True, color=fill_color, thickness=2)
 
-        # Label
         cx = int(np.mean([p[0] for p in pts_px]))
         cy = int(np.mean([p[1] for p in pts_px]))
         label = f"{zname}: {percent:.1f}%"

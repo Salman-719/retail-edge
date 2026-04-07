@@ -123,6 +123,20 @@ export default function StoreOnboarding() {
     floorPlanUrl,
   } = useStore()
   const importRef = useRef()
+  const [dbReloading, setDbReloading] = useState(false)
+
+  const handleReloadFromDb = async () => {
+    setDbReloading(true)
+    try {
+      const data = await loadProject()
+      if (data) hydrateProject(data)
+      else alert('No saved data found for this store.')
+    } catch (e) {
+      alert(e.message)
+    } finally {
+      setDbReloading(false)
+    }
+  }
 
   const handleStoreSelected = async (store) => {
     setCurrentStoreId(store.id)
@@ -211,7 +225,14 @@ export default function StoreOnboarding() {
           })}
         </nav>
 
-        <div className="pt-3 border-t mt-3">
+        <div className="pt-3 border-t mt-3 space-y-1">
+          <button
+            onClick={handleReloadFromDb}
+            disabled={dbReloading}
+            className="w-full text-xs px-2.5 py-2 rounded-lg text-left text-blue-600 hover:bg-blue-50 transition flex items-center gap-2 disabled:opacity-50"
+          >
+            <span>🔄</span> {dbReloading ? 'Loading…' : 'Reload from DB'}
+          </button>
           <button
             onClick={() => importRef.current?.click()}
             className="w-full text-xs px-2.5 py-2 rounded-lg text-left text-gray-500 hover:bg-gray-100 transition flex items-center gap-2"

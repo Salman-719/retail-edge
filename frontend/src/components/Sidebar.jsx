@@ -3,6 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 
 const NAV_ITEMS = [
   { path: '/', label: 'Store Onboarding', icon: '🏪' },
+  { path: '/config', label: 'Store Config', icon: '⚙️' },
   { path: '/live-monitoring', label: 'Live Monitoring', icon: '📹' },
   { path: '/analytics', label: 'Analytics', icon: '📊' },
   { path: '/ai-agent', label: 'AI Agent', icon: '🤖' },

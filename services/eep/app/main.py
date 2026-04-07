@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from prometheus_fastapi_instrumentator import Instrumentator
+
 from app.core.config import settings
 from app.core.database import engine, Base
 from app.core.s3_client import s3_client
@@ -18,12 +20,13 @@ async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
     logger.info("EEP starting — initialising infrastructure…")
 
-    # Create all DB tables (Alembic handles migrations in prod; this covers dev)
+    # Import all model modules so SQLAlchemy registers every table before create_all
+    import app.models  # noqa: F401
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables ready.")
 
-    # Ensure MinIO bucket exists
     s3_client.ensure_bucket()
     logger.info("S3 bucket ready.")
 
@@ -49,15 +52,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Routers ──────────────────────────────────────────────────────────────────
-from app.api import stores, floor_plans, zones, cameras, calibration, tracking  # noqa: E402
+from app.api import register_routers  # noqa: E402
+register_routers(app)
 
-app.include_router(stores.router, prefix="/api/stores", tags=["stores"])
-app.include_router(floor_plans.router, prefix="/api/stores", tags=["floor-plans"])
-app.include_router(zones.router, prefix="/api/stores", tags=["zones"])
-app.include_router(cameras.router, prefix="/api/stores", tags=["cameras"])
-app.include_router(calibration.router, prefix="/api/stores", tags=["calibration"])
-app.include_router(tracking.router, prefix="/api/stores", tags=["tracking"])
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 
 @app.get("/health")

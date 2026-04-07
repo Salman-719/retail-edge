@@ -1,0 +1,156 @@
+{
+  "title": "RetailVision Overview",
+  "uid": "retailvision-overview",
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "refresh": "15s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request Rate — All Services",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (job) (rate(http_requests_total[1m]))",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Error Rate — All Services",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (job) (rate(http_requests_total{status=~\"5..\"}[1m]))",
+          "legendFormat": "{{job}} errors"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "P95 Latency by Service",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{job}} p95"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Active Tracking Jobs",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 8, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "iep2_active_tracking_jobs",
+          "legendFormat": "Active"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Tracking Jobs Total",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 8, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(iep2_tracking_jobs_total)",
+          "legendFormat": "Total"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Tracking Job Duration (p95)",
+      "type": "stat",
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "x": 12, "y": 12, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(iep2_tracking_job_duration_seconds_bucket[10m])))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Tracking Job Success vs Error",
+      "type": "piechart",
+      "gridPos": { "x": 18, "y": 12, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum by (status) (iep2_tracking_jobs_total)",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Calibration Results",
+      "type": "piechart",
+      "gridPos": { "x": 0, "y": 16, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum by (status) (eep_calibration_attempts_total)",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Video Uploads (IEP1)",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 16, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(iep1_video_uploads_total{status=\"success\"})",
+          "legendFormat": "Successful uploads"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Total Video Data Uploaded",
+      "type": "stat",
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "x": 16, "y": 16, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(iep1_video_upload_bytes_total)",
+          "legendFormat": "Bytes"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Container CPU Usage",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(container_cpu_usage_seconds_total{name=~\"retail-edge.*\"}[1m])",
+          "legendFormat": "{{name}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Container Memory Usage",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "container_memory_usage_bytes{name=~\"retail-edge.*\"}",
+          "legendFormat": "{{name}}"
+        }
+      ]
+    }
+  ]
+}

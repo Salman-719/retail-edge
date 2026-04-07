@@ -7,6 +7,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.s3_client import s3_client
@@ -14,13 +16,19 @@ from app.core.config import settings
 from app.models import db as models
 from app.models.schemas import FloorPlanResponse, ScaleConfig
 from app.utils.pdf_utils import pdf_to_png_bytes
+from app.core.metrics import floor_plan_uploads
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 async def _get_or_create_floor_plan(store_id: str, db: AsyncSession) -> models.FloorPlan:
-    store = await db.get(models.Store, store_id)
+    result = await db.execute(
+        select(models.Store)
+        .where(models.Store.id == store_id)
+        .options(selectinload(models.Store.floor_plan))
+    )
+    store = result.scalar_one_or_none()
     if not store:
         raise HTTPException(404, "Store not found")
     if store.floor_plan is None:
@@ -46,10 +54,12 @@ async def upload_floor_plan(
         img_bytes = pdf_to_png_bytes(raw)
         content_type = "image/png"
         ext = "png"
+        floor_plan_uploads.labels(format="pdf").inc()
     else:
         img_bytes = raw
         content_type = file.content_type or "image/png"
         ext = Path(filename).suffix.lstrip(".") or "png"
+        floor_plan_uploads.labels(format=ext.lower()).inc()
 
     # Get image dimensions
     from PIL import Image
@@ -79,7 +89,12 @@ async def get_floor_plan(store_id: str, db: AsyncSession = Depends(get_db)):
 @router.get("/{store_id}/floor-plan/image")
 async def get_floor_plan_image(store_id: str, db: AsyncSession = Depends(get_db)):
     """Proxy floor plan image from S3 so the frontend doesn't need direct MinIO access."""
-    store = await db.get(models.Store, store_id)
+    result = await db.execute(
+        select(models.Store)
+        .where(models.Store.id == store_id)
+        .options(selectinload(models.Store.floor_plan))
+    )
+    store = result.scalar_one_or_none()
     if not store or not store.floor_plan or not store.floor_plan.s3_key:
         raise HTTPException(404, "Floor plan image not found")
 

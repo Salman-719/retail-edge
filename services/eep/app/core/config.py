@@ -23,5 +23,9 @@ class Settings(BaseSettings):
     # Tmp directory for video/image processing
     TMP_DIR: str = "/tmp/retailvision"
 
+    # IEP service URLs
+    IEP1_URL: str = "http://iep1-ingestion:8001"
+    IEP2_URL: str = "http://iep2-vision:8002"
+
 
 settings = Settings()

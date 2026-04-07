@@ -2,6 +2,7 @@ import React from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import LoginPage from './pages/LoginPage'
 import StoreOnboarding from './pages/StoreOnboarding'
+import StoreConfig from './pages/StoreConfig'
 import LiveMonitoring from './pages/LiveMonitoring'
 import Analytics from './pages/Analytics'
 import AIAgent from './pages/AIAgent'
@@ -55,6 +56,12 @@ export default function App() {
       <Route path="/ai-agent" element={
         <RequireAuth>
           <AppLayout><AIAgent /></AppLayout>
+        </RequireAuth>
+      } />
+
+      <Route path="/config" element={
+        <RequireAuth>
+          <AppLayout><StoreConfig /></AppLayout>
         </RequireAuth>
       } />
 
