@@ -13,31 +13,21 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse, Response
-from pydantic import BaseModel
 
 from app.core.config import settings
 from app.core.s3_client import s3_client
 from app.core.redis_client import async_redis, job_key
 from app.core.metrics import heatmap_generation_duration
+from app.schemas import (
+    TrackingStartRequest, TrackingStartResponse,
+    TrackingProgressResponse, TrajectoryResponse,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # In-process frame buffer per camera (for MJPEG stream only)
 _frame_buffers: dict[str, list] = {}
-
-
-# ── Request schema ────────────────────────────────────────────────────────────
-
-class TrackingStartRequest(BaseModel):
-    video_s3_key: str
-    floor_plan_s3_key: Optional[str] = None
-    homography_matrix: List[List[float]]
-    zones: List[dict]
-    pixels_per_meter: float = 100.0
-    origin_px: Optional[dict] = None
-    model_size: str = "yolov8n"
-    store_id: str
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -64,7 +54,7 @@ async def _get_job(camera_id: str) -> dict:
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.post("/{store_id}/cameras/{camera_id}/tracking/start")
+@router.post("/{store_id}/cameras/{camera_id}/tracking/start", response_model=TrackingStartResponse)
 async def start_tracking(
     store_id: str,
     camera_id: str,
@@ -145,7 +135,7 @@ async def stream_tracking(store_id: str, camera_id: str):
     )
 
 
-@router.get("/{store_id}/cameras/{camera_id}/tracking/progress")
+@router.get("/{store_id}/cameras/{camera_id}/tracking/progress", response_model=TrackingProgressResponse)
 async def tracking_progress(store_id: str, camera_id: str):
     job = await _get_job(camera_id)
 
@@ -184,10 +174,10 @@ async def get_heatmap(store_id: str, camera_id: str):
     return Response(content=img_bytes, media_type="image/png")
 
 
-@router.get("/{store_id}/cameras/{camera_id}/tracking/trajectory")
+@router.get("/{store_id}/cameras/{camera_id}/tracking/trajectory", response_model=TrajectoryResponse)
 async def get_trajectory(store_id: str, camera_id: str):
     job = await _get_job(camera_id)
-    return {"trajectory": job.get("trajectory", [])}
+    return TrajectoryResponse(trajectory=job.get("trajectory", []))
 
 
 # ── Result persistence ────────────────────────────────────────────────────────

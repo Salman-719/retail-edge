@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.s3_client import s3_client
 from app.core.database import AsyncSessionLocal
 from app.core.metrics import video_uploads, video_upload_bytes, video_duration_seconds, frame_extraction_duration
+from app.schemas import VideoUploadResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -46,7 +47,7 @@ async def _update_camera_video(camera_id: str, s3_key: str, fps: float, duration
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.post("/{store_id}/cameras/{camera_id}/video")
+@router.post("/{store_id}/cameras/{camera_id}/video", response_model=VideoUploadResponse)
 async def upload_video(
     store_id: str,
     camera_id: str,
@@ -80,14 +81,14 @@ async def upload_video(
     video_uploads.labels(status="success").inc()
     video_duration_seconds.observe(duration)
 
-    return {
-        "camera_id": camera_id,
-        "video_s3_key": s3_key,
-        "video_fps": fps,
-        "video_duration": duration,
-        "video_width": width,
-        "video_height": height,
-    }
+    return VideoUploadResponse(
+        camera_id=camera_id,
+        video_s3_key=s3_key,
+        video_fps=fps,
+        video_duration=duration,
+        video_width=width,
+        video_height=height,
+    )
 
 
 @router.get("/{store_id}/cameras/{camera_id}/frame")

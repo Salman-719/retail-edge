@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # IEP service URLs
     IEP1_URL: str = "http://iep1-ingestion:8001"
     IEP2_URL: str = "http://iep2-vision:8002"
+    IEP3_URL: str = "http://iep3-alerts:8003"
+    IEP4_URL: str = "http://iep4-analytics:8004"
+    IEP5_URL: str = "http://iep5-agent:8005"
 
 
 settings = Settings()
