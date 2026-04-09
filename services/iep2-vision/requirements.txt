@@ -10,6 +10,9 @@ numpy==1.26.4
 scipy==1.13.1
 Pillow==10.4.0
 
+# ReID embeddings
+torchvision>=0.18.0
+
 # Storage & cache
 boto3==1.34.131
 redis==5.0.7
@@ -17,6 +20,7 @@ redis==5.0.7
 # DB (for persisting results)
 sqlalchemy==2.0.31
 asyncpg==0.29.0
+psycopg2-binary==2.9.9
 
 # Monitoring
 prometheus-fastapi-instrumentator==6.1.0

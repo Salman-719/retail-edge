@@ -1,12 +1,16 @@
-"""Background tracking worker — YOLO + ByteTrack per-camera job.
+"""Background tracking worker — YOLO + BoT-SORT per-camera job.
 
 Job state is persisted to Redis so EEP can poll it independently.
 In-memory frame buffer is kept here for MJPEG streaming (can't go in Redis).
+
+Supports optional employee identification via ReID embeddings when
+gallery data is available in the DB.
 """
 import time
+import logging
 import cv2
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from app.utils.homography import project_point
 from app.core.redis_client import sync_redis
@@ -15,6 +19,8 @@ from app.core.metrics import (
     tracking_frames_processed, tracking_detections,
     active_tracking_jobs,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def point_in_polygon(x: float, y: float, polygon: List[Dict]) -> bool:
@@ -31,6 +37,28 @@ def point_in_polygon(x: float, y: float, polygon: List[Dict]) -> bool:
             inside = not inside
         j = i
     return inside
+
+
+def _load_employee_gallery(store_id: str) -> Dict[str, np.ndarray]:
+    """Load enrolled employee embeddings from DB. Returns {emp_id: embedding}."""
+    gallery = {}
+    try:
+        import sqlalchemy as sa
+        from app.core.database import sync_engine
+        with sync_engine.connect() as conn:
+            rows = conn.execute(
+                sa.text("SELECT id, gallery_embeddings FROM employees WHERE store_id = :sid AND gallery_embeddings IS NOT NULL"),
+                {"sid": store_id},
+            ).mappings().all()
+        for row in rows:
+            emb = row["gallery_embeddings"]
+            if emb and isinstance(emb, list) and len(emb) > 0:
+                gallery[row["id"]] = np.array(emb, dtype=np.float32)
+        if gallery:
+            logger.info(f"Loaded {len(gallery)} employee gallery embeddings for store {store_id}")
+    except Exception as e:
+        logger.warning(f"Could not load employee gallery: {e}")
+    return gallery
 
 
 def run_tracking_job(
@@ -77,6 +105,21 @@ def run_tracking_job(
         H = np.array(homography_matrix, dtype=np.float64)
         model_name = model_size if model_size.endswith(".pt") else f"{model_size}.pt"
         model = YOLO(model_name)
+
+        # Load employee gallery for identification (optional)
+        employee_gallery = _load_employee_gallery(store_id)
+        reid_extractor = None
+        if employee_gallery:
+            try:
+                from app.utils.reid import ReIDExtractor, match_against_gallery
+                reid_extractor = ReIDExtractor()
+                logger.info("ReID extractor loaded for employee identification")
+            except Exception as e:
+                logger.warning(f"Could not load ReID extractor: {e}")
+                reid_extractor = None
+
+        # Track ID -> employee ID mapping (persists across frames)
+        track_to_employee: Dict[int, Optional[str]] = {}
 
         SAMPLE_EVERY = 3
         OCCUPANCY_UPDATE_EVERY = 30   # push live occupancy to Redis every 30 sampled frames
@@ -131,12 +174,34 @@ def run_tracking_job(
                     cx = float((box[0] + box[2]) / 2)
                     cy = float(box[3])
                     mx, my = project_point(H, cx, cy)
-                    trajectory.append({"frameIdx": frame_idx, "x": mx, "y": my, "trackId": int(tid)})
+
+                    tid_int = int(tid)
+                    person_type = "customer"
+                    employee_id = None
+
+                    # Employee identification via ReID
+                    if reid_extractor and employee_gallery and tid_int not in track_to_employee:
+                        crop = frame[int(box[1]):int(box[3]), int(box[0]):int(box[2])]
+                        emb = reid_extractor.extract(crop)
+                        if emb is not None:
+                            from app.utils.reid import match_against_gallery
+                            matched = match_against_gallery(emb, employee_gallery, threshold=0.75)
+                            track_to_employee[tid_int] = matched
+
+                    if tid_int in track_to_employee and track_to_employee[tid_int]:
+                        person_type = "employee"
+                        employee_id = track_to_employee[tid_int]
+
+                    trajectory.append({
+                        "frameIdx": frame_idx, "x": mx, "y": my,
+                        "trackId": tid_int,
+                        "personType": person_type,
+                        "employeeId": employee_id,
+                    })
 
                     for zone in zones_data:
                         if point_in_polygon(mx, my, zone["points"]):
                             zname = zone["name"]
-                            tid_int = int(tid)
                             if tid_int not in zone_presence[zname]:
                                 zone_presence[zname][tid_int] = set()
                             zone_presence[zname][tid_int].add(frame_idx)

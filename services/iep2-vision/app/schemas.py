@@ -64,6 +64,22 @@ class TrajectoryResponse(BaseModel):
     trajectory: List[TrajectoryPoint] = []
 
 
+class EnrollmentRequest(BaseModel):
+    """Request to enroll an employee by extracting ReID embeddings from video."""
+    video_s3_key: str
+    employee_id: str
+    store_id: str
+    sample_count: int = 20  # number of crops to extract
+
+
+class EnrollmentResponse(BaseModel):
+    employee_id: str
+    status: str  # "enrolled" | "failed"
+    embedding_dim: int = 0
+    samples_extracted: int = 0
+    error: Optional[str] = None
+
+
 class HealthResponse(BaseModel):
     service: str
     status: str

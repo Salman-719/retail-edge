@@ -26,6 +26,7 @@ class Store(Base):
     zones: Mapped[list["Zone"]] = relationship(back_populates="store", cascade="all, delete-orphan")
     obstacles: Mapped[list["Obstacle"]] = relationship(back_populates="store", cascade="all, delete-orphan")
     cameras: Mapped[list["Camera"]] = relationship(back_populates="store", cascade="all, delete-orphan")
+    employees: Mapped[list["Employee"]] = relationship(back_populates="store", cascade="all, delete-orphan")
 
 
 class FloorPlan(Base):

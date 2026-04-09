@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from shapely.geometry import Polygon as ShapelyPolygon
 
 from app.core.database import get_db
 from app.models import db as models
@@ -10,6 +11,31 @@ from app.models.schemas import (
 )
 
 router = APIRouter()
+
+
+def _check_zone_overlap(new_points: list[dict], existing_zones: list, exclude_id: str | None = None):
+    """Raise 409 if new zone polygon overlaps any existing zone."""
+    if len(new_points) < 3:
+        return
+    new_poly = ShapelyPolygon([(p["x"], p["y"]) for p in new_points])
+    if not new_poly.is_valid:
+        return
+    for zone in existing_zones:
+        if exclude_id and zone.id == exclude_id:
+            continue
+        pts = zone.points
+        if len(pts) < 3:
+            continue
+        existing_poly = ShapelyPolygon([(p["x"], p["y"]) for p in pts])
+        if not existing_poly.is_valid:
+            continue
+        intersection = new_poly.intersection(existing_poly)
+        # Allow touching edges (area=0) but not real overlap
+        if intersection.area > 0:
+            raise HTTPException(
+                409,
+                f"Zone overlaps with existing zone '{zone.name}'"
+            )
 
 
 # ─── Zones ────────────────────────────────────────────────────────────────────
@@ -27,12 +53,19 @@ async def create_zone(store_id: str, payload: ZoneCreate, db: AsyncSession = Dep
     store = await db.get(models.Store, store_id)
     if not store:
         raise HTTPException(404, "Store not found")
+
+    # Overlap check
+    result = await db.execute(select(models.Zone).where(models.Zone.store_id == store_id))
+    existing_zones = result.scalars().all()
+    points_dicts = [p.model_dump() for p in payload.points]
+    _check_zone_overlap(points_dicts, existing_zones, exclude_id=payload.id)
+
     if payload.id:
         existing = await db.get(models.Zone, payload.id)
         if existing and existing.store_id == store_id:
             existing.name = payload.name
             existing.type = payload.type
-            existing.points = [p.model_dump() for p in payload.points]
+            existing.points = points_dicts
             await db.flush()
             await db.refresh(existing)
             return existing
@@ -41,7 +74,7 @@ async def create_zone(store_id: str, payload: ZoneCreate, db: AsyncSession = Dep
         store_id=store_id,
         name=payload.name,
         type=payload.type,
-        points=[p.model_dump() for p in payload.points],
+        points=points_dicts,
     )
     db.add(zone)
     await db.flush()
@@ -54,12 +87,16 @@ async def update_zone(store_id: str, zone_id: str, payload: ZoneUpdate, db: Asyn
     zone = await db.get(models.Zone, zone_id)
     if not zone or zone.store_id != store_id:
         raise HTTPException(404, "Zone not found")
+    if payload.points is not None:
+        result = await db.execute(select(models.Zone).where(models.Zone.store_id == store_id))
+        existing_zones = result.scalars().all()
+        points_dicts = [p.model_dump() for p in payload.points]
+        _check_zone_overlap(points_dicts, existing_zones, exclude_id=zone_id)
+        zone.points = points_dicts
     if payload.name is not None:
         zone.name = payload.name
     if payload.type is not None:
         zone.type = payload.type
-    if payload.points is not None:
-        zone.points = [p.model_dump() for p in payload.points]
     await db.flush()
     await db.refresh(zone)
     return zone

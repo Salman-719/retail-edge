@@ -41,7 +41,9 @@ app.add_middleware(
 )
 
 from app.api.tracking import router as tracking_router  # noqa: E402
+from app.api.enrollment import router as enrollment_router  # noqa: E402
 app.include_router(tracking_router, prefix="/tracking", tags=["tracking"])
+app.include_router(enrollment_router, prefix="/enrollment", tags=["enrollment"])
 
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 

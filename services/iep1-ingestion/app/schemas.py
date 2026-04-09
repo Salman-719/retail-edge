@@ -25,6 +25,24 @@ class VideoUploadResponse(BaseModel):
     video_height: int
 
 
+class ChunkInfo(BaseModel):
+    """Metadata for a single video chunk."""
+    chunk_idx: int
+    s3_key: str
+    start_sec: float
+    end_sec: float
+    total_frames: int
+    accepted_frames: int
+    rejected_frames: int
+
+
+class ChunkResponse(BaseModel):
+    """Returned after video chunking."""
+    camera_id: str
+    chunks: list[ChunkInfo]
+    total_chunks: int
+
+
 class HealthResponse(BaseModel):
     service: str
     status: str

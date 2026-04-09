@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.core.s3_client import s3_client
 from app.core.database import AsyncSessionLocal
 from app.core.metrics import video_uploads, video_upload_bytes, video_duration_seconds, frame_extraction_duration
-from app.schemas import VideoUploadResponse
+from app.schemas import VideoUploadResponse, ChunkResponse, ChunkInfo
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -89,6 +89,45 @@ async def upload_video(
         video_width=width,
         video_height=height,
     )
+
+
+@router.post("/{store_id}/cameras/{camera_id}/chunk", response_model=ChunkResponse)
+async def chunk_video(
+    store_id: str,
+    camera_id: str,
+    chunk_duration: int = Query(300, description="Chunk duration in seconds"),
+    overlap: int = Query(30, description="Overlap in seconds between chunks"),
+):
+    """Split an already-uploaded video into chunks and upload to S3."""
+    cam = await _get_camera(store_id, camera_id)
+    if not cam.get("video_s3_key"):
+        raise HTTPException(404, "No video uploaded for this camera")
+
+    tmp_dir = settings.TMP_DIR
+    os.makedirs(tmp_dir, exist_ok=True)
+    ext = Path(cam["video_s3_key"]).suffix
+    tmp_path = os.path.join(tmp_dir, f"chunk_src_{camera_id}{ext}")
+
+    try:
+        s3_client.download_to_file(cam["video_s3_key"], tmp_path)
+
+        from app.utils.chunker import chunk_video as do_chunk
+        results = do_chunk(
+            video_path=tmp_path,
+            store_id=store_id,
+            camera_id=camera_id,
+            chunk_duration=chunk_duration,
+            overlap=overlap,
+        )
+        chunks = [ChunkInfo(**r.to_dict()) for r in results]
+        return ChunkResponse(
+            camera_id=camera_id,
+            chunks=chunks,
+            total_chunks=len(chunks),
+        )
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 @router.get("/{store_id}/cameras/{camera_id}/frame")

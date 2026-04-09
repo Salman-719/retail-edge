@@ -10,6 +10,10 @@ from app.schemas.camera import (
     CalibrationRequest, CalibrationResponse,
     CorrespondencePoint, ProjectSave,
 )
+from app.schemas.employee import (
+    EmployeeCreate, EmployeeUpdate, EmployeeResponse,
+    ShiftCreate, ShiftResponse,
+)
 
 __all__ = [
     "HealthResponse", "Point",
@@ -19,4 +23,6 @@ __all__ = [
     "CameraCreate", "CameraUpdate", "CameraResponse",
     "CalibrationRequest", "CalibrationResponse",
     "CorrespondencePoint", "ProjectSave",
+    "EmployeeCreate", "EmployeeUpdate", "EmployeeResponse",
+    "ShiftCreate", "ShiftResponse",
 ]

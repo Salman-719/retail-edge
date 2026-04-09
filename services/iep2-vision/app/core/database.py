@@ -1,6 +1,11 @@
+from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from app.core.config import settings
+
+# Sync engine for background threads (tracker, enrollment)
+_sync_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+sync_engine = create_engine(_sync_url, pool_pre_ping=True, pool_size=2)
 
 engine = create_async_engine(
     settings.DATABASE_URL,

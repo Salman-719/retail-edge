@@ -7,9 +7,11 @@
 from app.models.store import Store, FloorPlan
 from app.models.zone import Zone, Obstacle
 from app.models.camera import Camera, Calibration, TrackingResult
+from app.models.employee import Employee, Shift
 
 __all__ = [
     "Store", "FloorPlan",
     "Zone", "Obstacle",
     "Camera", "Calibration", "TrackingResult",
+    "Employee", "Shift",
 ]

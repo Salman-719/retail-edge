@@ -7,9 +7,9 @@ on:
     branches: [main, development]
 
 jobs:
-  # ── EEP unit tests ───────────────────────────────────────────────────────────
-  eep-tests:
-    name: EEP Unit Tests
+  # ── Python linting ──────────────────────────────────────────────────────────
+  lint-python:
+    name: Python Lint
     runs-on: ubuntu-latest
 
     steps:
@@ -20,21 +20,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install EEP dependencies
-        working-directory: services/eep
-        run: |
-          pip install --upgrade pip
-          # Install a subset of requirements that don't need GPU/OpenCV system libs
-          pip install fastapi pydantic pydantic-settings sqlalchemy asyncpg \
-                      alembic numpy scipy pytest
+      - name: Install linters
+        run: pip install flake8 black
 
-      - name: Install OpenCV headless
-        run: pip install opencv-python-headless
+      - name: flake8
+        run: flake8 services/ tests/ --max-line-length=120 --extend-ignore=E501,W503
 
-      - name: Run unit tests
-        run: pytest tests/unit/ -v
+      - name: black (check only)
+        run: black --check --line-length=120 services/ tests/
 
-  # ── Frontend lint / build check ───────────────────────────────────────────────
+  # ── Frontend lint + build ───────────────────────────────────────────────────
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
@@ -57,7 +52,33 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-  # ── Docker Compose smoke test ─────────────────────────────────────────────────
+  # ── EEP unit tests ─────────────────────────────────────────────────────────
+  eep-tests:
+    name: EEP Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install EEP dependencies
+        working-directory: services/eep
+        run: |
+          pip install --upgrade pip
+          pip install fastapi pydantic pydantic-settings sqlalchemy asyncpg \
+                      alembic numpy scipy pytest shapely
+
+      - name: Install OpenCV headless
+        run: pip install opencv-python-headless
+
+      - name: Run unit tests
+        run: pytest tests/unit/ -v
+
+  # ── Docker Compose smoke test ──────────────────────────────────────────────
   docker-smoke:
     name: Docker Compose Smoke
     runs-on: ubuntu-latest
