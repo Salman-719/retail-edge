@@ -17,9 +17,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # ── Zone: add updated_at ──────────────────────────────────────────────────
-    op.add_column("zones", sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now()))
-
     # ── TrackingResult: add store_id FK ───────────────────────────────────────
     op.add_column("tracking_results", sa.Column("store_id", sa.String(36), nullable=True))
     op.create_foreign_key(
@@ -123,4 +120,3 @@ def downgrade() -> None:
     op.drop_constraint("fk_tracking_results_store_id", "tracking_results", type_="foreignkey")
     op.drop_column("tracking_results", "store_id")
     op.alter_column("shifts", "end_time", nullable=False)
-    op.drop_column("zones", "updated_at")

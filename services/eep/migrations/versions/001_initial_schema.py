@@ -52,6 +52,7 @@ def upgrade() -> None:
         sa.Column("type", sa.String(50), nullable=False),
         sa.Column("points", sa.JSON(), nullable=False),
         sa.Column("created_at", sa.DateTime(), server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now()),
     )
 
     op.create_table(
