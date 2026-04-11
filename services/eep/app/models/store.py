@@ -17,6 +17,7 @@ class Store(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    onboarding_method: Mapped[str] = mapped_column(String(20), server_default="standard")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -45,6 +46,11 @@ class FloorPlan(Base):
     scale_point2_y: Mapped[float | None] = mapped_column(Float)
     real_world_distance_m: Mapped[float | None] = mapped_column(Float)
     pixels_per_meter: Mapped[float | None] = mapped_column(Float)
+    # Method 2: virtual canvas extent in world meters (no floor plan image)
+    world_x_min: Mapped[float | None] = mapped_column(Float)
+    world_x_max: Mapped[float | None] = mapped_column(Float)
+    world_y_min: Mapped[float | None] = mapped_column(Float)
+    world_y_max: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

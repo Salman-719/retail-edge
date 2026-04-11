@@ -91,6 +91,8 @@ async def start_tracking(
         zones=payload.zones,
         pixels_per_meter=payload.pixels_per_meter,
         origin_px=payload.origin_px or {"x": 0, "y": 0},
+        projection_method=payload.projection_method,
+        world_bounds=json.dumps(payload.world_bounds) if payload.world_bounds else "{}",
     )
 
     thread = threading.Thread(
@@ -104,6 +106,11 @@ async def start_tracking(
             payload.zones,
             payload.pixels_per_meter,
             payload.model_size,
+            payload.projection_method,
+            payload.intrinsic_matrix,
+            payload.dist_coeffs,
+            payload.rotation_matrix,
+            payload.translation_vector,
         ),
         daemon=True,
     )
@@ -219,6 +226,27 @@ async def _persist_results(job: dict):
             s3_client.upload_bytes(heatmap_s3_key, heatmap_bytes, "image/png")
         except Exception:
             logger.exception("Heatmap generation failed")
+    else:
+        # Method 2: no floor plan image — generate a virtual canvas heatmap from world bounds
+        wb_str = job.get("world_bounds", "{}")
+        try:
+            wb = json.loads(wb_str) if isinstance(wb_str, str) else (wb_str or {})
+        except (json.JSONDecodeError, TypeError):
+            wb = {}
+        if wb.get("x_min") is not None:
+            try:
+                from app.utils.heatmap import generate_virtual_heatmap_bytes
+                with heatmap_generation_duration.time():
+                    heatmap_bytes = generate_virtual_heatmap_bytes(
+                        job.get("trajectory", []),
+                        job.get("zones", []),
+                        job.get("zone_occupancy", {}),
+                        wb,
+                    )
+                heatmap_s3_key = f"stores/{store_id}/cameras/{camera_id}/heatmap.png"
+                s3_client.upload_bytes(heatmap_s3_key, heatmap_bytes, "image/png")
+            except Exception:
+                logger.exception("Virtual heatmap generation failed")
 
     # ── DB persist ───────────────────────────────────────────────────────────
     try:

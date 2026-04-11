@@ -26,11 +26,11 @@ export async function listStores() {
   return _json(await fetch('/api/stores'))
 }
 
-export async function createStore(name) {
+export async function createStore(name, onboardingMethod = 'standard') {
   return _json(await fetch('/api/stores', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, onboarding_method: onboardingMethod }),
   }))
 }
 
@@ -158,6 +158,81 @@ export async function getVideoFrame(cameraId, timestampSec) {
   return URL.createObjectURL(await r.blob())
 }
 
+// ─── Calibration Files (Method 2) ────────────────────────────────────────────
+
+/**
+ * Fetch all cameras for the current store including their full calibration matrices
+ * (intrinsic_matrix, rotation_matrix, translation_vector, image size).
+ * Used by CalibStep2 to do client-side pixel→world projection.
+ */
+export async function listCamerasWithCalibration() {
+  const cameras = await _json(await fetch(`${base()}/cameras`))
+  return (cameras ?? []).map(c => ({
+    id: c.id,
+    name: c.name,
+    calibration: c.calibration
+      ? {
+          method: c.calibration.method,
+          intrinsic_matrix: c.calibration.intrinsic_matrix,
+          rotation_matrix: c.calibration.rotation_matrix,
+          translation_vector: c.calibration.translation_vector,
+          image_width: c.calibration.image_width,
+          image_height: c.calibration.image_height,
+        }
+      : null,
+  }))
+}
+
+/**
+ * Parse intr_*.xml + extr_*.xml server-side. No DB write.
+ * @param {string} cameraId  (unused by the endpoint URL, kept for caller context)
+ * @param {File}   intrFile  Intrinsic XML file
+ * @param {File}   extrFile  Extrinsic XML file
+ * @param {number} scaleFactor  Multiplier applied to tvec (e.g. 0.001 for mm→m)
+ */
+export async function parseCalibrationFiles(cameraId, intrFile, extrFile, scaleFactor = 1.0) {
+  const fd = new FormData()
+  fd.append('intr_file', intrFile)
+  fd.append('extr_file', extrFile)
+  fd.append('scale_factor', scaleFactor)
+  return _json(await fetch(`${base()}/calibration-files/parse`, { method: 'POST', body: fd }))
+}
+
+/**
+ * Persist previously-parsed calibration data to the DB for the given camera.
+ */
+export async function saveCalibrationFiles(cameraId, parsedData) {
+  return _json(await fetch(`${base()}/cameras/${cameraId}/calibration-files`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(parsedData),
+  }))
+}
+
+/**
+ * Auto-compute world bounds from all calibrated cameras (Method 2).
+ */
+export async function getWorldBoundsFromCameras() {
+  return _json(await fetch(`${base()}/calibration-files/world-bounds-from-cameras`))
+}
+
+/**
+ * Save world bounds for the virtual map canvas (Method 2).
+ * @param {{ xMin, xMax, yMin, yMax }} bounds  World metres
+ */
+export async function saveWorldBounds(bounds) {
+  return _json(await fetch(`${base()}/floor-plan/world-bounds`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      world_x_min: bounds.xMin,
+      world_x_max: bounds.xMax,
+      world_y_min: bounds.yMin,
+      world_y_max: bounds.yMax,
+    }),
+  }))
+}
+
 // ─── Calibration ─────────────────────────────────────────────────────────────
 
 /**
@@ -265,7 +340,9 @@ export async function saveProject(data) {
   // 4. Cameras — upsert, then purge
   for (const cam of data.cameras ?? []) {
     try { await createCamera(cam) } catch (_) {}
-    if (cam.homographyMatrix && cam.correspondences?.length >= 4) {
+    if (data.onboardingMethod === 'calibration') {
+      // Method 2: calibration was already persisted during CalibStep1 — nothing to do here
+    } else if (cam.homographyMatrix && cam.correspondences?.length >= 4) {
       try {
         await computeHomography(
           cam.id,
@@ -301,15 +378,26 @@ export async function loadProject() {
       fetch(`${base()}/cameras`).then(r => r.ok ? r.json() : []).catch(() => []),
     ])
 
+    // Detect method from floor plan data
+    const isCalibMethod = fp?.world_x_min != null
+    const onboardingMethod = isCalibMethod ? 'calibration' : 'standard'
+
     return {
       version: '1.0',
       savedAt: new Date().toISOString(),
+      onboardingMethod,
+      worldBounds: isCalibMethod ? {
+        xMin: fp.world_x_min,
+        xMax: fp.world_x_max,
+        yMin: fp.world_y_min,
+        yMax: fp.world_y_max,
+      } : null,
       floorPlan: fp?.s3_key ? {
         url: `/api/stores/${_storeId}/floor-plan/image`,
         widthPx: fp.width_px,
         heightPx: fp.height_px,
       } : null,
-      scale: fp?.pixels_per_meter ? {
+      scale: (fp?.pixels_per_meter && !isCalibMethod) ? {
         originPx: { x: fp.origin_x, y: fp.origin_y },
         scalePoint1Px: { x: fp.scale_point1_x, y: fp.scale_point1_y },
         scalePoint2Px: { x: fp.scale_point2_x, y: fp.scale_point2_y },
@@ -331,6 +419,12 @@ export async function loadProject() {
         reprojectionError: c.calibration?.reprojection_error ?? null,
         homographyStatus: c.calibration?.status ?? null,
         correspondences: c.calibration?.correspondences ?? [],
+        // Method 2 calibration fields
+        calibrationMethod: c.calibration?.method ?? null,
+        calibrationStatus: c.calibration?.status ?? null,
+        cameraWorldXYZ: (c.calibration?.camera_world_x != null)
+          ? [c.calibration.camera_world_x, c.calibration.camera_world_y, c.calibration.camera_world_z]
+          : null,
       })),
     }
   } catch {

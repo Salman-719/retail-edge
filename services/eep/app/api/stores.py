@@ -17,7 +17,7 @@ async def list_stores(db: AsyncSession = Depends(get_db)):
 
 @router.post("", response_model=StoreResponse, status_code=201)
 async def create_store(payload: StoreCreate, db: AsyncSession = Depends(get_db)):
-    store = models.Store(name=payload.name)
+    store = models.Store(name=payload.name, onboarding_method=payload.onboarding_method)
     db.add(store)
     await db.flush()
     await db.refresh(store)

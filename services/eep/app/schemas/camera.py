@@ -31,8 +31,41 @@ class CalibrationResponse(BaseModel):
     homography_matrix: Optional[List[List[float]]] = None
     reprojection_error: Optional[float] = None
     status: Optional[str] = None
+    # Method 2: calibration files data
+    method: str = "homography"
+    intrinsic_matrix: Optional[List[List[float]]] = None
+    dist_coeffs: Optional[List[float]] = None
+    rotation_matrix: Optional[List[List[float]]] = None
+    translation_vector: Optional[List[float]] = None
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
+    camera_world_x: Optional[float] = None
+    camera_world_y: Optional[float] = None
+    camera_world_z: Optional[float] = None
 
     model_config = {"from_attributes": True}
+
+
+class CalibrationFilesRequest(BaseModel):
+    """Parsed calibration data from intr_*.xml + extr_*.xml (Method 2)."""
+    intrinsic_matrix: List[List[float]]       # 3×3 K
+    dist_coeffs: List[float]                  # [k1, k2, p1, p2, k3, ...]
+    rotation_matrix: List[List[float]]        # 3×3 R (post-Rodrigues)
+    translation_vector: List[float]           # [tx, ty, tz]
+    image_width: int
+    image_height: int
+
+
+class ParsedCalibrationResponse(BaseModel):
+    """Response from the /parse endpoint — no DB write, just validation + parsed values."""
+    intrinsic_matrix: List[List[float]]
+    dist_coeffs: List[float]
+    rotation_matrix: List[List[float]]
+    translation_vector: List[float]
+    image_width: int
+    image_height: int
+    camera_world_xyz: List[float]             # C = -R^T @ t
+    warnings: List[str] = []
 
 
 class CameraResponse(BaseModel):

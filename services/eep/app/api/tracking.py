@@ -69,13 +69,30 @@ async def start_tracking(
         for z in (store.zones if store else [])
     ]
 
+    cal = cam.calibration
+    projection_method = getattr(cal, "method", "homography") or "homography"
+
     payload = {
         "video_s3_key": cam.video_s3_key,
         "floor_plan_s3_key": fp.s3_key if fp else None,
-        "homography_matrix": cam.calibration.homography_matrix,
+        "projection_method": projection_method,
+        # Method 1: homography matrix (None for Method 2)
+        "homography_matrix": cal.homography_matrix if projection_method == "homography" else None,
+        # Method 2: intrinsic/extrinsic data (None for Method 1)
+        "intrinsic_matrix": cal.intrinsic_matrix if projection_method == "calibration_files" else None,
+        "dist_coeffs": cal.dist_coeffs if projection_method == "calibration_files" else None,
+        "rotation_matrix": cal.rotation_matrix if projection_method == "calibration_files" else None,
+        "translation_vector": cal.translation_vector if projection_method == "calibration_files" else None,
+        # Common fields
         "zones": zones_data,
-        "pixels_per_meter": fp.pixels_per_meter if fp else 100.0,
+        "pixels_per_meter": (fp.pixels_per_meter if fp and fp.pixels_per_meter is not None else 100.0),
         "origin_px": {"x": fp.origin_x or 0, "y": fp.origin_y or 0} if fp else {"x": 0, "y": 0},
+        "world_bounds": {
+            "x_min": fp.world_x_min,
+            "x_max": fp.world_x_max,
+            "y_min": fp.world_y_min,
+            "y_max": fp.world_y_max,
+        } if fp and fp.world_x_min is not None else None,
         "model_size": model_size,
         "store_id": store_id,
     }

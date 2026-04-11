@@ -10,11 +10,13 @@ from app.schemas.common import Point
 
 class StoreCreate(BaseModel):
     name: str
+    onboarding_method: str = "standard"
 
 
 class StoreResponse(BaseModel):
     id: str
     name: str
+    onboarding_method: str = "standard"
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -42,5 +44,17 @@ class FloorPlanResponse(BaseModel):
     scale_point2_y: Optional[float] = None
     real_world_distance_m: Optional[float] = None
     pixels_per_meter: Optional[float] = None
+    # Method 2: virtual canvas bounds in world meters
+    world_x_min: Optional[float] = None
+    world_x_max: Optional[float] = None
+    world_y_min: Optional[float] = None
+    world_y_max: Optional[float] = None
 
     model_config = {"from_attributes": True}
+
+
+class WorldBoundsConfig(BaseModel):
+    world_x_min: float
+    world_x_max: float
+    world_y_min: float
+    world_y_max: float

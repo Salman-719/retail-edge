@@ -48,6 +48,18 @@ class Calibration(Base):
     homography_matrix: Mapped[list | None] = mapped_column(JSON)
     reprojection_error: Mapped[float | None] = mapped_column(Float)
     status: Mapped[str | None] = mapped_column(String(50))  # ok|rejected|failed
+    # Method 2: intrinsic/extrinsic calibration data
+    method: Mapped[str] = mapped_column(String(20), server_default="homography")
+    intrinsic_matrix: Mapped[list | None] = mapped_column(JSON)   # 3×3 K
+    dist_coeffs: Mapped[list | None] = mapped_column(JSON)        # [k1,k2,p1,p2,k3,...]
+    rotation_matrix: Mapped[list | None] = mapped_column(JSON)    # 3×3 R (post-Rodrigues)
+    translation_vector: Mapped[list | None] = mapped_column(JSON) # [tx, ty, tz]
+    image_width: Mapped[int | None] = mapped_column(Integer)
+    image_height: Mapped[int | None] = mapped_column(Integer)
+    # Pre-computed camera world position C = -R^T @ t
+    camera_world_x: Mapped[float | None] = mapped_column(Float)
+    camera_world_y: Mapped[float | None] = mapped_column(Float)
+    camera_world_z: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

@@ -66,10 +66,16 @@ def run_tracking_job(
     camera_id: str,
     store_id: str,
     video_path: str,
-    homography_matrix: List[List[float]],
+    homography_matrix: Optional[List[List[float]]],
     zones_data: List[Dict],
     pixels_per_meter: float,
     model_size: str = "yolov8n",
+    # Method 2: calibration-files projection
+    projection_method: str = "homography",
+    intrinsic_matrix: Optional[List[List[float]]] = None,
+    dist_coeffs_list: Optional[List[float]] = None,
+    rotation_matrix: Optional[List[List[float]]] = None,
+    translation_vector: Optional[List[float]] = None,
 ) -> None:
     """
     Background thread entry point.
@@ -102,7 +108,20 @@ def run_tracking_job(
         total_frames = max(total_frames, 1)
         sync_redis.update_job(camera_id, total_frames=total_frames)
 
-        H = np.array(homography_matrix, dtype=np.float64)
+        # Set up projection callable once before the frame loop
+        if projection_method == "calibration_files":
+            from app.utils.homography import project_pixel_to_ground_ray as _ray_proj
+            _K = np.array(intrinsic_matrix, dtype=np.float64)
+            _R = np.array(rotation_matrix, dtype=np.float64)
+            _t = np.array(translation_vector, dtype=np.float64)
+            _dist = np.array(dist_coeffs_list, dtype=np.float64) if dist_coeffs_list else None
+            def _project(px: float, py: float):
+                return _ray_proj(px, py, _K, _R, _t, _dist)
+        else:
+            _H = np.array(homography_matrix, dtype=np.float64)
+            def _project(px: float, py: float):
+                return project_point(_H, px, py)
+
         model_name = model_size if model_size.endswith(".pt") else f"{model_size}.pt"
         model = YOLO(model_name)
 
@@ -173,7 +192,7 @@ def run_tracking_job(
                 for box, tid in zip(boxes, track_ids):
                     cx = float((box[0] + box[2]) / 2)
                     cy = float(box[3])
-                    mx, my = project_point(H, cx, cy)
+                    mx, my = _project(cx, cy)
 
                     tid_int = int(tid)
                     person_type = "customer"

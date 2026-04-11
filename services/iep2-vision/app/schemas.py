@@ -20,17 +20,33 @@ Endpoints:
     Output: TrajectoryResponse
 """
 from typing import List, Dict, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class TrackingStartRequest(BaseModel):
     """Fully-resolved payload sent by EEP after DB lookups."""
     video_s3_key: str
     floor_plan_s3_key: Optional[str] = None
-    homography_matrix: List[List[float]]
+    # Projection method: 'homography' (Method 1) | 'calibration_files' (Method 2)
+    projection_method: str = "homography"
+    # Method 1: homography matrix
+    homography_matrix: Optional[List[List[float]]] = None
+    # Method 2: intrinsic/extrinsic calibration data
+    intrinsic_matrix: Optional[List[List[float]]] = None
+    dist_coeffs: Optional[List[float]] = None
+    rotation_matrix: Optional[List[List[float]]] = None
+    translation_vector: Optional[List[float]] = None
+    # Common fields
     zones: List[dict]
-    pixels_per_meter: float = 100.0
+    pixels_per_meter: Optional[float] = 100.0
     origin_px: Optional[dict] = None
+
+    @field_validator("pixels_per_meter", mode="before")
+    @classmethod
+    def coerce_pixels_per_meter(cls, v):
+        """Accept null/None from older EEP versions — fall back to 100.0."""
+        return v if v is not None else 100.0
+    world_bounds: Optional[dict] = None  # {x_min, x_max, y_min, y_max} for Method 2
     model_size: str = "yolov8n"
     store_id: str
 

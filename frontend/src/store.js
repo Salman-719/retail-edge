@@ -1,6 +1,16 @@
 import { create } from 'zustand'
 
 function inferMaxStep(data) {
+  if (data.onboardingMethod === 'calibration') {
+    // Method 2 step inference (6-step wizard after method selection)
+    if (!data.cameras?.length) return 1
+    if (!data.cameras?.some(c => c.calibrationMethod === 'calibration_files')) return 1
+    if (!data.worldBounds) return 2
+    if (!data.zones?.length) return 3
+    if (!data.cameras?.some(c => c.videoDuration)) return 4
+    return 6
+  }
+  // Method 1 (standard) step inference
   if (!data.floorPlan?.url) return 1
   if (!data.scale?.pixelsPerMeter) return 2
   if (!data.zones?.length) return 3
@@ -16,6 +26,14 @@ const useStore = create((set, get) => ({
   activeStoreId: null,
   activeStoreName: null,
   setActiveStore: (id, name) => set({ activeStoreId: id, activeStoreName: name }),
+
+  // Onboarding method: '' (not yet chosen) | 'standard' | 'calibration'
+  onboardingMethod: '',
+  setOnboardingMethod: (m) => set({ onboardingMethod: m }),
+
+  // Method 2: virtual canvas world bounds in metres
+  worldBounds: null,  // { xMin, xMax, yMin, yMax }
+  setWorldBounds: (b) => set({ worldBounds: b }),
 
   // Step tracking
   currentStep: 1,
@@ -63,6 +81,8 @@ const useStore = create((set, get) => ({
   loadProject: (data) => {
     const maxStep = inferMaxStep(data)
     set({
+      onboardingMethod: data.onboardingMethod ?? 'standard',
+      worldBounds: data.worldBounds ?? null,
       floorPlanUrl: data.floorPlan?.url ?? null,
       floorPlanWidth: data.floorPlan?.widthPx ?? 0,
       floorPlanHeight: data.floorPlan?.heightPx ?? 0,
@@ -81,6 +101,8 @@ const useStore = create((set, get) => ({
   resetOnboarding: () => set({
     currentStep: 1,
     maxReachedStep: 1,
+    onboardingMethod: '',
+    worldBounds: null,
     floorPlanUrl: null,
     floorPlanWidth: 0,
     floorPlanHeight: 0,
@@ -98,6 +120,8 @@ const useStore = create((set, get) => ({
     return {
       version: '1.0',
       savedAt: new Date().toISOString(),
+      onboardingMethod: s.onboardingMethod,
+      worldBounds: s.worldBounds,
       floorPlan: {
         url: s.floorPlanUrl,
         widthPx: s.floorPlanWidth,

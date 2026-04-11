@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react'
 import useStore from '../store'
 import { listStores, createStore, setCurrentStoreId, loadProject } from '../api'
 
+// Method 1 — Standard (Floor Plan + Homography)
 import Step1_Upload from '../steps/Step1_Upload'
 import Step2_Scale from '../steps/Step2_Scale'
 import Step3_Zones from '../steps/Step3_Zones'
@@ -12,7 +13,18 @@ import Step7_Homography from '../steps/Step7_Homography'
 import Step8_Save from '../steps/Step8_Save'
 import Step9_TestMode from '../steps/Step9_TestMode'
 
-const STEPS = [
+// Method 2 — Calibration Files
+import Step0_MethodSelect from '../steps/Step0_MethodSelect'
+import CalibStep1_CamerasAndFiles from '../steps/CalibStep1_CamerasAndFiles'
+import CalibStep2_WorldBounds from '../steps/CalibStep2_WorldBounds'
+import CalibStep3_Zones from '../steps/CalibStep3_Zones'
+import CalibStep4_Videos from '../steps/CalibStep4_Videos'
+import CalibStep5_Save from '../steps/CalibStep5_Save'
+import CalibStep6_TestMode from '../steps/CalibStep6_TestMode'
+
+// ── Method 1 steps ────────────────────────────────────────────────────────────
+
+const STANDARD_STEPS = [
   { n: 1, label: 'Floor Plan Upload' },
   { n: 2, label: 'Scale & Origin' },
   { n: 3, label: 'Zones & Obstacles' },
@@ -24,7 +36,7 @@ const STEPS = [
   { n: 9, label: 'Test Mode & Heatmap' },
 ]
 
-const STEP_COMPONENTS = {
+const STANDARD_STEP_COMPONENTS = {
   1: Step1_Upload,
   2: Step2_Scale,
   3: Step3_Zones,
@@ -35,6 +47,17 @@ const STEP_COMPONENTS = {
   8: Step8_Save,
   9: Step9_TestMode,
 }
+
+// ── Method 2 steps ────────────────────────────────────────────────────────────
+
+const CALIB_STEPS = [
+  { n: 1, label: 'Camera Setup & Files' },
+  { n: 2, label: 'World Map Bounds' },
+  { n: 3, label: 'Draw Zones' },
+  { n: 4, label: 'Camera Videos' },
+  { n: 5, label: 'Save Configuration' },
+  { n: 6, label: 'Test Mode & Heatmap' },
+]
 
 // ── Store selector overlay ────────────────────────────────────────────────────
 
@@ -53,8 +76,9 @@ function StoreSelector({ onSelected }) {
     setLoading(true)
     setError(null)
     try {
-      const store = await createStore(newName.trim())
-      onSelected(store)
+      // Create with default method; method is chosen in the onboarding pre-screen
+      const store = await createStore(newName.trim(), 'standard')
+      onSelected(store, true /* isNew */)
     } catch (e) {
       setError(e.message)
     } finally {
@@ -75,11 +99,16 @@ function StoreSelector({ onSelected }) {
               {stores.map(s => (
                 <button
                   key={s.id}
-                  onClick={() => onSelected(s)}
+                  onClick={() => onSelected(s, false)}
                   className="w-full text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-blue-400 hover:bg-blue-50 transition flex items-center gap-3"
                 >
                   <span className="text-xl">🏪</span>
                   <span className="font-medium text-gray-800">{s.name}</span>
+                  {s.onboarding_method && s.onboarding_method !== 'standard' && (
+                    <span className="ml-auto text-xs text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
+                      {s.onboarding_method === 'calibration' ? 'Calib Files' : s.onboarding_method}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
@@ -112,6 +141,20 @@ function StoreSelector({ onSelected }) {
   )
 }
 
+// ── Method 2 — step component renderer ───────────────────────────────────────
+
+function CalibStepRenderer({ step, onBack, onNext }) {
+  switch (step) {
+    case 1: return <CalibStep1_CamerasAndFiles onNext={onNext} />
+    case 2: return <CalibStep2_WorldBounds onBack={onBack} onNext={onNext} />
+    case 3: return <CalibStep3_Zones onBack={onBack} onNext={onNext} />
+    case 4: return <CalibStep4_Videos onBack={onBack} onNext={onNext} />
+    case 5: return <CalibStep5_Save onBack={onBack} onNext={onNext} />
+    case 6: return <CalibStep6_TestMode onBack={onBack} />
+    default: return null
+  }
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function StoreOnboarding() {
@@ -121,9 +164,13 @@ export default function StoreOnboarding() {
     loadProject: hydrateProject,
     resetOnboarding,
     floorPlanUrl,
+    onboardingMethod, setOnboardingMethod,
   } = useStore()
+
   const importRef = useRef()
   const [dbReloading, setDbReloading] = useState(false)
+  // showMethodSelect: true for a freshly created store that has not yet picked a method
+  const [showMethodSelect, setShowMethodSelect] = useState(false)
 
   const handleReloadFromDb = async () => {
     setDbReloading(true)
@@ -138,16 +185,28 @@ export default function StoreOnboarding() {
     }
   }
 
-  const handleStoreSelected = async (store) => {
+  const handleStoreSelected = async (store, isNew = false) => {
     setCurrentStoreId(store.id)
     setActiveStore(store.id, store.name)
     resetOnboarding()
 
-    // Load existing project data from backend
+    if (isNew) {
+      // Brand-new store: skip loadProject (nothing to load), go straight to method selection
+      setShowMethodSelect(true)
+      return
+    }
+
+    // Existing store: load saved data and let hydrateProject set onboardingMethod from DB
     try {
       const data = await loadProject()
       if (data) hydrateProject(data)
     } catch (_) {}
+  }
+
+  const handleMethodSelected = (method) => {
+    setOnboardingMethod(method)
+    setShowMethodSelect(false)
+    setStep(1)
   }
 
   const handleImportFile = (e) => {
@@ -166,6 +225,7 @@ export default function StoreOnboarding() {
     e.target.value = ''
   }
 
+  // ── No store selected ───────────────────────────────────────────────────────
   if (!activeStoreId) {
     return (
       <div className="flex-1 flex flex-col">
@@ -178,7 +238,124 @@ export default function StoreOnboarding() {
     )
   }
 
-  const StepComponent = STEP_COMPONENTS[currentStep]
+  // ── Method selection pre-screen (new stores only) ───────────────────────────
+  if (showMethodSelect) {
+    return (
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <header className="bg-white border-b px-8 py-3 flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-gray-800">{activeStoreName}</h2>
+            <p className="text-xs text-gray-500">Choose onboarding method</p>
+          </div>
+          <button
+            onClick={() => { setActiveStore(null, null); setShowMethodSelect(false) }}
+            className="text-xs text-blue-500 hover:underline"
+          >
+            Switch store
+          </button>
+        </header>
+        <div className="flex-1 overflow-auto">
+          <Step0_MethodSelect onMethodSelected={handleMethodSelected} />
+        </div>
+      </div>
+    )
+  }
+
+  // ── Method 1 — Standard ─────────────────────────────────────────────────────
+  if (!onboardingMethod || onboardingMethod === 'standard') {
+    const StepComponent = STANDARD_STEP_COMPONENTS[currentStep] ?? STANDARD_STEP_COMPONENTS[1]
+
+    return (
+      <div className="flex flex-1 overflow-hidden">
+        {/* Wizard sidebar */}
+        <aside className="w-56 flex flex-col py-5 px-3 border-r bg-white shrink-0 overflow-y-auto">
+          <div className="mb-4 px-1">
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Store</p>
+            <p className="text-sm font-semibold text-gray-800 mt-0.5 truncate">{activeStoreName}</p>
+            <button
+              onClick={() => setActiveStore(null, null)}
+              className="text-xs text-blue-500 hover:underline"
+            >
+              Switch store
+            </button>
+          </div>
+
+          <div className="mb-3 px-1">
+            <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded">Standard method</span>
+          </div>
+
+          <nav className="flex flex-col gap-0.5 flex-1">
+            {STANDARD_STEPS.map(step => {
+              const active = step.n === currentStep
+              const done = step.n < maxReachedStep
+              const accessible = step.n <= maxReachedStep
+              return (
+                <button
+                  key={step.n}
+                  onClick={() => accessible && setStep(step.n)}
+                  className={`flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs text-left transition-colors ${
+                    active ? 'bg-blue-600 text-white font-semibold' :
+                    done ? 'text-gray-600 hover:bg-gray-100 cursor-pointer' :
+                    accessible ? 'text-gray-500 hover:bg-gray-100 cursor-pointer' :
+                    'text-gray-300 cursor-not-allowed'
+                  }`}
+                >
+                  <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
+                    active ? 'bg-white text-blue-600' :
+                    done ? 'bg-green-500 text-white' :
+                    accessible ? 'bg-blue-100 text-blue-700' :
+                    'bg-gray-200 text-gray-400'
+                  }`}>
+                    {done ? '✓' : step.n}
+                  </span>
+                  <span className="truncate">{step.label}</span>
+                </button>
+              )
+            })}
+          </nav>
+
+          <div className="pt-3 border-t mt-3 space-y-1">
+            <button
+              onClick={handleReloadFromDb}
+              disabled={dbReloading}
+              className="w-full text-xs px-2.5 py-2 rounded-lg text-left text-blue-600 hover:bg-blue-50 transition flex items-center gap-2 disabled:opacity-50"
+            >
+              <span>🔄</span> {dbReloading ? 'Loading…' : 'Reload from DB'}
+            </button>
+            <button
+              onClick={() => importRef.current?.click()}
+              className="w-full text-xs px-2.5 py-2 rounded-lg text-left text-gray-500 hover:bg-gray-100 transition flex items-center gap-2"
+            >
+              <span>📂</span> Import JSON
+            </button>
+            <input ref={importRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
+          </div>
+        </aside>
+
+        {/* Step content */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <header className="bg-white border-b px-8 py-3 flex items-center justify-between">
+            <div>
+              <h2 className="text-base font-semibold text-gray-800">
+                Step {currentStep}: {STANDARD_STEPS[currentStep - 1]?.label}
+              </h2>
+              <p className="text-xs text-gray-500">Step {currentStep} of {STANDARD_STEPS.length}</p>
+            </div>
+            {floorPlanUrl && (
+              <span className="text-xs text-green-600 font-medium">● Floor plan loaded</span>
+            )}
+          </header>
+          <div className="flex-1 overflow-auto p-6">
+            <StepComponent />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Method 2 — Calibration Files ────────────────────────────────────────────
+  const calibStepIndex = Math.min(Math.max(currentStep, 1), CALIB_STEPS.length) - 1
+  const calibStep = CALIB_STEPS[calibStepIndex]
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -195,8 +372,12 @@ export default function StoreOnboarding() {
           </button>
         </div>
 
+        <div className="mb-3 px-1">
+          <span className="text-xs bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded">Calibration Files</span>
+        </div>
+
         <nav className="flex flex-col gap-0.5 flex-1">
-          {STEPS.map(step => {
+          {CALIB_STEPS.map(step => {
             const active = step.n === currentStep
             const done = step.n < maxReachedStep
             const accessible = step.n <= maxReachedStep
@@ -205,16 +386,16 @@ export default function StoreOnboarding() {
                 key={step.n}
                 onClick={() => accessible && setStep(step.n)}
                 className={`flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs text-left transition-colors ${
-                  active ? 'bg-blue-600 text-white font-semibold' :
+                  active ? 'bg-indigo-600 text-white font-semibold' :
                   done ? 'text-gray-600 hover:bg-gray-100 cursor-pointer' :
                   accessible ? 'text-gray-500 hover:bg-gray-100 cursor-pointer' :
                   'text-gray-300 cursor-not-allowed'
                 }`}
               >
                 <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
-                  active ? 'bg-white text-blue-600' :
+                  active ? 'bg-white text-indigo-600' :
                   done ? 'bg-green-500 text-white' :
-                  accessible ? 'bg-blue-100 text-blue-700' :
+                  accessible ? 'bg-indigo-100 text-indigo-700' :
                   'bg-gray-200 text-gray-400'
                 }`}>
                   {done ? '✓' : step.n}
@@ -248,16 +429,18 @@ export default function StoreOnboarding() {
         <header className="bg-white border-b px-8 py-3 flex items-center justify-between">
           <div>
             <h2 className="text-base font-semibold text-gray-800">
-              Step {currentStep}: {STEPS[currentStep - 1].label}
+              Step {currentStep}: {calibStep?.label}
             </h2>
-            <p className="text-xs text-gray-500">Step {currentStep} of 9</p>
+            <p className="text-xs text-gray-500">Step {currentStep} of {CALIB_STEPS.length}</p>
           </div>
-          {floorPlanUrl && (
-            <span className="text-xs text-green-600 font-medium">● Floor plan loaded</span>
-          )}
+          <span className="text-xs text-indigo-600 font-medium bg-indigo-50 px-2 py-0.5 rounded">Calibration Files method</span>
         </header>
         <div className="flex-1 overflow-auto p-6">
-          <StepComponent />
+          <CalibStepRenderer
+            step={currentStep}
+            onBack={() => setStep(Math.max(1, currentStep - 1))}
+            onNext={() => setStep(Math.min(CALIB_STEPS.length, currentStep + 1))}
+          />
         </div>
       </div>
     </div>
