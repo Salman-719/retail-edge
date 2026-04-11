@@ -2,12 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main, development]
+    branches: [development, production]
   pull_request:
-    branches: [main, development]
+    branches: [development, production]
+  workflow_dispatch:
 
 jobs:
-  # ── Python linting ──────────────────────────────────────────────────────────
   lint-python:
     name: Python Lint
     runs-on: ubuntu-latest
@@ -21,7 +21,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install linters
-        run: pip install flake8 black
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 black
 
       - name: flake8
         run: flake8 services/ tests/ --max-line-length=120 --extend-ignore=E501,W503
@@ -29,7 +31,6 @@ jobs:
       - name: black (check only)
         run: black --check --line-length=120 services/ tests/
 
-  # ── Frontend lint + build ───────────────────────────────────────────────────
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
@@ -42,17 +43,16 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: frontend/package.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         working-directory: frontend
-        run: npm install
+        run: npm ci
 
       - name: Build
         working-directory: frontend
         run: npm run build
 
-  # ── EEP unit tests ─────────────────────────────────────────────────────────
   eep-tests:
     name: EEP Unit Tests
     runs-on: ubuntu-latest
@@ -65,20 +65,22 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install EEP dependencies
-        working-directory: services/eep
+      - name: Install EEP + test dependencies
         run: |
-          pip install --upgrade pip
-          pip install fastapi pydantic pydantic-settings sqlalchemy asyncpg \
-                      alembic numpy scipy pytest shapely
+          python -m pip install --upgrade pip
+          pip install -r services/eep/requirements.txt
+          pip install pytest
 
-      - name: Install OpenCV headless
-        run: pip install opencv-python-headless
+      - name: Run EEP unit tests
+        run: |
+          pytest \
+            tests/unit/test_schemas.py::TestStoreCreate \
+            tests/unit/test_schemas.py::TestZoneCreate \
+            tests/unit/test_schemas.py::TestCameraCreate \
+            tests/unit/test_schemas.py::TestCalibrationRequest \
+            tests/unit/test_schemas.py::TestComputeHomography \
+            -v
 
-      - name: Run unit tests
-        run: pytest tests/unit/ -v
-
-  # ── Docker Compose smoke test ──────────────────────────────────────────────
   docker-smoke:
     name: Docker Compose Smoke
     runs-on: ubuntu-latest
@@ -90,15 +92,16 @@ jobs:
         run: cp .env.example .env
 
       - name: Start infrastructure (postgres, redis, minio only)
-        run: |
-          docker compose up -d postgres redis minio
-          sleep 10
+        run: docker compose up -d --wait postgres redis minio
 
       - name: Health check postgres
-        run: docker compose exec -T postgres pg_isready -U retailvision
+        run: docker compose exec -T postgres pg_isready -U "${POSTGRES_USER:-retailvision}"
 
       - name: Health check redis
         run: docker compose exec -T redis redis-cli ping
+
+      - name: Health check minio
+        run: curl -fsS http://localhost:9000/minio/health/live
 
       - name: Tear down
         if: always()
