@@ -1,101 +1,152 @@
-"""IEP2 — Vision Processing Service schemas.
+"""IEP2 — Vision Processing Service: I/O contract.
 
-Defines the clear input/output contract for every endpoint.
+All request bodies, query parameters, and response payloads are declared here so
+every endpoint has an explicit, typed, documented contract.
 
-Endpoints:
-  POST /tracking/{store_id}/cameras/{camera_id}/tracking/start
-    Input:  TrackingStartRequest (JSON body)
-    Output: TrackingStartResponse
+Endpoint catalogue
+------------------
 
-  GET  /tracking/{store_id}/cameras/{camera_id}/tracking/stream
-    Output: multipart/x-mixed-replace MJPEG stream
+POST /tracking/{store_id}/cameras/{camera_id}/tracking/start
+    Input :  TrackingStartRequest  (list of frame S3 keys from IEP1 + calibration)
+    Output:  TrackingStartResponse            (200)
+    Errors:  —  (any I/O failure bubbles as 500)
 
-  GET  /tracking/{store_id}/cameras/{camera_id}/tracking/progress
-    Output: TrackingProgressResponse
+GET  /tracking/{store_id}/cameras/{camera_id}/tracking/progress
+    Output:  TrackingProgressResponse         (200)
+    Errors:  404 no job for camera
 
-  GET  /tracking/{store_id}/cameras/{camera_id}/tracking/heatmap
-    Output: image/png bytes
+POST /enrollment/{store_id}/employees/{employee_id}/enroll
+    Input :  EnrollmentRequest
+    Output:  EnrollmentResponse               (200)
+    Errors:  404 enrollment frames not found
 
-  GET  /tracking/{store_id}/cameras/{camera_id}/tracking/trajectory
-    Output: TrajectoryResponse
+GET  /health
+    Output:  HealthResponse                   (200)
 """
-from typing import List, Dict, Optional
-from pydantic import BaseModel, field_validator
+from typing import List, Dict, Optional, Literal
+from pydantic import BaseModel, Field, field_validator
+
+
+# ── Health ────────────────────────────────────────────────────────────────────
+
+class HealthResponse(BaseModel):
+    service: str = "iep2-vision"
+    status: str = "ok"
+
+
+# ── Shared primitives ─────────────────────────────────────────────────────────
+
+class Point(BaseModel):
+    """2-D point. Used for polygon vertices and pixel anchors."""
+    x: float
+    y: float
+
+
+class Zone(BaseModel):
+    """Polygon zone definition passed from EEP at tracking start."""
+    name: str
+    type: Optional[str] = Field(None, description='e.g. "entrance", "checkout", "general"')
+    points: List[Point] = Field(..., description="Polygon vertices (metres or pixels per context)")
+
+
+# ── Tracking ──────────────────────────────────────────────────────────────────
+
+ProjectionMethod = Literal["homography", "calibration_files"]
+JobStatus = Literal["idle", "running", "done", "error"]
+StartStatus = Literal["started", "already_running"]
 
 
 class TrackingStartRequest(BaseModel):
-    """Fully-resolved payload sent by EEP after DB lookups."""
-    video_s3_key: str
+    """Sent by EEP to start a tracking job over pre-extracted frames from IEP1."""
+    frame_s3_keys: List[str] = Field(..., description="Ordered JPEG frame S3 keys produced by IEP1")
+    sample_fps: float = Field(5.0, ge=0, description="Frame rate of the sampled sequence")
+    camera_id: str
+    store_id: str
     floor_plan_s3_key: Optional[str] = None
-    # Projection method: 'homography' (Method 1) | 'calibration_files' (Method 2)
-    projection_method: str = "homography"
-    # Method 1: homography matrix
+
+    # Projection method selector
+    projection_method: ProjectionMethod = "homography"
+
+    # Method 1 — homography matrix (3x3)
     homography_matrix: Optional[List[List[float]]] = None
-    # Method 2: intrinsic/extrinsic calibration data
+
+    # Method 2 — intrinsic/extrinsic calibration
     intrinsic_matrix: Optional[List[List[float]]] = None
     dist_coeffs: Optional[List[float]] = None
     rotation_matrix: Optional[List[List[float]]] = None
     translation_vector: Optional[List[float]] = None
-    # Common fields
-    zones: List[dict]
+
+    # Common
+    zones: List[Zone] = Field(default_factory=list)
     pixels_per_meter: Optional[float] = 100.0
-    origin_px: Optional[dict] = None
+    origin_px: Optional[Point] = None
+    world_bounds: Optional[Dict[str, float]] = Field(
+        None, description='Method-2 only: {"x_min","x_max","y_min","y_max"}'
+    )
+    model_size: str = "yolov8n"
 
     @field_validator("pixels_per_meter", mode="before")
     @classmethod
-    def coerce_pixels_per_meter(cls, v):
+    def _coerce_ppm(cls, v):
         """Accept null/None from older EEP versions — fall back to 100.0."""
         return v if v is not None else 100.0
-    world_bounds: Optional[dict] = None  # {x_min, x_max, y_min, y_max} for Method 2
-    model_size: str = "yolov8n"
-    store_id: str
 
 
 class TrackingStartResponse(BaseModel):
-    status: str  # "started" | "already_running"
-
-
-class ZoneOccupancy(BaseModel):
-    seconds: float
-    percent: float
+    status: StartStatus
 
 
 class TrackingProgressResponse(BaseModel):
-    status: str  # "running" | "done" | "error" | "idle"
-    progress: int  # 0-100
-    total_frames: int
-    zone_occupancy: Dict[str, ZoneOccupancy] = {}
+    """Snapshot of a running or completed tracking job."""
+    status: JobStatus
+    progress: int = Field(..., ge=0, le=100, description="Percent complete")
+    total_frames: int = Field(..., ge=0)
+    frames_written: int = Field(..., ge=0, description="Frame rows committed to DB so far")
     error: Optional[str] = None
-    heatmap_url: Optional[str] = None
 
 
-class TrajectoryPoint(BaseModel):
-    frameIdx: int
-    x: float
-    y: float
-    trackId: int
+# ── Per-frame DB record ───────────────────────────────────────────────────────
+
+class DetectionRecord(BaseModel):
+    """One YOLO+ByteTrack detection within a single frame."""
+    track_id: int = Field(..., description="ByteTrack persistent person ID")
+    bbox_x: float = Field(..., description="Bounding-box centre X (pixels)")
+    bbox_y: float = Field(..., description="Bounding-box centre Y (pixels)")
+    bbox_w: float = Field(..., ge=0, description="Bounding-box width (pixels)")
+    bbox_h: float = Field(..., ge=0, description="Bounding-box height (pixels)")
+    confidence: float = Field(..., ge=0, le=1)
+    floor_x: Optional[float] = Field(None, description="Projected floor position X (metres)")
+    floor_y: Optional[float] = Field(None, description="Projected floor position Y (metres)")
+    zone_name: Optional[str] = Field(None, description="Zone the person is standing in")
 
 
-class TrajectoryResponse(BaseModel):
-    trajectory: List[TrajectoryPoint] = []
+class FrameRecord(BaseModel):
+    """Complete per-frame row written to the database by IEP2."""
+    store_id: str
+    camera_id: str
+    frame_index: int = Field(..., ge=0)
+    timestamp_sec: float = Field(..., ge=0)
+    s3_key: str = Field(..., description="Source JPEG S3 key (from IEP1)")
+    detections: List[DetectionRecord] = Field(default_factory=list)
+    people_count: int = Field(..., ge=0, description="Number of tracked persons in this frame")
+
+
+# ── Enrollment ────────────────────────────────────────────────────────────────
+
+EnrollmentStatus = Literal["enrolled", "failed"]
 
 
 class EnrollmentRequest(BaseModel):
-    """Request to enroll an employee by extracting ReID embeddings from video."""
-    video_s3_key: str
+    """Request to enroll an employee using sampled frames from IEP1."""
+    frame_s3_keys: List[str] = Field(..., description="Frame S3 keys to extract ReID crops from")
     employee_id: str
     store_id: str
-    sample_count: int = 20  # number of crops to extract
+    sample_count: int = Field(20, ge=1, description="Number of crops to extract")
 
 
 class EnrollmentResponse(BaseModel):
     employee_id: str
-    status: str  # "enrolled" | "failed"
-    embedding_dim: int = 0
-    samples_extracted: int = 0
+    status: EnrollmentStatus
+    embedding_dim: int = Field(0, ge=0)
+    samples_extracted: int = Field(0, ge=0)
     error: Optional[str] = None
-
-
-class HealthResponse(BaseModel):
-    service: str
-    status: str

@@ -1,6 +1,6 @@
 """IEP4 — Analytics Aggregation.
 
-Aggregates tracking data into time-series analytics and reports.
+Reads FrameRecord rows from the database and aggregates them into time-series analytics.
 Stub endpoints — logic will be implemented in Milestone 3.
 """
 from datetime import datetime, timedelta
@@ -9,10 +9,13 @@ from typing import List, Optional
 from fastapi import FastAPI, Query
 
 from app.schemas import (
-    TrackingSnapshot,
+    AnalyticsQueryRequest,
+    AggregateAck,
     StoreSummary,
     ZoneAnalytics,
     TrafficTimeSeries,
+    Granularity,
+    HealthResponse,
 )
 
 app = FastAPI(
@@ -24,19 +27,20 @@ app = FastAPI(
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health():
-    return {"service": "iep4-analytics", "status": "ok"}
+    return HealthResponse()
 
 
 # ── Ingestion ────────────────────────────────────────────────────────────────
 
-@app.post("/analytics/ingest", status_code=202)
-async def ingest(snapshot: TrackingSnapshot):
-    """Receive a tracking snapshot and aggregate it.
+@app.post("/analytics/aggregate", status_code=202, response_model=AggregateAck)
+async def aggregate(request: AnalyticsQueryRequest):
+    """Read FrameRecord rows from the DB and aggregate them.
     Stub — stores nothing until persistence is implemented."""
-    # TODO: persist snapshot into time-series storage
-    return {"accepted": True}
+    # TODO: query DB for FrameRecord rows matching request.store_id / camera_id / time window
+    # TODO: compute visitor counts, dwell times, zone occupancy and write results back to DB
+    return AggregateAck()
 
 
 # ── Queries ──────────────────────────────────────────────────────────────────
@@ -46,7 +50,7 @@ async def store_summary(
     store_id: str,
     start: Optional[datetime] = Query(None),
     end: Optional[datetime] = Query(None),
-    granularity: str = Query("day"),
+    granularity: Granularity = Query("day"),
 ):
     """Return aggregated store summary for a time period.
     Stub — returns zeroed placeholder."""
@@ -76,7 +80,7 @@ async def traffic_time_series(
     store_id: str,
     start: Optional[datetime] = Query(None),
     end: Optional[datetime] = Query(None),
-    granularity: str = Query("hour"),
+    granularity: Granularity = Query("hour"),
 ):
     """Return visitor traffic as a time-series.
     Stub — returns empty buckets."""

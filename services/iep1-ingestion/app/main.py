@@ -15,6 +15,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.core.s3_client import s3_client
 from app.core.database import engine
+from app.schemas import HealthResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -50,6 +51,6 @@ app.include_router(videos_router, prefix="/ingest", tags=["videos"])
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health():
-    return {"service": "iep1-ingestion", "status": "ok"}
+    return HealthResponse()
