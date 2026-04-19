@@ -13,6 +13,7 @@ from app.schemas import (
     AlertRuleCreate, AlertRule,
     TrackingEvent, AlertResult,
     Alert, AlertUpdate,
+    HealthResponse,
 )
 
 app = FastAPI(
@@ -28,9 +29,9 @@ _alerts: dict[str, Alert] = {}
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health():
-    return {"service": "iep3-alerts", "status": "ok"}
+    return HealthResponse()
 
 
 # ── Rules CRUD ───────────────────────────────────────────────────────────────

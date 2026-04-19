@@ -13,6 +13,7 @@ from app.schemas import (
     AgentQuery, AgentResponse,
     ReportRequest, ReportResponse,
     Suggestion,
+    HealthResponse,
 )
 
 app = FastAPI(
@@ -24,9 +25,9 @@ app = FastAPI(
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health():
-    return {"service": "iep5-agent", "status": "ok"}
+    return HealthResponse()
 
 
 # ── Query ────────────────────────────────────────────────────────────────────

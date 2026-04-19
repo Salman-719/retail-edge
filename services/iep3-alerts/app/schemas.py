@@ -1,32 +1,61 @@
-"""IEP3 — Alerts & Rule Engine schemas.
+"""IEP3 — Alerts & Rule Engine Service: I/O contract.
 
-Defines the input/output contract for the alert service.
+All request bodies, query parameters, and response payloads are declared here so
+every endpoint has an explicit, typed, documented contract.
 
-Endpoints:
-  POST /alerts/rules
-    Input:  AlertRuleCreate
-    Output: AlertRule
+Endpoint catalogue
+------------------
 
-  GET  /alerts/rules
-    Output: List[AlertRule]
+POST /alerts/rules
+    Input :  AlertRuleCreate
+    Output:  AlertRule                        (200)
 
-  DELETE /alerts/rules/{rule_id}
-    Output: 204
+GET  /alerts/rules
+    Query :  store_id:str|None=None
+    Output:  List[AlertRule]                  (200)
 
-  POST /alerts/evaluate
-    Input:  TrackingEvent (sent by IEP2 after each tracking job)
-    Output: List[AlertResult]
+DELETE /alerts/rules/{rule_id}
+    Output:  —                                (204)
+    Errors:  404 rule not found
 
-  GET  /alerts/{store_id}
-    Output: List[Alert]
+POST /alerts/evaluate
+    Input :  TrackingEvent                    (sent by IEP2 after tracking job)
+    Output:  List[AlertResult]                (200)
 
-  PATCH /alerts/{alert_id}
-    Input:  AlertUpdate
-    Output: Alert
+GET  /alerts/{store_id}
+    Output:  List[Alert]                      (200)
+
+PATCH /alerts/{alert_id}
+    Input :  AlertUpdate
+    Output:  Alert                            (200)
+    Errors:  404 alert not found
+
+GET  /health
+    Output:  HealthResponse                   (200)
 """
 from datetime import datetime
-from typing import List, Optional, Dict
-from pydantic import BaseModel
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field
+
+
+# ── Health ────────────────────────────────────────────────────────────────────
+
+class HealthResponse(BaseModel):
+    service: str = "iep3-alerts"
+    status: str = "ok"
+
+
+# ── Shared primitives ─────────────────────────────────────────────────────────
+
+RuleType = Literal["zone_dwell", "zone_crowding", "no_staff"]
+Severity = Literal["info", "warning", "critical"]
+AlertStatus = Literal["active", "acknowledged", "resolved"]
+
+
+class ZoneOccupancy(BaseModel):
+    """Dwell statistics for a single zone during a tracking run."""
+    seconds: float = Field(..., ge=0)
+    percent: float = Field(..., ge=0, le=100)
 
 
 # ── Rules ─────────────────────────────────────────────────────────────────────
@@ -35,10 +64,10 @@ class AlertRuleCreate(BaseModel):
     """Define a new alerting rule."""
     store_id: str
     name: str
-    type: str           # "zone_dwell" | "zone_crowding" | "no_staff"
+    type: RuleType
     zone_name: Optional[str] = None
-    threshold_seconds: Optional[float] = None   # for dwell-time rules
-    threshold_count: Optional[int] = None        # for crowding rules
+    threshold_seconds: Optional[float] = Field(None, ge=0, description="For dwell-time rules")
+    threshold_count: Optional[int] = Field(None, ge=0, description="For crowding rules")
     enabled: bool = True
 
 
@@ -53,20 +82,20 @@ class TrackingEvent(BaseModel):
     """Sent by IEP2 after a tracking job completes."""
     store_id: str
     camera_id: str
-    zone_occupancy: Dict[str, Dict]  # {zone_name: {seconds, percent}}
-    trajectory: List[Dict]
-    total_frames: int
-    fps: float
+    zone_occupancy: Dict[str, ZoneOccupancy] = Field(default_factory=dict)
+    trajectory: List[Dict[str, Any]] = Field(default_factory=list)
+    total_frames: int = Field(0, ge=0)
+    fps: float = Field(0.0, ge=0)
 
 
 class AlertResult(BaseModel):
     """An alert emitted when a rule condition is met."""
     rule_id: str
     rule_name: str
-    type: str
-    severity: str        # "info" | "warning" | "critical"
+    type: RuleType
+    severity: Severity
     message: str
-    data: Dict = {}
+    data: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
@@ -75,13 +104,13 @@ class Alert(BaseModel):
     id: str
     store_id: str
     rule_id: Optional[str] = None
-    type: str
-    severity: str
-    status: str          # "active" | "acknowledged" | "resolved"
+    type: RuleType
+    severity: Severity
+    status: AlertStatus
     message: str
-    data: Dict = {}
+    data: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
 
 class AlertUpdate(BaseModel):
-    status: Optional[str] = None  # "acknowledged" | "resolved"
+    status: Optional[AlertStatus] = None

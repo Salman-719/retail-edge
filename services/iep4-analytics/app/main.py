@@ -10,9 +10,12 @@ from fastapi import FastAPI, Query
 
 from app.schemas import (
     TrackingSnapshot,
+    IngestAck,
     StoreSummary,
     ZoneAnalytics,
     TrafficTimeSeries,
+    Granularity,
+    HealthResponse,
 )
 
 app = FastAPI(
@@ -24,19 +27,18 @@ app = FastAPI(
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health():
-    return {"service": "iep4-analytics", "status": "ok"}
+    return HealthResponse()
 
 
 # ── Ingestion ────────────────────────────────────────────────────────────────
 
-@app.post("/analytics/ingest", status_code=202)
+@app.post("/analytics/ingest", status_code=202, response_model=IngestAck)
 async def ingest(snapshot: TrackingSnapshot):
     """Receive a tracking snapshot and aggregate it.
     Stub — stores nothing until persistence is implemented."""
-    # TODO: persist snapshot into time-series storage
-    return {"accepted": True}
+    return IngestAck()
 
 
 # ── Queries ──────────────────────────────────────────────────────────────────
@@ -46,7 +48,7 @@ async def store_summary(
     store_id: str,
     start: Optional[datetime] = Query(None),
     end: Optional[datetime] = Query(None),
-    granularity: str = Query("day"),
+    granularity: Granularity = Query("day"),
 ):
     """Return aggregated store summary for a time period.
     Stub — returns zeroed placeholder."""
@@ -76,7 +78,7 @@ async def traffic_time_series(
     store_id: str,
     start: Optional[datetime] = Query(None),
     end: Optional[datetime] = Query(None),
-    granularity: str = Query("hour"),
+    granularity: Granularity = Query("hour"),
 ):
     """Return visitor traffic as a time-series.
     Stub — returns empty buckets."""

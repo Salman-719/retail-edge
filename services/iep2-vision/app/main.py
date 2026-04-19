@@ -9,6 +9,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from app.core.s3_client import s3_client
 from app.core.redis_client import async_redis
 from app.core.database import engine
+from app.schemas import HealthResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,6 +49,6 @@ app.include_router(enrollment_router, prefix="/enrollment", tags=["enrollment"])
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health():
-    return {"service": "iep2-vision", "status": "ok"}
+    return HealthResponse()
