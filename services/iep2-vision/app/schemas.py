@@ -3,41 +3,22 @@
 All request bodies, query parameters, and response payloads are declared here so
 every endpoint has an explicit, typed, documented contract.
 
-Wire-compatibility notes
-------------------------
-- `TrajectoryPoint` uses camelCase fields (`frameIdx`, `trackId`) for
-  direct consumption by the React frontend (Step9_TestMode, live monitoring
-  canvas). All other models are snake_case.
-
 Endpoint catalogue
 ------------------
 
 POST /tracking/{store_id}/cameras/{camera_id}/tracking/start
-    Input :  TrackingStartRequest
-    Query :  model_size:str="yolov8n"         (override)
+    Input :  TrackingStartRequest  (list of frame S3 keys from IEP1 + calibration)
     Output:  TrackingStartResponse            (200)
     Errors:  —  (any I/O failure bubbles as 500)
-
-GET  /tracking/{store_id}/cameras/{camera_id}/tracking/stream
-    Output:  multipart/x-mixed-replace MJPEG  (200)
-    Errors:  404 no job for camera
 
 GET  /tracking/{store_id}/cameras/{camera_id}/tracking/progress
     Output:  TrackingProgressResponse         (200)
     Errors:  404 no job for camera
 
-GET  /tracking/{store_id}/cameras/{camera_id}/tracking/heatmap
-    Output:  image/png bytes                  (200)
-    Errors:  404 heatmap not yet available
-
-GET  /tracking/{store_id}/cameras/{camera_id}/tracking/trajectory
-    Output:  TrajectoryResponse               (200)
-    Errors:  404 no job for camera
-
 POST /enrollment/{store_id}/employees/{employee_id}/enroll
     Input :  EnrollmentRequest
     Output:  EnrollmentResponse               (200)
-    Errors:  404 enrollment video not found
+    Errors:  404 enrollment frames not found
 
 GET  /health
     Output:  HealthResponse                   (200)
@@ -68,12 +49,6 @@ class Zone(BaseModel):
     points: List[Point] = Field(..., description="Polygon vertices (metres or pixels per context)")
 
 
-class ZoneOccupancy(BaseModel):
-    """Dwell statistics for a single zone during a tracking run."""
-    seconds: float = Field(..., ge=0)
-    percent: float = Field(..., ge=0, le=100)
-
-
 # ── Tracking ──────────────────────────────────────────────────────────────────
 
 ProjectionMethod = Literal["homography", "calibration_files"]
@@ -82,8 +57,11 @@ StartStatus = Literal["started", "already_running"]
 
 
 class TrackingStartRequest(BaseModel):
-    """Fully-resolved payload sent by EEP after DB lookups."""
-    video_s3_key: str
+    """Sent by EEP to start a tracking job over pre-extracted frames from IEP1."""
+    frame_s3_keys: List[str] = Field(..., description="Ordered JPEG frame S3 keys produced by IEP1")
+    sample_fps: float = Field(5.0, ge=0, description="Frame rate of the sampled sequence")
+    camera_id: str
+    store_id: str
     floor_plan_s3_key: Optional[str] = None
 
     # Projection method selector
@@ -106,7 +84,6 @@ class TrackingStartRequest(BaseModel):
         None, description='Method-2 only: {"x_min","x_max","y_min","y_max"}'
     )
     model_size: str = "yolov8n"
-    store_id: str
 
     @field_validator("pixels_per_meter", mode="before")
     @classmethod
@@ -124,21 +101,34 @@ class TrackingProgressResponse(BaseModel):
     status: JobStatus
     progress: int = Field(..., ge=0, le=100, description="Percent complete")
     total_frames: int = Field(..., ge=0)
-    zone_occupancy: Dict[str, ZoneOccupancy] = Field(default_factory=dict)
+    frames_written: int = Field(..., ge=0, description="Frame rows committed to DB so far")
     error: Optional[str] = None
-    heatmap_url: Optional[str] = None
 
 
-class TrajectoryPoint(BaseModel):
-    """One point in a person trajectory. CamelCase for frontend consumption."""
-    frameIdx: int
-    x: float
-    y: float
-    trackId: int
+# ── Per-frame DB record ───────────────────────────────────────────────────────
+
+class DetectionRecord(BaseModel):
+    """One YOLO+ByteTrack detection within a single frame."""
+    track_id: int = Field(..., description="ByteTrack persistent person ID")
+    bbox_x: float = Field(..., description="Bounding-box centre X (pixels)")
+    bbox_y: float = Field(..., description="Bounding-box centre Y (pixels)")
+    bbox_w: float = Field(..., ge=0, description="Bounding-box width (pixels)")
+    bbox_h: float = Field(..., ge=0, description="Bounding-box height (pixels)")
+    confidence: float = Field(..., ge=0, le=1)
+    floor_x: Optional[float] = Field(None, description="Projected floor position X (metres)")
+    floor_y: Optional[float] = Field(None, description="Projected floor position Y (metres)")
+    zone_name: Optional[str] = Field(None, description="Zone the person is standing in")
 
 
-class TrajectoryResponse(BaseModel):
-    trajectory: List[TrajectoryPoint] = Field(default_factory=list)
+class FrameRecord(BaseModel):
+    """Complete per-frame row written to the database by IEP2."""
+    store_id: str
+    camera_id: str
+    frame_index: int = Field(..., ge=0)
+    timestamp_sec: float = Field(..., ge=0)
+    s3_key: str = Field(..., description="Source JPEG S3 key (from IEP1)")
+    detections: List[DetectionRecord] = Field(default_factory=list)
+    people_count: int = Field(..., ge=0, description="Number of tracked persons in this frame")
 
 
 # ── Enrollment ────────────────────────────────────────────────────────────────
@@ -147,8 +137,8 @@ EnrollmentStatus = Literal["enrolled", "failed"]
 
 
 class EnrollmentRequest(BaseModel):
-    """Request to enroll an employee by extracting ReID embeddings."""
-    video_s3_key: str
+    """Request to enroll an employee using sampled frames from IEP1."""
+    frame_s3_keys: List[str] = Field(..., description="Frame S3 keys to extract ReID crops from")
     employee_id: str
     store_id: str
     sample_count: int = Field(20, ge=1, description="Number of crops to extract")

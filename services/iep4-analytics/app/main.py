@@ -1,6 +1,6 @@
 """IEP4 — Analytics Aggregation.
 
-Aggregates tracking data into time-series analytics and reports.
+Reads FrameRecord rows from the database and aggregates them into time-series analytics.
 Stub endpoints — logic will be implemented in Milestone 3.
 """
 from datetime import datetime, timedelta
@@ -9,8 +9,8 @@ from typing import List, Optional
 from fastapi import FastAPI, Query
 
 from app.schemas import (
-    TrackingSnapshot,
-    IngestAck,
+    AnalyticsQueryRequest,
+    AggregateAck,
     StoreSummary,
     ZoneAnalytics,
     TrafficTimeSeries,
@@ -34,11 +34,13 @@ async def health():
 
 # ── Ingestion ────────────────────────────────────────────────────────────────
 
-@app.post("/analytics/ingest", status_code=202, response_model=IngestAck)
-async def ingest(snapshot: TrackingSnapshot):
-    """Receive a tracking snapshot and aggregate it.
+@app.post("/analytics/aggregate", status_code=202, response_model=AggregateAck)
+async def aggregate(request: AnalyticsQueryRequest):
+    """Read FrameRecord rows from the DB and aggregate them.
     Stub — stores nothing until persistence is implemented."""
-    return IngestAck()
+    # TODO: query DB for FrameRecord rows matching request.store_id / camera_id / time window
+    # TODO: compute visitor counts, dwell times, zone occupancy and write results back to DB
+    return AggregateAck()
 
 
 # ── Queries ──────────────────────────────────────────────────────────────────

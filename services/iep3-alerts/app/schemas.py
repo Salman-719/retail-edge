@@ -19,8 +19,9 @@ DELETE /alerts/rules/{rule_id}
     Errors:  404 rule not found
 
 POST /alerts/evaluate
-    Input :  TrackingEvent                    (sent by IEP2 after tracking job)
-    Output:  List[AlertResult]                (200)
+    Input :  AlertEvaluateRequest             (store/camera + optional frame window)
+    IEP3 reads FrameRecord rows from the DB itself — no tracking data in body.
+    Output:  TBD                              (200)
 
 GET  /alerts/{store_id}
     Output:  List[Alert]                      (200)
@@ -52,12 +53,6 @@ Severity = Literal["info", "warning", "critical"]
 AlertStatus = Literal["active", "acknowledged", "resolved"]
 
 
-class ZoneOccupancy(BaseModel):
-    """Dwell statistics for a single zone during a tracking run."""
-    seconds: float = Field(..., ge=0)
-    percent: float = Field(..., ge=0, le=100)
-
-
 # ── Rules ─────────────────────────────────────────────────────────────────────
 
 class AlertRuleCreate(BaseModel):
@@ -76,16 +71,15 @@ class AlertRule(AlertRuleCreate):
     created_at: datetime
 
 
-# ── Evaluation ────────────────────────────────────────────────────────────────
+# ── Evaluation input (reads from DB) ─────────────────────────────────────────
 
-class TrackingEvent(BaseModel):
-    """Sent by IEP2 after a tracking job completes."""
+class AlertEvaluateRequest(BaseModel):
+    """Trigger IEP3 to read FrameRecord rows from the DB and evaluate rules.
+    IEP3 queries the DB itself — no tracking data is passed in the request body."""
     store_id: str
     camera_id: str
-    zone_occupancy: Dict[str, ZoneOccupancy] = Field(default_factory=dict)
-    trajectory: List[Dict[str, Any]] = Field(default_factory=list)
-    total_frames: int = Field(0, ge=0)
-    fps: float = Field(0.0, ge=0)
+    from_frame_index: Optional[int] = Field(None, ge=0, description="Inclusive lower bound (None = all)")
+    to_frame_index: Optional[int] = Field(None, ge=0, description="Inclusive upper bound (None = latest)")
 
 
 class AlertResult(BaseModel):

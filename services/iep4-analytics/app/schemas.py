@@ -6,9 +6,10 @@ every endpoint has an explicit, typed, documented contract.
 Endpoint catalogue
 ------------------
 
-POST /analytics/ingest
-    Input :  TrackingSnapshot                 (sent by IEP2 after tracking)
-    Output:  IngestAck                        (202)
+POST /analytics/aggregate
+    Input :  AnalyticsQueryRequest            (store/camera + optional time window)
+    IEP4 reads FrameRecord rows from the DB itself — no tracking data in body.
+    Output:  TBD                              (202)
 
 GET  /analytics/{store_id}/summary
     Query :  start:datetime|None, end:datetime|None, granularity:Granularity="day"
@@ -26,7 +27,7 @@ GET  /health
     Output:  HealthResponse                   (200)
 """
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -42,26 +43,19 @@ class HealthResponse(BaseModel):
 Granularity = Literal["hour", "day", "week"]
 
 
-class ZoneOccupancy(BaseModel):
-    """Dwell statistics for a single zone during a tracking run."""
-    seconds: float = Field(..., ge=0)
-    percent: float = Field(..., ge=0, le=100)
+# ── Aggregation trigger (reads from DB) ──────────────────────────────────────
 
-
-# ── Ingestion ─────────────────────────────────────────────────────────────────
-
-class TrackingSnapshot(BaseModel):
-    """Sent by IEP2 after a tracking job completes — raw data for aggregation."""
+class AnalyticsQueryRequest(BaseModel):
+    """Trigger IEP4 to read FrameRecord rows from the DB and aggregate them.
+    IEP4 queries the DB itself — no tracking data is passed in the request body."""
     store_id: str
-    camera_id: str
-    zone_occupancy: Dict[str, ZoneOccupancy] = Field(default_factory=dict)
-    trajectory: List[Dict[str, Any]] = Field(default_factory=list)
-    total_frames: int = Field(..., ge=0)
-    fps: float = Field(..., ge=0)
-    recorded_at: Optional[datetime] = None
+    camera_id: Optional[str] = Field(None, description="None = aggregate all cameras for the store")
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+    granularity: Granularity = "hour"
 
 
-class IngestAck(BaseModel):
+class AggregateAck(BaseModel):
     accepted: bool = True
 
 

@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Path
 
 from app.schemas import (
     AlertRuleCreate, AlertRule,
-    TrackingEvent, AlertResult,
+    AlertEvaluateRequest, AlertResult,
     Alert, AlertUpdate,
     HealthResponse,
 )
@@ -65,11 +65,12 @@ async def delete_rule(rule_id: str = Path(...)):
 # ── Evaluation ───────────────────────────────────────────────────────────────
 
 @app.post("/alerts/evaluate", response_model=List[AlertResult])
-async def evaluate(event: TrackingEvent):
-    """Evaluate all enabled rules against a tracking event.
+async def evaluate(request: AlertEvaluateRequest):
+    """Read FrameRecord rows from the DB for the given store/camera/frame window and evaluate rules.
     Stub — returns empty list until rule engine is implemented."""
     results: List[AlertResult] = []
-    # TODO: iterate _rules, check conditions, emit AlertResults
+    # TODO: query DB for FrameRecord rows matching request.store_id / camera_id / frame range
+    # TODO: iterate _rules, check conditions against DB data, emit AlertResults
     return results
 
 
