@@ -5,6 +5,7 @@
  * and edit zones, obstacles, and cameras inline.
  */
 import React, { useState, useEffect, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   listStores, setCurrentStoreId,
   updateZone, deleteZone,
@@ -254,16 +255,25 @@ function ConfigPanel({ storeId }) {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function StoreConfig() {
+  const [searchParams] = useSearchParams()
   const [stores, setStores] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [loadingStores, setLoadingStores] = useState(true)
 
   useEffect(() => {
     listStores()
-      .then(s => { setStores(s); if (s.length === 1) setSelectedId(s[0].id) })
+      .then(s => {
+        setStores(s)
+        const paramId = searchParams.get('store')
+        if (paramId && s.find(x => x.id === paramId)) {
+          setSelectedId(paramId)
+        } else if (s.length === 1) {
+          setSelectedId(s[0].id)
+        }
+      })
       .catch(() => {})
       .finally(() => setLoadingStores(false))
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const selected = stores.find(s => s.id === selectedId)
 

@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import useStore from '../store'
 import {
   saveProject, loadProject,
@@ -168,12 +169,14 @@ function CamerasSection({ cameras, updateCamera: patchCamera, removeCamera }) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 export default function Step8_Save() {
+  const navigate = useNavigate()
   const store = useStore()
   const {
     setStep,
     loadProject: hydrateProject,
     floorPlanWidth, floorPlanHeight, pixelsPerMeter, origin,
     zones, obstacles, cameras,
+    activeStoreName,
     updateZone, removeZone,
     updateObstacle, removeObstacle,
     updateCamera, removeCamera,
@@ -287,15 +290,58 @@ export default function Step8_Save() {
         </button>
       </div>
 
-      {saved && <p className="mt-3 text-green-600 text-sm font-medium">✓ Configuration saved to database.</p>}
       {error && <p className="mt-3 text-red-600 text-sm">{error}</p>}
 
-      <div className="mt-6 flex justify-between">
-        <button onClick={() => setStep(7)} className="px-4 py-2 text-gray-600 border rounded-lg hover:bg-gray-50">← Back</button>
-        <button onClick={() => setStep(9)} className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition">
-          Next: Test Mode & Heatmap →
-        </button>
-      </div>
+      {!saved && (
+        <div className="mt-6 flex justify-between">
+          <button onClick={() => setStep(7)} className="px-4 py-2 text-gray-600 border rounded-lg hover:bg-gray-50">← Back</button>
+        </div>
+      )}
+
+      {saved && (
+        <div className="mt-8 bg-green-50 border border-green-200 rounded-2xl p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <span className="text-3xl">✅</span>
+            <div>
+              <h3 className="text-lg font-bold text-green-800">Store setup complete!</h3>
+              <p className="text-sm text-green-600">{activeStoreName} is ready to use.</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 mb-6 text-center">
+            <div className="bg-white rounded-xl border border-green-100 py-3 px-2">
+              <p className="text-2xl font-bold text-gray-800">{cameras.length}</p>
+              <p className="text-xs text-gray-500 mt-0.5">Camera{cameras.length !== 1 ? 's' : ''}</p>
+            </div>
+            <div className="bg-white rounded-xl border border-green-100 py-3 px-2">
+              <p className="text-2xl font-bold text-gray-800">{zones.length}</p>
+              <p className="text-xs text-gray-500 mt-0.5">Zone{zones.length !== 1 ? 's' : ''}</p>
+            </div>
+            <div className="bg-white rounded-xl border border-green-100 py-3 px-2">
+              <p className="text-2xl font-bold text-gray-800">{pixelsPerMeter ? `${pixelsPerMeter.toFixed(0)}` : '—'}</p>
+              <p className="text-xs text-gray-500 mt-0.5">px / metre</p>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-3">
+            <button
+              onClick={() => navigate(`/config?store=${store.activeStoreId}`)}
+              className="flex-1 px-5 py-3 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-700 transition text-sm"
+            >
+              Go to Store Config →
+            </button>
+            <button
+              onClick={() => setStep(9)}
+              className="flex-1 px-5 py-3 bg-white border border-gray-300 text-gray-700 rounded-xl font-medium hover:bg-gray-50 transition text-sm"
+            >
+              Optionally run tracking test
+            </button>
+          </div>
+          <p className="text-xs text-gray-400 mt-3 text-center">
+            The tracking test is optional — you can always run it later from Store Config.
+          </p>
+        </div>
+      )}
     </div>
   )
 }
