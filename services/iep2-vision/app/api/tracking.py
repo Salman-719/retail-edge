@@ -88,13 +88,14 @@ async def start_tracking(
     # Persist job metadata to Redis so _persist_results can use it
     from app.core.redis_client import sync_redis
     sync_redis.update_job(camera_id,
-        zones=payload.zones,
+        zones=[z.model_dump() for z in payload.zones],
         pixels_per_meter=payload.pixels_per_meter,
-        origin_px=payload.origin_px or {"x": 0, "y": 0},
+        origin_px=(payload.origin_px.model_dump() if payload.origin_px else {"x": 0, "y": 0}),
         projection_method=payload.projection_method,
         world_bounds=json.dumps(payload.world_bounds) if payload.world_bounds else "{}",
     )
 
+    zones_as_dicts = [z.model_dump() for z in payload.zones]
     thread = threading.Thread(
         target=run_tracking_job,
         args=(
@@ -103,7 +104,7 @@ async def start_tracking(
             store_id,
             video_path,
             payload.homography_matrix,
-            payload.zones,
+            zones_as_dicts,
             payload.pixels_per_meter,
             payload.model_size,
             payload.projection_method,

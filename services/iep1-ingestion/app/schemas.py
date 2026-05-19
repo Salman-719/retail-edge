@@ -58,3 +58,23 @@ class FrameExtractionResponse(BaseModel):
     video_height: int = Field(..., ge=0)
     frames: List[FrameInfo]
     total_frames: int = Field(..., ge=0, description="Number of sampled frames = len(frames)")
+
+
+# ── Video chunking ────────────────────────────────────────────────────────────
+
+class ChunkInfo(BaseModel):
+    """Metadata for a single video chunk stored in S3."""
+    chunk_idx: int = Field(..., ge=0)
+    s3_key: str
+    start_sec: float = Field(..., ge=0)
+    end_sec: float = Field(..., ge=0)
+    total_frames: int = Field(..., ge=0)
+    accepted_frames: int = Field(..., ge=0)
+    rejected_frames: int = Field(..., ge=0)
+
+
+class ChunkResponse(BaseModel):
+    """Returned after splitting a video into chunks."""
+    camera_id: str
+    chunks: List[ChunkInfo]
+    total_chunks: int = Field(..., ge=0)

@@ -57,10 +57,8 @@ StartStatus = Literal["started", "already_running"]
 
 
 class TrackingStartRequest(BaseModel):
-    """Sent by EEP to start a tracking job over pre-extracted frames from IEP1."""
-    frame_s3_keys: List[str] = Field(..., description="Ordered JPEG frame S3 keys produced by IEP1")
-    sample_fps: float = Field(5.0, ge=0, description="Frame rate of the sampled sequence")
-    camera_id: str
+    """Sent by EEP to start a tracking job on a video uploaded via IEP1."""
+    video_s3_key: str = Field(..., description="S3 key of the uploaded video produced by IEP1")
     store_id: str
     floor_plan_s3_key: Optional[str] = None
 
@@ -101,8 +99,9 @@ class TrackingProgressResponse(BaseModel):
     status: JobStatus
     progress: int = Field(..., ge=0, le=100, description="Percent complete")
     total_frames: int = Field(..., ge=0)
-    frames_written: int = Field(..., ge=0, description="Frame rows committed to DB so far")
     error: Optional[str] = None
+    zone_occupancy: Optional[Dict[str, dict]] = None
+    heatmap_url: Optional[str] = None
 
 
 # ── Per-frame DB record ───────────────────────────────────────────────────────
@@ -131,14 +130,29 @@ class FrameRecord(BaseModel):
     people_count: int = Field(..., ge=0, description="Number of tracked persons in this frame")
 
 
+# ── Trajectory ───────────────────────────────────────────────────────────────
+
+class TrajectoryPoint(BaseModel):
+    frameIdx: int
+    x: float
+    y: float
+    trackId: int
+    personType: str
+    employeeId: Optional[str] = None
+
+
+class TrajectoryResponse(BaseModel):
+    trajectory: List[TrajectoryPoint]
+
+
 # ── Enrollment ────────────────────────────────────────────────────────────────
 
 EnrollmentStatus = Literal["enrolled", "failed"]
 
 
 class EnrollmentRequest(BaseModel):
-    """Request to enroll an employee using sampled frames from IEP1."""
-    frame_s3_keys: List[str] = Field(..., description="Frame S3 keys to extract ReID crops from")
+    """Request to enroll an employee using a video uploaded via IEP1."""
+    video_s3_key: str = Field(..., description="S3 key of the enrollment video")
     employee_id: str
     store_id: str
     sample_count: int = Field(20, ge=1, description="Number of crops to extract")
