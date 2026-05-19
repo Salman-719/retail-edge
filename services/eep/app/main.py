@@ -8,7 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.core.config import settings
-from app.core.database import engine, Base
 from app.core.s3_client import s3_client
 
 logging.basicConfig(level=logging.INFO)
@@ -20,20 +19,11 @@ async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
     logger.info("EEP starting — initialising infrastructure…")
 
-    # Import all model modules so SQLAlchemy registers every table before create_all
-    import app.models  # noqa: F401
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables ready.")
-
     s3_client.ensure_bucket()
     logger.info("S3 bucket ready.")
 
     yield
 
-    # ── Shutdown ─────────────────────────────────────────────────────────────
-    await engine.dispose()
     logger.info("EEP shutdown complete.")
 
 
