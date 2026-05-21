@@ -1,55 +1,65 @@
 import React from 'react'
-import { NavLink, useNavigate } from 'react-router-dom'
+import { NavLink, useNavigate, useParams } from 'react-router-dom'
+import { useAuth } from '../store'
+import { logout } from '../api'
 
-const NAV_ITEMS = [
-  { path: '/', label: 'Store Onboarding', icon: '🏪' },
-  { path: '/config', label: 'Store Config', icon: '⚙️' },
-  { path: '/live-monitoring', label: 'Live Monitoring', icon: '📹' },
-  { path: '/analytics', label: 'Analytics', icon: '📊' },
-  { path: '/ai-agent', label: 'AI Agent', icon: '🤖' },
+const NAV = [
+  { label: 'Store Config', path: 'config' },
+  { label: 'Live Monitoring', path: 'live' },
+  { label: 'Analytics', path: 'analytics' },
+  { label: 'Employees', path: 'employees' },
+  { label: 'Members', path: 'members' },
+  { label: 'Audit Log', path: 'audit' },
+  { label: 'Settings', path: 'settings' },
 ]
 
 export default function Sidebar() {
+  const { slug } = useParams()
+  const { state, dispatch } = useAuth()
   const navigate = useNavigate()
 
-  const handleLogout = () => {
-    sessionStorage.removeItem('rv_logged_in')
-    navigate('/login')
+  async function handleLogout() {
+    try {
+      if (state.tokens?.refresh_token) await logout(state.tokens.refresh_token)
+    } finally {
+      dispatch({ type: 'LOGOUT' })
+      navigate('/login')
+    }
   }
 
   return (
-    <aside className="w-56 flex flex-col py-6 px-3 shrink-0" style={{ background: '#1B3A5C' }}>
-      <div className="mb-8 px-2">
-        <h1 className="text-lg font-bold text-white leading-tight">RetailVision AI</h1>
-        <p className="text-xs text-blue-300 mt-0.5">Analytics Platform</p>
+    <aside className="w-56 min-h-screen flex flex-col shrink-0" style={{ backgroundColor: '#1B3A5C' }}>
+      <div className="px-4 py-5 border-b border-blue-900">
+        <h1 className="text-white font-bold text-sm leading-tight">RetailVision AI</h1>
+        {state.currentStore && (
+          <p className="text-blue-300 text-xs mt-0.5 truncate">{state.currentStore.name}</p>
+        )}
       </div>
 
-      <nav className="flex flex-col gap-1 flex-1">
-        {NAV_ITEMS.map(item => (
+      <nav className="flex-1 py-3 px-2 flex flex-col gap-0.5">
+        {NAV.map(({ label, path }) => (
           <NavLink
-            key={item.path}
-            to={item.path}
-            end={item.path === '/'}
+            key={path}
+            to={`/store/${slug}/${path}`}
             className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+              `block px-3 py-2 rounded-lg text-sm transition-colors ${
                 isActive
                   ? 'bg-blue-600 text-white font-semibold'
-                  : 'text-blue-200 hover:bg-blue-900'
+                  : 'text-blue-200 hover:bg-blue-900 hover:text-white'
               }`
             }
           >
-            <span>{item.icon}</span>
-            <span>{item.label}</span>
+            {label}
           </NavLink>
         ))}
       </nav>
 
-      <div className="pt-4 border-t border-blue-900">
+      <div className="px-2 py-3 border-t border-blue-900">
         <button
           onClick={handleLogout}
-          className="w-full text-xs px-3 py-2 rounded-lg text-left text-blue-300 hover:bg-blue-800 transition flex items-center gap-2"
+          className="w-full text-left px-3 py-2 rounded-lg text-sm text-blue-300 hover:bg-blue-800 hover:text-white transition-colors"
         >
-          <span>🚪</span> Sign Out
+          Sign Out
         </button>
       </div>
     </aside>

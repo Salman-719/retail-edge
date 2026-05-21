@@ -100,6 +100,8 @@ CREATE TABLE invitations (
     role          VARCHAR(20) NOT NULL CHECK (role IN ('manager', 'viewer')),
     access_scope  VARCHAR(20) NOT NULL DEFAULT 'full_store'
                   CHECK (access_scope IN ('full_store', 'section_scoped')),
+    section_ids   JSONB NOT NULL DEFAULT '[]',
+    permissions   JSONB NOT NULL DEFAULT '{}',
     token         VARCHAR(255) UNIQUE NOT NULL,
     invited_by    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at    TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '3 days'),
@@ -123,13 +125,14 @@ CREATE TABLE audit_logs (
     store_id     UUID REFERENCES stores(id) ON DELETE SET NULL,
     user_id      UUID REFERENCES users(id) ON DELETE SET NULL,
     action       VARCHAR(50) NOT NULL CHECK (action IN (
+                     'login', 'logout',
                      'config_edited', 'version_activated', 'version_rolled_back',
                      'member_invited', 'member_removed', 'member_role_changed',
                      'permission_changed', 'password_reset',
                      'employee_created', 'employee_updated', 'employee_deleted',
                      'shift_created', 'shift_updated', 'shift_deleted',
                      'store_created', 'store_updated',
-                     'draft_expired'
+                     'draft_created', 'draft_discarded', 'draft_expired'
                  )),
     entity_type  VARCHAR(50),
     entity_id    UUID,
@@ -152,8 +155,7 @@ CREATE TABLE store_config_versions (
     active_from        TIMESTAMPTZ,
     active_until       TIMESTAMPTZ,
     last_edited_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at         TIMESTAMPTZ GENERATED ALWAYS AS
-                           (last_edited_at + INTERVAL '48 hours') STORED,
+    expires_at         TIMESTAMPTZ,
     warning_sent_at    TIMESTAMPTZ,
     created_by         UUID NOT NULL REFERENCES users(id),
     activated_by       UUID REFERENCES users(id),

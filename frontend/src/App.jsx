@@ -1,30 +1,54 @@
 import React from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
+import { AuthProvider } from './store'
+import PrivateRoute from './components/PrivateRoute'
+import StoreLayout from './components/StoreLayout'
+
+import Login from './pages/Login'
+import Register from './pages/Register'
+import AcceptInvite from './pages/AcceptInvite'
+import OwnerDashboard from './pages/OwnerDashboard'
+
 import StoreConfig from './pages/StoreConfig'
 import LiveMonitoring from './pages/LiveMonitoring'
 import Analytics from './pages/Analytics'
-import AIAgent from './pages/AIAgent'
-import Sidebar from './components/Sidebar'
-
-function AppLayout({ children }) {
-  return (
-    <div className="flex min-h-screen bg-gray-50">
-      <Sidebar />
-      <main className="flex-1 flex flex-col overflow-hidden">
-        {children}
-      </main>
-    </div>
-  )
-}
+import Employees from './pages/Employees'
+import Members from './pages/Members'
+import Audit from './pages/Audit'
+import Settings from './pages/Settings'
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/live-monitoring" element={<AppLayout><LiveMonitoring /></AppLayout>} />
-      <Route path="/analytics" element={<AppLayout><Analytics /></AppLayout>} />
-      <Route path="/ai-agent" element={<AppLayout><AIAgent /></AppLayout>} />
-      <Route path="/config" element={<AppLayout><StoreConfig /></AppLayout>} />
-      <Route path="*" element={<Navigate to="/config" replace />} />
-    </Routes>
+    <AuthProvider>
+      <Routes>
+        {/* Public */}
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route path="/accept-invite" element={<AcceptInvite />} />
+
+        {/* Owner dashboard */}
+        <Route path="/dashboard" element={<PrivateRoute><OwnerDashboard /></PrivateRoute>} />
+
+        {/* Store-scoped */}
+        <Route path="/store/:slug" element={<PrivateRoute><StoreLayout /></PrivateRoute>}>
+          <Route index element={<Navigate to="live" replace />} />
+          <Route path="dashboard" element={<Navigate to="live" replace />} />
+          <Route path="config" element={<StoreConfig />} />
+          <Route path="live" element={<LiveMonitoring />} />
+          <Route path="analytics" element={<Analytics />} />
+          <Route path="employees" element={<Employees />} />
+          <Route path="members" element={<Members />} />
+          <Route path="audit" element={<Audit />} />
+          <Route path="settings" element={<Settings />} />
+        </Route>
+
+        {/* Store invite acceptance */}
+        <Route path="/store/:slug/accept-invite" element={<AcceptInvite />} />
+
+        {/* Default */}
+        <Route path="/" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    </AuthProvider>
   )
 }

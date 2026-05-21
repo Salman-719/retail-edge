@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose *)",
+      "Bash(curl -s http://localhost:8000/api/auth/register -X POST -H \"Content-Type: application/json\" -d \"{\\\\\"name\\\\\":\\\\\"Test\\\\\",\\\\\"email\\\\\":\\\\\"test@example.com\\\\\",\\\\\"password\\\\\":\\\\\"testpass123\\\\\"}\")",
+      "Bash(curl -s -X POST http://localhost:8000/api/auth/register -H \"Content-Type: application/json\" -d \"{\\\\\"name\\\\\":\\\\\"Test Owner\\\\\",\\\\\"email\\\\\":\\\\\"owner@test.com\\\\\",\\\\\"password\\\\\":\\\\\"testpass123\\\\\"}\")",
+      "Bash(curl -s -X POST http://localhost:8000/api/auth/login -H \"Content-Type: application/json\" -d \"{\\\\\"email\\\\\":\\\\\"owner@test.com\\\\\",\\\\\"password\\\\\":\\\\\"testpass123\\\\\"}\")",
+      "Bash(docker volume *)"
+    ]
+  }
+}

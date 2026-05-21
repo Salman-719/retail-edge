@@ -87,6 +87,24 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
+      S3_BUCKET: ${S3_BUCKET:-retailvision}
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   iep1-ingestion:
     build:
