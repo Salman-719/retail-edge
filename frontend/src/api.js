@@ -1,8 +1,11 @@
 /**
- * RetailVision API client — store-scoped.
+ * RetailVision API client — store-scoped stubs.
  *
- * Call setCurrentStoreId(id) once a store is selected before
- * invoking any store-scoped function.
+ * All functions are skeleton signatures. Implement each by making the
+ * appropriate fetch() call to the EEP service (proxied at /api by nginx).
+ *
+ * Call setCurrentStoreId(id) once a store is selected before invoking
+ * any store-scoped function.
  */
 
 let _storeId = null
@@ -23,261 +26,141 @@ async function _json(r) {
 // ─── Stores ──────────────────────────────────────────────────────────────────
 
 export async function listStores() {
-  return _json(await fetch('/api/stores'))
+  // TODO: GET /api/stores → return array of store objects
+  throw new Error('Not implemented')
 }
 
 export async function createStore(name, onboardingMethod = 'standard') {
-  return _json(await fetch('/api/stores', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, onboarding_method: onboardingMethod }),
-  }))
+  // TODO: POST /api/stores {name, onboarding_method} → return created store
+  throw new Error('Not implemented')
 }
 
 // ─── Floor plan ──────────────────────────────────────────────────────────────
 
 export async function uploadFloorplan(file) {
-  const fd = new FormData()
-  fd.append('file', file)
-  const data = await _json(await fetch(`${base()}/floor-plan/upload`, { method: 'POST', body: fd }))
-  // Normalise to the shape Step1 expects (FloorPlanResponse has no url field — construct it)
-  return {
-    url: `/api/stores/${_storeId}/floor-plan/image`,
-    width: data.width_px,
-    height: data.height_px,
-    notice: null,
-  }
+  // TODO: POST ${base()}/floor-plan/upload multipart → return {url, width, height}
+  throw new Error('Not implemented')
 }
 
 export async function saveScale({ originPx, scalePoint1Px, scalePoint2Px, realWorldDistanceM, pixelsPerMeter }) {
-  // ScaleConfig schema uses nested Point objects
-  return _json(await fetch(`${base()}/floor-plan/scale`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      origin_px: { x: originPx.x, y: originPx.y },
-      scale_point1_px: { x: scalePoint1Px.x, y: scalePoint1Px.y },
-      scale_point2_px: { x: scalePoint2Px.x, y: scalePoint2Px.y },
-      real_world_distance_m: realWorldDistanceM,
-      pixels_per_meter: pixelsPerMeter,
-    }),
-  }))
+  // TODO: PUT ${base()}/floor-plan/scale {origin_px, scale_point1_px, scale_point2_px, real_world_distance_m, pixels_per_meter}
+  throw new Error('Not implemented')
+}
+
+export async function saveWorldBounds(bounds) {
+  // TODO: PUT ${base()}/floor-plan/world-bounds {world_x_min, world_x_max, world_y_min, world_y_max}
+  throw new Error('Not implemented')
 }
 
 // ─── Zones ───────────────────────────────────────────────────────────────────
 
 export async function createZone(zone) {
-  return _json(await fetch(`${base()}/zones`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: zone.id, name: zone.name, type: zone.type, points: zone.points }),
-  }))
+  // TODO: POST ${base()}/zones {id, name, type, points}
+  throw new Error('Not implemented')
 }
 
 export async function updateZone(id, patch) {
-  return _json(await fetch(`${base()}/zones/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(patch),
-  }))
+  // TODO: PUT ${base()}/zones/${id} patch
+  throw new Error('Not implemented')
 }
 
 export async function deleteZone(id) {
-  const r = await fetch(`${base()}/zones/${id}`, { method: 'DELETE' })
-  if (!r.ok) throw new Error(await r.text())
+  // TODO: DELETE ${base()}/zones/${id}
+  throw new Error('Not implemented')
 }
 
 // ─── Obstacles ───────────────────────────────────────────────────────────────
 
 export async function createObstacle(obs) {
-  return _json(await fetch(`${base()}/obstacles`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: obs.id, name: obs.name, points: obs.points }),
-  }))
+  // TODO: POST ${base()}/obstacles {id, name, points}
+  throw new Error('Not implemented')
+}
+
+export async function updateObstacle(id, patch) {
+  // TODO: PUT ${base()}/obstacles/${id} patch
+  throw new Error('Not implemented')
 }
 
 export async function deleteObstacle(id) {
-  const r = await fetch(`${base()}/obstacles/${id}`, { method: 'DELETE' })
-  if (!r.ok) throw new Error(await r.text())
+  // TODO: DELETE ${base()}/obstacles/${id}
+  throw new Error('Not implemented')
 }
 
 // ─── Cameras ─────────────────────────────────────────────────────────────────
 
 export async function createCamera(cam) {
-  return _json(await fetch(`${base()}/cameras`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      id: cam.id,
-      name: cam.name,
-      position_x: cam.position?.x,
-      position_y: cam.position?.y,
-      height_meters: cam.heightMeters,
-    }),
-  }))
+  // TODO: POST ${base()}/cameras {id, name, position_x, position_y, height_meters}
+  throw new Error('Not implemented')
 }
 
 export async function updateCamera(cameraId, patch) {
-  return _json(await fetch(`${base()}/cameras/${cameraId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(patch),
-  }))
+  // TODO: PUT ${base()}/cameras/${cameraId} patch
+  throw new Error('Not implemented')
 }
 
 export async function deleteCamera(cameraId) {
-  const r = await fetch(`${base()}/cameras/${cameraId}`, { method: 'DELETE' })
-  if (!r.ok) throw new Error(await r.text())
+  // TODO: DELETE ${base()}/cameras/${cameraId}
+  throw new Error('Not implemented')
 }
 
-export async function updateObstacle(obsId, patch) {
-  return _json(await fetch(`${base()}/obstacles/${obsId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(patch),
-  }))
+export async function listCamerasWithCalibration() {
+  // TODO: GET ${base()}/cameras → map to {id, name, calibration: {method, intrinsic_matrix, ...}}
+  throw new Error('Not implemented')
 }
+
+// ─── Videos ──────────────────────────────────────────────────────────────────
 
 export async function uploadVideo(cameraId, file) {
-  const fd = new FormData()
-  fd.append('file', file)
-  const data = await _json(await fetch(`${base()}/cameras/${cameraId}/video`, { method: 'POST', body: fd }))
-  return {
-    videoPath: data.video_s3_key,
-    duration: data.video_duration,
-    fps: data.video_fps,
-    width: data.video_width,
-    height: data.video_height,
-  }
+  // TODO: POST ${base()}/cameras/${cameraId}/video multipart
+  //       → return {videoPath, duration, fps, width, height}
+  throw new Error('Not implemented')
 }
 
 export async function getVideoFrame(cameraId, timestampSec) {
-  const r = await fetch(`${base()}/cameras/${cameraId}/frame?timestamp_sec=${timestampSec}`)
-  if (!r.ok) throw new Error(await r.text())
-  return URL.createObjectURL(await r.blob())
+  // TODO: GET ${base()}/cameras/${cameraId}/frame?timestamp_sec=${timestampSec}
+  //       → return object URL for JPEG blob
+  throw new Error('Not implemented')
 }
 
 // ─── Calibration Files (Method 2) ────────────────────────────────────────────
 
-/**
- * Fetch all cameras for the current store including their full calibration matrices
- * (intrinsic_matrix, rotation_matrix, translation_vector, image size).
- * Used by CalibStep2 to do client-side pixel→world projection.
- */
-export async function listCamerasWithCalibration() {
-  const cameras = await _json(await fetch(`${base()}/cameras`))
-  return (cameras ?? []).map(c => ({
-    id: c.id,
-    name: c.name,
-    calibration: c.calibration
-      ? {
-          method: c.calibration.method,
-          intrinsic_matrix: c.calibration.intrinsic_matrix,
-          rotation_matrix: c.calibration.rotation_matrix,
-          translation_vector: c.calibration.translation_vector,
-          image_width: c.calibration.image_width,
-          image_height: c.calibration.image_height,
-        }
-      : null,
-  }))
-}
-
-/**
- * Parse intr_*.xml + extr_*.xml server-side. No DB write.
- * @param {string} cameraId  (unused by the endpoint URL, kept for caller context)
- * @param {File}   intrFile  Intrinsic XML file
- * @param {File}   extrFile  Extrinsic XML file
- * @param {number} scaleFactor  Multiplier applied to tvec (e.g. 0.001 for mm→m)
- */
 export async function parseCalibrationFiles(cameraId, intrFile, extrFile, scaleFactor = 1.0) {
-  const fd = new FormData()
-  fd.append('intr_file', intrFile)
-  fd.append('extr_file', extrFile)
-  fd.append('scale_factor', scaleFactor)
-  return _json(await fetch(`${base()}/calibration-files/parse`, { method: 'POST', body: fd }))
+  // TODO: POST ${base()}/calibration-files/parse multipart {intr_file, extr_file, scale_factor}
+  //       → return parsed intrinsic + extrinsic matrices
+  throw new Error('Not implemented')
 }
 
-/**
- * Persist previously-parsed calibration data to the DB for the given camera.
- */
 export async function saveCalibrationFiles(cameraId, parsedData) {
-  return _json(await fetch(`${base()}/cameras/${cameraId}/calibration-files`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(parsedData),
-  }))
+  // TODO: POST ${base()}/cameras/${cameraId}/calibration-files JSON parsedData
+  throw new Error('Not implemented')
 }
 
-/**
- * Auto-compute world bounds from all calibrated cameras (Method 2).
- */
 export async function getWorldBoundsFromCameras() {
-  return _json(await fetch(`${base()}/calibration-files/world-bounds-from-cameras`))
+  // TODO: GET ${base()}/calibration-files/world-bounds-from-cameras
+  //       → return {xMin, xMax, yMin, yMax} computed from all calibrated cameras
+  throw new Error('Not implemented')
 }
 
-/**
- * Save world bounds for the virtual map canvas (Method 2).
- * @param {{ xMin, xMax, yMin, yMax }} bounds  World metres
- */
-export async function saveWorldBounds(bounds) {
-  return _json(await fetch(`${base()}/floor-plan/world-bounds`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      world_x_min: bounds.xMin,
-      world_x_max: bounds.xMax,
-      world_y_min: bounds.yMin,
-      world_y_max: bounds.yMax,
-    }),
-  }))
-}
+// ─── Homography Calibration (Method 1) ───────────────────────────────────────
 
-// ─── Calibration ─────────────────────────────────────────────────────────────
-
-/**
- * Step7 calls: computeHomography(cam.id, corr.map(c => c.camPx), corr.map(c => c.floorM))
- * Returns a normalised result shape.
- */
 export async function computeHomography(cameraId, camPoints, floorPoints) {
-  const correspondences = camPoints.map((cp, i) => ({
-    camPx: { x: cp.x, y: cp.y },
-    floorM: { x: floorPoints[i].x, y: floorPoints[i].y },
-  }))
-  const data = await _json(await fetch(`${base()}/cameras/${cameraId}/calibrate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ correspondences }),
-  }))
-  return {
-    status: data.status,
-    matrix: data.homography_matrix,
-    reprojectionError: data.reprojection_error,
-    perPointErrors: data.per_point_errors ?? null,
-  }
+  // TODO: POST ${base()}/cameras/${cameraId}/calibrate
+  //       body: {correspondences: [{camPx: {x,y}, floorM: {x,y}}, ...]}
+  //       → return {status, matrix, reprojectionError, perPointErrors}
+  throw new Error('Not implemented')
 }
 
 // ─── Tracking ────────────────────────────────────────────────────────────────
 
 export async function startTracking(storeId, cameraId, modelSize = 'yolov8n') {
-  return _json(await fetch(
-    `/api/stores/${storeId}/cameras/${cameraId}/tracking/start?model_size=${modelSize}`,
-    { method: 'POST' },
-  ))
+  // TODO: POST /api/stores/${storeId}/cameras/${cameraId}/tracking/start?model_size=${modelSize}
+  throw new Error('Not implemented')
 }
 
 export async function getTrackingProgress(storeId, cameraId) {
-  const data = await _json(await fetch(`/api/stores/${storeId}/cameras/${cameraId}/tracking/progress`))
-  // Normalise to the shape Step9 expects
-  return {
-    status: data.status,
-    progress: (data.progress ?? 0) / 100,   // Step9 expects 0..1
-    processedFrames: Math.round(((data.progress ?? 0) / 100) * (data.total_frames ?? 0)),
-    totalFrames: data.total_frames ?? 0,
-    zoneOccupancy: data.zone_occupancy ?? {},
-    heatmapUrl: data.heatmap_url ?? null,
-    error: data.error ?? null,
-  }
+  // TODO: GET /api/stores/${storeId}/cameras/${cameraId}/tracking/progress
+  //       → normalise to {status, progress (0..1), processedFrames, totalFrames, zoneOccupancy, heatmapUrl, error}
+  throw new Error('Not implemented')
 }
 
 export function trackingStreamUrl(storeId, cameraId, key = 0) {
@@ -285,149 +168,26 @@ export function trackingStreamUrl(storeId, cameraId, key = 0) {
 }
 
 export async function getTrajectory(storeId, cameraId) {
-  const data = await _json(await fetch(`/api/stores/${storeId}/cameras/${cameraId}/tracking/trajectory`))
-  return data.trajectory ?? []
+  // TODO: GET /api/stores/${storeId}/cameras/${cameraId}/tracking/trajectory
+  //       → return data.trajectory array
+  throw new Error('Not implemented')
 }
 
-// ─── Project save / load (Step8) ─────────────────────────────────────────────
+// ─── Project save / load ─────────────────────────────────────────────────────
 
-/**
- * Persist the full Zustand project state to the new backend.
- * Called by Step8 "Save Project".
- */
 export async function saveProject(data) {
-  const errors = []
-
-  // 1. Scale config
-  if (data.scale) {
-    try {
-      await saveScale({
-        originPx: data.scale.originPx,
-        scalePoint1Px: data.scale.scalePoint1Px,
-        scalePoint2Px: data.scale.scalePoint2Px,
-        realWorldDistanceM: data.scale.realWorldDistanceM,
-        pixelsPerMeter: data.scale.pixelsPerMeter,
-      })
-    } catch (e) {
-      errors.push(`Scale: ${e.message}`)
-    }
-  }
-
-  // 2. Zones — upsert, then purge any DB zones not in local state
-  for (const zone of data.zones ?? []) {
-    try { await createZone(zone) } catch (_) {}
-  }
-  try {
-    const dbZones = await fetch(`${base()}/zones`).then(r => r.ok ? r.json() : [])
-    const localIds = new Set((data.zones ?? []).map(z => z.id))
-    for (const z of dbZones) {
-      if (!localIds.has(z.id)) await deleteZone(z.id).catch(() => {})
-    }
-  } catch (_) {}
-
-  // 3. Obstacles — upsert, then purge
-  for (const obs of data.obstacles ?? []) {
-    try { await createObstacle(obs) } catch (_) {}
-  }
-  try {
-    const dbObs = await fetch(`${base()}/obstacles`).then(r => r.ok ? r.json() : [])
-    const localIds = new Set((data.obstacles ?? []).map(o => o.id))
-    for (const o of dbObs) {
-      if (!localIds.has(o.id)) await deleteObstacle(o.id).catch(() => {})
-    }
-  } catch (_) {}
-
-  // 4. Cameras — upsert, then purge
-  for (const cam of data.cameras ?? []) {
-    try { await createCamera(cam) } catch (_) {}
-    if (data.onboardingMethod === 'calibration') {
-      // Method 2: calibration was already persisted during CalibStep1 — nothing to do here
-    } else if (cam.homographyMatrix && cam.correspondences?.length >= 4) {
-      try {
-        await computeHomography(
-          cam.id,
-          cam.correspondences.map(c => c.camPx),
-          cam.correspondences.map(c => c.floorM),
-        )
-      } catch (_) {}
-    }
-  }
-  try {
-    const dbCams = await fetch(`${base()}/cameras`).then(r => r.ok ? r.json() : [])
-    const localIds = new Set((data.cameras ?? []).map(c => c.id))
-    for (const c of dbCams) {
-      if (!localIds.has(c.id)) await deleteCamera(c.id).catch(() => {})
-    }
-  } catch (_) {}
-
-  if (errors.length) throw new Error(errors.join('; '))
-  return { ok: true }
+  // TODO: persist full Zustand project state to backend in sequence:
+  //   1. saveScale() if data.scale is set
+  //   2. createZone() for each zone, then deleteZone() for any DB zones not in local state
+  //   3. createObstacle() for each obstacle, then purge stale DB obstacles
+  //   4. createCamera() for each camera + computeHomography() if correspondences are present
+  //   5. Collect errors and throw if any step failed
+  throw new Error('Not implemented')
 }
 
-/**
- * Load project state from the backend and return it in the shape
- * that Zustand's loadProject() expects.
- * Makes separate calls: floor-plan, zones, obstacles, cameras.
- */
 export async function loadProject() {
-  try {
-    const [fp, zones, obstacles, cameras] = await Promise.all([
-      fetch(`${base()}/floor-plan`).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`${base()}/zones`).then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch(`${base()}/obstacles`).then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch(`${base()}/cameras`).then(r => r.ok ? r.json() : []).catch(() => []),
-    ])
-
-    // Detect method from floor plan data
-    const isCalibMethod = fp?.world_x_min != null
-    const onboardingMethod = isCalibMethod ? 'calibration' : 'standard'
-
-    return {
-      version: '1.0',
-      savedAt: new Date().toISOString(),
-      onboardingMethod,
-      worldBounds: isCalibMethod ? {
-        xMin: fp.world_x_min,
-        xMax: fp.world_x_max,
-        yMin: fp.world_y_min,
-        yMax: fp.world_y_max,
-      } : null,
-      floorPlan: fp?.s3_key ? {
-        url: `/api/stores/${_storeId}/floor-plan/image`,
-        widthPx: fp.width_px,
-        heightPx: fp.height_px,
-      } : null,
-      scale: (fp?.pixels_per_meter && !isCalibMethod) ? {
-        originPx: { x: fp.origin_x, y: fp.origin_y },
-        scalePoint1Px: { x: fp.scale_point1_x, y: fp.scale_point1_y },
-        scalePoint2Px: { x: fp.scale_point2_x, y: fp.scale_point2_y },
-        realWorldDistanceM: fp.real_world_distance_m,
-        pixelsPerMeter: fp.pixels_per_meter,
-      } : null,
-      zones: zones ?? [],
-      obstacles: obstacles ?? [],
-      cameras: (cameras ?? []).map(c => ({
-        id: c.id,
-        name: c.name,
-        position: { x: c.position_x ?? 0, y: c.position_y ?? 0 },
-        heightMeters: c.height_meters ?? 0,
-        videoDuration: c.video_duration ?? null,
-        videoFps: c.video_fps ?? null,
-        videoWidth: c.video_width ?? null,
-        videoHeight: c.video_height ?? null,
-        homographyMatrix: c.calibration?.homography_matrix ?? null,
-        reprojectionError: c.calibration?.reprojection_error ?? null,
-        homographyStatus: c.calibration?.status ?? null,
-        correspondences: c.calibration?.correspondences ?? [],
-        // Method 2 calibration fields
-        calibrationMethod: c.calibration?.method ?? null,
-        calibrationStatus: c.calibration?.status ?? null,
-        cameraWorldXYZ: (c.calibration?.camera_world_x != null)
-          ? [c.calibration.camera_world_x, c.calibration.camera_world_y, c.calibration.camera_world_z]
-          : null,
-      })),
-    }
-  } catch {
-    return null
-  }
+  // TODO: parallel fetch floor-plan, zones, obstacles, cameras from backend
+  //       reconstruct and return the Zustand project shape:
+  //       {version, savedAt, onboardingMethod, worldBounds, floorPlan, scale, zones, obstacles, cameras}
+  throw new Error('Not implemented')
 }
