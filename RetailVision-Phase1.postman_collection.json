@@ -1,0 +1,602 @@
+{
+  "info": {
+    "name": "RetailVision EEP — Phase 1",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000/api" },
+    { "key": "run_id", "value": "" },
+    { "key": "owner_email", "value": "" },
+    { "key": "member_email", "value": "" },
+    { "key": "access_token", "value": "" },
+    { "key": "refresh_token", "value": "" },
+    { "key": "store_slug", "value": "" },
+    { "key": "store_id", "value": "" },
+    { "key": "invite_token", "value": "" },
+    { "key": "invitation_id", "value": "" },
+    { "key": "member_id", "value": "" },
+    { "key": "member_access_token", "value": "" },
+    { "key": "member_refresh_token", "value": "" }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "exec": [
+          "if (!pm.collectionVariables.get('run_id')) {",
+          "  const id = Math.random().toString(36).substring(2, 8);",
+          "  pm.collectionVariables.set('run_id', id);",
+          "  pm.collectionVariables.set('owner_email', 'owner_' + id + '@example.com');",
+          "  pm.collectionVariables.set('member_email', 'member_' + id + '@example.com');",
+          "}"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "exec": [
+          "// Clear run_id after the last request so next Run generates fresh IDs",
+          "const items = pm.info.requestName;",
+          "if (items === '5.5 Access Store Without Token (expect 401)') {",
+          "  pm.collectionVariables.set('run_id', '');",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "1.1 Register Owner",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const r = pm.response.json();",
+                  "pm.test('Has user_id', () => pm.expect(r.user_id).to.be.a('string'));",
+                  "pm.test('account_type is owner', () => pm.expect(r.account_type).to.eql('owner'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Alice Owner\",\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"Secret123!\"\n}"
+            }
+          }
+        },
+        {
+          "name": "1.2 Login (Owner)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.collectionVariables.set('access_token', r.access_token);",
+                  "pm.collectionVariables.set('refresh_token', r.refresh_token);",
+                  "pm.test('Got access_token', () => pm.expect(r.access_token).to.be.a('string'));",
+                  "pm.test('account_type is owner', () => pm.expect(r.account_type).to.eql('owner'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"Secret123!\"\n}"
+            }
+          }
+        },
+        {
+          "name": "1.3 Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.collectionVariables.set('access_token', r.access_token);",
+                  "pm.collectionVariables.set('refresh_token', r.refresh_token);",
+                  "pm.test('Got new access_token', () => pm.expect(r.access_token).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/auth/refresh",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Stores",
+      "item": [
+        {
+          "name": "2.1 Create Store",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const r = pm.response.json();",
+                  "pm.collectionVariables.set('store_slug', r.slug);",
+                  "pm.collectionVariables.set('store_id', r.store_id);",
+                  "pm.test('Has slug', () => pm.expect(r.slug).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/stores",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"My Supermarket\",\n  \"slug\": \"store-{{run_id}}\",\n  \"timezone\": \"Asia/Beirut\",\n  \"currency\": \"USD\"\n}"
+            }
+          }
+        },
+        {
+          "name": "2.2 List Stores",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('Returns array', () => pm.expect(r).to.be.an('array'));",
+                  "pm.test('At least 1 store', () => pm.expect(r.length).to.be.at.least(1));",
+                  "pm.test('section_count >= 1', () => pm.expect(r[0].section_count).to.be.at.least(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/stores"
+          }
+        },
+        {
+          "name": "2.3 Get Store Detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('Correct slug', () => pm.expect(r.slug).to.eql(pm.collectionVariables.get('store_slug')));",
+                  "pm.test('Status is active', () => pm.expect(r.status).to.eql('active'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}"
+          }
+        },
+        {
+          "name": "2.4 Get My Context (owner)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('is_owner true', () => pm.expect(r.is_owner).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}/me"
+          }
+        },
+        {
+          "name": "2.5 Patch Store",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('Address updated', () => pm.expect(r.address).to.eql('123 Main St'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"address\": \"123 Main St\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Members & Invitations",
+      "item": [
+        {
+          "name": "3.1 Invite Member",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const r = pm.response.json();",
+                  "pm.collectionVariables.set('invite_token', r.token);",
+                  "pm.collectionVariables.set('invitation_id', r.invitation_id);",
+                  "pm.test('Has token', () => pm.expect(r.token).to.be.a('string'));",
+                  "pm.test('Has expires_at', () => pm.expect(r.expires_at).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/members/invite",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"role\": \"manager\",\n  \"access_scope\": \"full_store\",\n  \"section_ids\": [],\n  \"permissions\": {\n    \"view_alerts\": true,\n    \"view_analytics\": true,\n    \"view_heatmaps\": false,\n    \"view_employees\": true,\n    \"view_audit_log\": false,\n    \"receive_notifications\": true,\n    \"manage_employees\": false,\n    \"manage_shifts\": false\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "3.2 List Pending Invitations",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('Has pending invitation', () => pm.expect(r.length).to.be.at.least(1));",
+                  "pm.test('accepted_at is null', () => pm.expect(r[0].accepted_at).to.be.null);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}/members/invitations"
+          }
+        },
+        {
+          "name": "3.3 Accept Invitation (create sub-account)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const r = pm.response.json();",
+                  "pm.collectionVariables.set('member_access_token', r.access_token);",
+                  "pm.collectionVariables.set('member_refresh_token', r.refresh_token);",
+                  "pm.test('Got access_token', () => pm.expect(r.access_token).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/store/{{store_slug}}/accept-invite",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{invite_token}}\",\n  \"name\": \"Bob Manager\",\n  \"password\": \"Pass456!!\"\n}"
+            }
+          }
+        },
+        {
+          "name": "3.4 List Members",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('Has members', () => pm.expect(r.length).to.be.at.least(1));",
+                  "pm.collectionVariables.set('member_id', r[0].id);",
+                  "pm.test('Member has role', () => pm.expect(r[0].role).to.be.a('string'));",
+                  "pm.test('Member has permissions', () => pm.expect(r[0].permissions).to.be.an('array'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}/members"
+          }
+        },
+        {
+          "name": "3.5 Member Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('account_type is sub_account', () => pm.expect(r.account_type).to.eql('sub_account'));",
+                  "pm.test('Has redirect_slug', () => pm.expect(r.redirect_slug).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/store/{{store_slug}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{member_email}}\",\n  \"password\": \"Pass456!!\"\n}"
+            }
+          }
+        },
+        {
+          "name": "3.6 Get My Context (member)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('is_owner false', () => pm.expect(r.is_owner).to.be.false);",
+                  "pm.test('role is manager', () => pm.expect(r.role).to.eql('manager'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{member_access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}/me"
+          }
+        },
+        {
+          "name": "3.7 Patch Member (downgrade to viewer)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('Status updated', () => pm.expect(r.status).to.eql('updated'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/members/{{member_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"viewer\",\n  \"permissions\": {\n    \"view_alerts\": true\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "3.8 Remove Member",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}/members/{{member_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Logout",
+      "item": [
+        {
+          "name": "4.1 Logout (Owner)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/auth/logout",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Error Cases",
+      "item": [
+        {
+          "name": "5.1 Register Duplicate Email (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 409', () => pm.response.to.have.status(409));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code EMAIL_TAKEN', () => pm.expect(r.detail.code).to.eql('EMAIL_TAKEN'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Alice Again\",\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"Secret123!\"\n}"
+            }
+          }
+        },
+        {
+          "name": "5.2 Login Wrong Password (expect 401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 401', () => pm.response.to.have.status(401));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code INVALID_CREDENTIALS', () => pm.expect(r.detail.code).to.eql('INVALID_CREDENTIALS'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"owner@example.com\",\n  \"password\": \"wrongpassword\"\n}"
+            }
+          }
+        },
+        {
+          "name": "5.3 Create Store Duplicate Slug (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 409', () => pm.response.to.have.status(409));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code SLUG_TAKEN', () => pm.expect(r.detail.code).to.eql('SLUG_TAKEN'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/stores",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Another Store\",\n  \"slug\": \"store-{{run_id}}\",\n  \"timezone\": \"Asia/Beirut\",\n  \"currency\": \"USD\"\n}"
+            }
+          }
+        },
+        {
+          "name": "5.4 Accept Expired/Invalid Invite (expect 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 404', () => pm.response.to.have.status(404));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code INVITE_NOT_FOUND', () => pm.expect(r.detail.code).to.eql('INVITE_NOT_FOUND'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/store/{{store_slug}}/accept-invite",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"fake-invalid-token-xxxx\",\n  \"name\": \"Nobody\",\n  \"password\": \"Pass456!!\"\n}"
+            }
+          }
+        },
+        {
+          "name": "5.5 Access Store Without Token (expect 401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/stores"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -140,10 +140,12 @@ async def patch_store(
     before = {k: getattr(ctx.store, k) for k in values if k != "updated_at"}
     await db.execute(update(Store).where(Store.id == ctx.store_id).values(**values))
 
+    serializable_after = {k: v for k, v in values.items() if k != "updated_at"}
+    serializable_before = {k: (str(v) if not isinstance(v, (str, int, float, bool, dict, list, type(None))) else v) for k, v in before.items()}
     await write_audit_log(
         db, "store_updated", store_id=ctx.store_id, user_id=ctx.user_id,
         entity_type="store", entity_id=ctx.store_id,
-        before_state=before, after_state=values,
+        before_state=serializable_before, after_state=serializable_after,
     )
     await db.commit()
 

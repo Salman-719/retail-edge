@@ -55,4 +55,3 @@ async def send_invitation_email(to_email: str, store_name: str, slug: str, token
         logger.info("Invitation email sent to %s", to_email)
     except Exception as exc:
         logger.error("Failed to send invitation email to %s: %s", to_email, exc)
-        raise
