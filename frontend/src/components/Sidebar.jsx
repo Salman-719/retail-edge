@@ -8,6 +8,7 @@ const NAV = [
   { label: 'Live Monitoring', path: 'live' },
   { label: 'Analytics', path: 'analytics' },
   { label: 'Employees', path: 'employees' },
+  { label: 'Shifts', path: 'shifts' },
   { label: 'Members', path: 'members' },
   { label: 'Audit Log', path: 'audit' },
   { label: 'Settings', path: 'settings' },

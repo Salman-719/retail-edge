@@ -14,6 +14,7 @@ import StoreConfigEdit from './pages/StoreConfigEdit'
 import LiveMonitoring from './pages/LiveMonitoring'
 import Analytics from './pages/Analytics'
 import Employees from './pages/Employees'
+import Shifts from './pages/Shifts'
 import Members from './pages/Members'
 import Audit from './pages/Audit'
 import Settings from './pages/Settings'
@@ -39,6 +40,7 @@ export default function App() {
           <Route path="live" element={<LiveMonitoring />} />
           <Route path="analytics" element={<Analytics />} />
           <Route path="employees" element={<Employees />} />
+          <Route path="shifts" element={<Shifts />} />
           <Route path="members" element={<Members />} />
           <Route path="audit" element={<Audit />} />
           <Route path="settings" element={<Settings />} />

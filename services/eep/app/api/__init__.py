@@ -8,6 +8,8 @@ from app.api.routers.config import router as config_router
 from app.api.routers.draft import router as draft_router
 from app.api.routers.employees import router as employees_router
 from app.api.routers.shifts import router as shifts_router
+from app.api.routers.audit import router as audit_router
+from app.api.routers.settings import router as settings_router
 
 
 def register_routers(app: FastAPI) -> None:
@@ -19,3 +21,5 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(draft_router, prefix="/api")
     app.include_router(employees_router, prefix="/api")
     app.include_router(shifts_router, prefix="/api")
+    app.include_router(audit_router, prefix="/api")
+    app.include_router(settings_router, prefix="/api")

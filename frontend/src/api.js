@@ -298,6 +298,80 @@ export const createEmployee = (slug, body) =>
 export const patchEmployee = (slug, employeeId, body) =>
   api.patch(`/store/${slug}/employees/${employeeId}`, body).then(r => r.data)
 
+export const deleteEmployee = (slug, employeeId) =>
+  api.delete(`/store/${slug}/employees/${employeeId}`).then(r => r.data)
+
+export const listEmployeeSections = (slug, employeeId) =>
+  api.get(`/store/${slug}/employees/${employeeId}/sections`).then(r => r.data)
+
+export const assignEmployeeSection = (slug, employeeId, body) =>
+  api.post(`/store/${slug}/employees/${employeeId}/sections`, body).then(r => r.data)
+
+export const removeEmployeeSection = (slug, employeeId, sectionId) =>
+  api.delete(`/store/${slug}/employees/${employeeId}/sections/${sectionId}`).then(r => r.data)
+
+// ─── Shift Patterns (Phase 4+) ───────────────────────────────────────────────
+
+export const listShiftPatterns = (slug, params) =>
+  api.get(`/store/${slug}/shift-patterns`, { params }).then(r => r.data)
+
+export const createShiftPattern = (slug, body) =>
+  api.post(`/store/${slug}/shift-patterns`, body).then(r => r.data)
+
+export const patchShiftPattern = (slug, patternId, body) =>
+  api.patch(`/store/${slug}/shift-patterns/${patternId}`, body).then(r => r.data)
+
+export const deleteShiftPattern = (slug, patternId) =>
+  api.delete(`/store/${slug}/shift-patterns/${patternId}`).then(r => r.data)
+
+// ─── Shift Instances (Phase 4+) ──────────────────────────────────────────────
+
+export const listShifts = (slug, params) =>
+  api.get(`/store/${slug}/shifts`, { params }).then(r => r.data)
+
+export const createShift = (slug, body) =>
+  api.post(`/store/${slug}/shifts`, body).then(r => r.data)
+
+export const getShift = (slug, shiftId) =>
+  api.get(`/store/${slug}/shifts/${shiftId}`).then(r => r.data)
+
+export const patchShift = (slug, shiftId, body) =>
+  api.patch(`/store/${slug}/shifts/${shiftId}`, body).then(r => r.data)
+
+export const deleteShift = (slug, shiftId) =>
+  api.delete(`/store/${slug}/shifts/${shiftId}`).then(r => r.data)
+
+export const generateShifts = (slug, body) =>
+  api.post(`/store/${slug}/shifts/generate`, body).then(r => r.data)
+
+// ─── Shift Assignments (Phase 4+) ────────────────────────────────────────────
+
+export const listShiftAssignments = (slug, shiftId) =>
+  api.get(`/store/${slug}/shifts/${shiftId}/assignments`).then(r => r.data)
+
+export const createShiftAssignment = (slug, shiftId, body) =>
+  api.post(`/store/${slug}/shifts/${shiftId}/assignments`, body).then(r => r.data)
+
+export const patchShiftAssignment = (slug, shiftId, assignmentId, body) =>
+  api.patch(`/store/${slug}/shifts/${shiftId}/assignments/${assignmentId}`, body).then(r => r.data)
+
+export const deleteShiftAssignment = (slug, shiftId, assignmentId) =>
+  api.delete(`/store/${slug}/shifts/${shiftId}/assignments/${assignmentId}`).then(r => r.data)
+
+// ─── Break Records (Phase 4+) ────────────────────────────────────────────────
+
+export const listBreaks = (slug, shiftId, assignmentId) =>
+  api.get(`/store/${slug}/shifts/${shiftId}/assignments/${assignmentId}/breaks`).then(r => r.data)
+
+export const createBreak = (slug, shiftId, assignmentId, body) =>
+  api.post(`/store/${slug}/shifts/${shiftId}/assignments/${assignmentId}/breaks`, body).then(r => r.data)
+
+export const patchBreak = (slug, shiftId, assignmentId, breakId, body) =>
+  api.patch(`/store/${slug}/shifts/${shiftId}/assignments/${assignmentId}/breaks/${breakId}`, body).then(r => r.data)
+
+export const deleteBreak = (slug, shiftId, assignmentId, breakId) =>
+  api.delete(`/store/${slug}/shifts/${shiftId}/assignments/${assignmentId}/breaks/${breakId}`).then(r => r.data)
+
 // ─── Settings (Phase 7+) ─────────────────────────────────────────────────────
 
 export const getSettings = (slug) =>
@@ -305,6 +379,12 @@ export const getSettings = (slug) =>
 
 export const patchSettings = (slug, body) =>
   api.patch(`/store/${slug}/settings`, body).then(r => r.data)
+
+export const getAlertConfig = (slug) =>
+  api.get(`/store/${slug}/alert-config`).then(r => r.data)
+
+export const patchAlertConfig = (slug, body) =>
+  api.patch(`/store/${slug}/alert-config`, body).then(r => r.data)
 
 // ─── Audit (Phase 7+) ────────────────────────────────────────────────────────
 
