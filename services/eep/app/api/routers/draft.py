@@ -666,6 +666,28 @@ async def create_zone(
     draft = await _require_draft(ctx.store_id, db)
     _require_draft_access(draft, ctx)
 
+    # Require scale to be defined before zones can be drawn
+    fp_result = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == draft.id,
+            FloorPlan.section_id == section_id,
+        )
+    )
+    fp = fp_result.scalar_one_or_none()
+    if not fp or not fp.scale_defined:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Floor plan scale must be set before drawing zones", "code": "SCALE_NOT_DEFINED"},
+        )
+
+    # Validate all zone points are within floor plan bounds
+    for point in body.points:
+        if not (0 <= point[0] <= fp.width_px and 0 <= point[1] <= fp.height_px):
+            raise HTTPException(
+                status_code=422,
+                detail={"error": f"Point {point} is outside floor plan bounds ({fp.width_px}x{fp.height_px})", "code": "POINT_OUT_OF_BOUNDS"},
+            )
+
     # Check for name uniqueness within this section/version
     existing_name = await db.execute(
         select(Zone).where(
@@ -733,6 +755,21 @@ async def update_zone(
     new_points = body.points if body.points is not None else zone.points
 
     if body.points is not None:
+        fp_result = await db.execute(
+            select(FloorPlan).where(
+                FloorPlan.version_id == draft.id,
+                FloorPlan.section_id == section_id,
+            )
+        )
+        fp = fp_result.scalar_one_or_none()
+        if fp:
+            for point in body.points:
+                if not (0 <= point[0] <= fp.width_px and 0 <= point[1] <= fp.height_px):
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"error": f"Point {point} is outside floor plan bounds ({fp.width_px}x{fp.height_px})", "code": "POINT_OUT_OF_BOUNDS"},
+                    )
+
         existing_zones = await db.execute(
             select(Zone).where(
                 Zone.version_id == draft.id,
@@ -1473,6 +1510,19 @@ async def activate_draft(
         raise HTTPException(
             status_code=422,
             detail={"error": "At least one floor plan must be uploaded", "code": "NO_FLOOR_PLAN"},
+        )
+
+    # Checklist: at least one camera config must be verified
+    verified_result = await db.execute(
+        select(CameraConfig).where(
+            CameraConfig.version_id == draft.id,
+            CameraConfig.status == "verified",
+        )
+    )
+    if not verified_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "At least one camera must be calibrated and verified before activation", "code": "NO_VERIFIED_CAMERA"},
         )
 
     if body.label:

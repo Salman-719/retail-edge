@@ -1,0 +1,623 @@
+{
+  "info": {
+    "name": "RetailVision EEP — Validation Tests",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000/api" },
+    { "key": "access_token", "value": "" },
+    { "key": "store_slug", "value": "" },
+    { "key": "section_id", "value": "" },
+    { "key": "draft_id", "value": "" },
+    { "key": "cam_id", "value": "" },
+    { "key": "cc_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Setup",
+      "item": [
+        {
+          "name": "0.1 Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('access_token', pm.response.json().access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"Secret123!\"\n}"
+            }
+          }
+        },
+        {
+          "name": "0.2 Get Store Slug",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('store_slug', pm.response.json()[0].slug);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/stores"
+          }
+        },
+        {
+          "name": "0.3 Get Section ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('section_id', pm.response.json()[0].id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}/sections"
+          }
+        },
+        {
+          "name": "0.4 Create Draft",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('draft_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/versions/draft",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"validation-test-draft\",\n  \"clone_from_active\": false\n}"
+            }
+          }
+        },
+        {
+          "name": "0.5 Register a Camera",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('cam_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/cameras",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"ValidationCam\",\n  \"mounting\": \"ceiling\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Validation 1 — Zone requires scale",
+      "item": [
+        {
+          "name": "1.1 Create Zone WITHOUT floor plan (expect 422 SCALE_NOT_DEFINED)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 422', () => pm.response.to.have.status(422));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code SCALE_NOT_DEFINED', () => pm.expect(r.detail.code).to.eql('SCALE_NOT_DEFINED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/sections/{{section_id}}/zones",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"TestZone\",\n  \"type\": \"general\",\n  \"points\": [[0,0],[100,0],[100,100],[0,100]]\n}"
+            }
+          }
+        },
+        {
+          "name": "1.2 Upload Floor Plan (Map.png) — manual file select required",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('image_uploaded true', () => pm.expect(pm.response.json().image_uploaded).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/sections/{{section_id}}/floor-plan/upload",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": "testing-data/Test3/Map.png" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "1.3 Create Zone WITH floor plan but WITHOUT scale (expect 422 SCALE_NOT_DEFINED)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 422', () => pm.response.to.have.status(422));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code SCALE_NOT_DEFINED', () => pm.expect(r.detail.code).to.eql('SCALE_NOT_DEFINED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/sections/{{section_id}}/zones",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"TestZone\",\n  \"type\": \"general\",\n  \"points\": [[0,0],[100,0],[100,100],[0,100]]\n}"
+            }
+          }
+        },
+        {
+          "name": "1.4 Set Scale",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('scale_defined true', () => pm.expect(pm.response.json().scale_defined).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/sections/{{section_id}}/floor-plan/scale",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"origin_x\": 8,\n  \"origin_y\": 720,\n  \"ref_point_1\": [8, 720],\n  \"ref_point_2\": [166, 720],\n  \"real_distance_meters\": 3.0\n}"
+            }
+          }
+        },
+        {
+          "name": "1.5 Create Zone after scale set (expect 201 — now allowed)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Zone created', () => pm.expect(pm.response.json().name).to.eql('TestZone'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/sections/{{section_id}}/zones",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"TestZone\",\n  \"type\": \"general\",\n  \"points\": [[100,200],[300,200],[300,400],[100,400]]\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Validation 2 — Zone points within bounds",
+      "item": [
+        {
+          "name": "2.1 Create Zone with out-of-bounds points (expect 422 POINT_OUT_OF_BOUNDS)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 422', () => pm.response.to.have.status(422));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code POINT_OUT_OF_BOUNDS', () => pm.expect(r.detail.code).to.eql('POINT_OUT_OF_BOUNDS'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/sections/{{section_id}}/zones",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"OutOfBoundsZone\",\n  \"type\": \"general\",\n  \"points\": [[99999,99999],[100000,99999],[100000,100000],[99999,100000]]\n}"
+            }
+          }
+        },
+        {
+          "name": "2.2 Create Zone with x slightly over width 1536 (expect 422 POINT_OUT_OF_BOUNDS)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 422', () => pm.response.to.have.status(422));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code POINT_OUT_OF_BOUNDS', () => pm.expect(r.detail.code).to.eql('POINT_OUT_OF_BOUNDS'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/sections/{{section_id}}/zones",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"OverWidthZone\",\n  \"type\": \"general\",\n  \"points\": [[1537,100],[1600,100],[1600,200],[1537,200]]\n}"
+            }
+          }
+        },
+        {
+          "name": "2.3 Create Zone with y slightly over height 731 (expect 422 POINT_OUT_OF_BOUNDS)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 422', () => pm.response.to.have.status(422));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code POINT_OUT_OF_BOUNDS', () => pm.expect(r.detail.code).to.eql('POINT_OUT_OF_BOUNDS'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/sections/{{section_id}}/zones",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"OverHeightZone\",\n  \"type\": \"general\",\n  \"points\": [[100,732],[200,732],[200,800],[100,800]]\n}"
+            }
+          }
+        },
+        {
+          "name": "2.4 Create Zone exactly at boundary (expect 201 — boundary is valid)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Zone created', () => pm.expect(pm.response.json().name).to.eql('BoundaryZone'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/sections/{{section_id}}/zones",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"BoundaryZone\",\n  \"type\": \"general\",\n  \"points\": [[1430,600],[1536,600],[1536,731],[1430,731]]\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Validation 3 — Activation requires verified camera",
+      "item": [
+        {
+          "name": "3.1 Activate with no verified camera (expect 422 NO_VERIFIED_CAMERA)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 422', () => pm.response.to.have.status(422));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code NO_VERIFIED_CAMERA', () => pm.expect(r.detail.code).to.eql('NO_VERIFIED_CAMERA'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/versions/draft/activate",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"countdown_sec\": 5\n}"
+            }
+          }
+        },
+        {
+          "name": "3.2 Place Camera on Map",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('cc_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/sections/{{section_id}}/camera-configs",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"physical_camera_id\": \"{{cam_id}}\",\n  \"position_x\": 82,\n  \"position_y\": 637,\n  \"height_meters\": 3.0,\n  \"fov_deg\": 90\n}"
+            }
+          }
+        },
+        {
+          "name": "3.3 Upload Camera Frame — manual file select required",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status frame_uploaded', () => pm.expect(pm.response.json().status).to.eql('frame_uploaded'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/camera-configs/{{cc_id}}/frame",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": "testing-data/Test3/images/Cam1.jpg" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "3.4 Activate with frame but no calibration (expect 422 NO_VERIFIED_CAMERA)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 422', () => pm.response.to.have.status(422));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code NO_VERIFIED_CAMERA', () => pm.expect(r.detail.code).to.eql('NO_VERIFIED_CAMERA'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/versions/draft/activate",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"countdown_sec\": 5\n}"
+            }
+          }
+        },
+        {
+          "name": "3.5 Compute Homography (calibrate camera)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('status ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/camera-configs/{{cc_id}}/calibration/homography",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"correspondences\": [\n    { \"pixel\": [540, 580], \"world\": [163, 601] },\n    { \"pixel\": [720, 580], \"world\": [322, 601] },\n    { \"pixel\": [720, 380], \"world\": [322, 478] },\n    { \"pixel\": [540, 380], \"world\": [163, 478] },\n    { \"pixel\": [130, 650], \"world\": [8, 673] },\n    { \"pixel\": [900, 650], \"world\": [474, 673] }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "3.6 Activate with calibrated but unverified camera (expect 422 NO_VERIFIED_CAMERA)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 422', () => pm.response.to.have.status(422));",
+                  "const r = pm.response.json();",
+                  "pm.test('Code NO_VERIFIED_CAMERA', () => pm.expect(r.detail.code).to.eql('NO_VERIFIED_CAMERA'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/versions/draft/activate",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"countdown_sec\": 5\n}"
+            }
+          }
+        },
+        {
+          "name": "3.7 Verify Calibration",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status verified', () => pm.expect(pm.response.json().status).to.eql('verified'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}/draft/camera-configs/{{cc_id}}/calibration/verify"
+          }
+        },
+        {
+          "name": "3.8 Activate with verified camera (expect 201 — now allowed)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const r = pm.response.json();",
+                  "pm.test('status pending', () => pm.expect(r.status).to.eql('pending'));",
+                  "pm.collectionVariables.set('sync_event_id', r.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": "{{base_url}}/store/{{store_slug}}/versions/draft/activate",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"countdown_sec\": 5\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Cleanup — Discard activated version (leave DB clean)",
+      "item": [
+        {
+          "name": "4.1 Poll to execute activation",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": ["setTimeout(() => {}, 7000);"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('executed', () => pm.expect(pm.response.json().status).to.eql('executed'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/store/{{store_slug}}/versions/sync/{{sync_event_id}}"
+          }
+        }
+      ]
+    }
+  ]
+}
