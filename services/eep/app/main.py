@@ -38,6 +38,10 @@ async def lifespan(app: FastAPI):
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ"
         ))
+        # Phase 4 tables — created via ORM metadata if absent
+        import app.models  # noqa: F401 — ensures all mappers are registered
+        from app.models.base import Base as ModelBase
+        await conn.run_sync(ModelBase.metadata.create_all)
 
     try:
         from app.core.s3_client import ensure_bucket

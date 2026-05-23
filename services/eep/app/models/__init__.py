@@ -17,6 +17,9 @@ from app.models.obstacle import Obstacle
 from app.models.camera_config import CameraConfig
 from app.models.calibration import Calibration
 from app.models.version_sync_event import VersionSyncEvent
+from app.models.employee import Employee, EmployeeSection
+from app.models.shift_pattern import ShiftPattern
+from app.models.shift_instance import ShiftInstance, ShiftAssignment, BreakRecord
 
 __all__ = [
     "Base",
@@ -40,4 +43,10 @@ __all__ = [
     "CameraConfig",
     "Calibration",
     "VersionSyncEvent",
+    "Employee",
+    "EmployeeSection",
+    "ShiftPattern",
+    "ShiftInstance",
+    "ShiftAssignment",
+    "BreakRecord",
 ]
