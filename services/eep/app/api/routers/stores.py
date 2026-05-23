@@ -14,7 +14,6 @@ from app.models.alert_config import AlertConfig
 from app.models.section import Section
 from app.models.store import Store
 from app.models.store_settings import StoreSettings
-from app.models.physical_camera import PhysicalCamera  # noqa: F401 — import for count query; created in Phase 2
 from app.schemas.store import CreateStoreRequest, PatchStoreRequest, StoreDetail, StoreListItem
 
 router = APIRouter(tags=["stores"])

@@ -10,6 +10,7 @@ from sqlalchemy import delete, text
 
 from app.api import register_routers
 from app.core.database import AsyncSessionLocal, engine
+import app.models  # noqa: F401 — registers all SQLAlchemy mappers at startup
 from app.models.user import User
 
 

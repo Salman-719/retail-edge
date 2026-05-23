@@ -121,12 +121,21 @@ export const patchMember = (slug, memberId, body) =>
 export const removeMember = (slug, memberId) =>
   api.delete(`/store/${slug}/members/${memberId}`).then(r => r.data)
 
-// ─── Sections (Phase 2+) ─────────────────────────────────────────────────────
+// ─── Sections ────────────────────────────────────────────────────────────────
 
 export const listSections = (slug) =>
   api.get(`/store/${slug}/sections`).then(r => r.data)
 
-// ─── Config Versions (Phase 2+) ──────────────────────────────────────────────
+export const createSection = (slug, body) =>
+  api.post(`/store/${slug}/sections`, body).then(r => r.data)
+
+export const patchSection = (slug, sectionId, body) =>
+  api.patch(`/store/${slug}/sections/${sectionId}`, body).then(r => r.data)
+
+export const deleteSection = (slug, sectionId) =>
+  api.delete(`/store/${slug}/sections/${sectionId}`).then(r => r.data)
+
+// ─── Config Versions (read-only) ─────────────────────────────────────────────
 
 export const getActiveVersion = (slug) =>
   api.get(`/store/${slug}/versions/active`).then(r => r.data)
@@ -134,10 +143,127 @@ export const getActiveVersion = (slug) =>
 export const listVersions = (slug) =>
   api.get(`/store/${slug}/versions`).then(r => r.data)
 
-// ─── Cameras (Phase 2+) ──────────────────────────────────────────────────────
+// ─── Cameras (physical) ──────────────────────────────────────────────────────
 
 export const listCameras = (slug) =>
   api.get(`/store/${slug}/cameras`).then(r => r.data)
+
+export const createCamera = (slug, body) =>
+  api.post(`/store/${slug}/cameras`, body).then(r => r.data)
+
+export const patchCamera = (slug, cameraId, body) =>
+  api.patch(`/store/${slug}/cameras/${cameraId}`, body).then(r => r.data)
+
+export const deleteCamera = (slug, cameraId) =>
+  api.delete(`/store/${slug}/cameras/${cameraId}`).then(r => r.data)
+
+// ─── Draft lifecycle ──────────────────────────────────────────────────────────
+
+export const getDraft = (slug) =>
+  api.get(`/store/${slug}/versions/draft`).then(r => r.data)
+
+export const createDraft = (slug, label, cloneFromActive = false) =>
+  api.post(`/store/${slug}/versions/draft`, { label, clone_from_active: cloneFromActive }).then(r => r.data)
+
+export const deleteDraft = (slug) =>
+  api.delete(`/store/${slug}/versions/draft`).then(r => r.data)
+
+// ─── Floor Plan ───────────────────────────────────────────────────────────────
+
+export const uploadFloorPlan = (slug, sectionId, file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return api.post(`/store/${slug}/draft/sections/${sectionId}/floor-plan/upload`, fd).then(r => r.data)
+}
+
+export const getDraftFloorPlan = (slug, sectionId) =>
+  api.get(`/store/${slug}/draft/sections/${sectionId}/floor-plan`).then(r => r.data)
+
+export const setFloorPlanScale = (slug, sectionId, body) =>
+  api.put(`/store/${slug}/draft/sections/${sectionId}/floor-plan/scale`, body).then(r => r.data)
+
+export const setFloorPlanWorldBounds = (slug, sectionId, body) =>
+  api.put(`/store/${slug}/draft/sections/${sectionId}/floor-plan/world-bounds`, body).then(r => r.data)
+
+// ─── Zones ────────────────────────────────────────────────────────────────────
+
+export const getDraftZones = (slug, sectionId) =>
+  api.get(`/store/${slug}/draft/sections/${sectionId}/zones`).then(r => r.data)
+
+export const createZone = (slug, sectionId, body) =>
+  api.post(`/store/${slug}/draft/sections/${sectionId}/zones`, body).then(r => r.data)
+
+export const updateZone = (slug, sectionId, zoneId, body) =>
+  api.put(`/store/${slug}/draft/sections/${sectionId}/zones/${zoneId}`, body).then(r => r.data)
+
+export const deleteZone = (slug, sectionId, zoneId) =>
+  api.delete(`/store/${slug}/draft/sections/${sectionId}/zones/${zoneId}`).then(r => r.data)
+
+// ─── Obstacles ────────────────────────────────────────────────────────────────
+
+export const getDraftObstacles = (slug, sectionId) =>
+  api.get(`/store/${slug}/draft/sections/${sectionId}/obstacles`).then(r => r.data)
+
+export const createObstacle = (slug, sectionId, body) =>
+  api.post(`/store/${slug}/draft/sections/${sectionId}/obstacles`, body).then(r => r.data)
+
+export const updateObstacle = (slug, sectionId, obstacleId, body) =>
+  api.put(`/store/${slug}/draft/sections/${sectionId}/obstacles/${obstacleId}`, body).then(r => r.data)
+
+export const deleteObstacle = (slug, sectionId, obstacleId) =>
+  api.delete(`/store/${slug}/draft/sections/${sectionId}/obstacles/${obstacleId}`).then(r => r.data)
+
+// ─── Camera Configs ───────────────────────────────────────────────────────────
+
+export const getDraftCameraConfigs = (slug, sectionId) =>
+  api.get(`/store/${slug}/draft/sections/${sectionId}/camera-configs`).then(r => r.data)
+
+export const placeCameraConfig = (slug, sectionId, body) =>
+  api.post(`/store/${slug}/draft/sections/${sectionId}/camera-configs`, body).then(r => r.data)
+
+export const updateCameraConfig = (slug, configId, body) =>
+  api.put(`/store/${slug}/draft/camera-configs/${configId}`, body).then(r => r.data)
+
+export const deleteCameraConfig = (slug, configId) =>
+  api.delete(`/store/${slug}/draft/camera-configs/${configId}`).then(r => r.data)
+
+export const uploadCameraFrame = (slug, configId, file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return api.post(`/store/${slug}/draft/camera-configs/${configId}/frame`, fd).then(r => r.data)
+}
+
+// ─── Calibration ──────────────────────────────────────────────────────────────
+
+export const computeHomography = (slug, configId, correspondences) =>
+  api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/homography`, { correspondences }).then(r => r.data)
+
+export const uploadCalibrationFiles = (slug, configId, intrinsicFile, extrinsicFile) => {
+  const fd = new FormData()
+  fd.append('intrinsic', intrinsicFile)
+  if (extrinsicFile) fd.append('extrinsic', extrinsicFile)
+  return api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/files`, fd).then(r => r.data)
+}
+
+export const verifyCalibration = (slug, configId) =>
+  api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/verify`).then(r => r.data)
+
+export const getCalibrations = (slug, configId) =>
+  api.get(`/store/${slug}/draft/camera-configs/${configId}/calibrations`).then(r => r.data)
+
+// ─── Activation ───────────────────────────────────────────────────────────────
+
+export const activateDraft = (slug, body) =>
+  api.post(`/store/${slug}/versions/draft/activate`, body).then(r => r.data)
+
+export const reactivateVersion = (slug, versionId) =>
+  api.post(`/store/${slug}/versions/${versionId}/reactivate`).then(r => r.data)
+
+export const getSyncEvent = (slug, eventId) =>
+  api.get(`/store/${slug}/versions/sync/${eventId}`).then(r => r.data)
+
+export const requestDraftDiscard = (slug) =>
+  api.post(`/store/${slug}/members/draft-discard-request`).then(r => r.data)
 
 // ─── Live Monitoring (Phase 5+) ──────────────────────────────────────────────
 

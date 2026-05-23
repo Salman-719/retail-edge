@@ -9,6 +9,14 @@ from app.models.audit_log import AuditLog
 from app.models.store_settings import StoreSettings
 from app.models.alert_config import AlertConfig
 from app.models.physical_camera import PhysicalCamera
+from app.models.version import StoreConfigVersion
+from app.models.coordinate_frame import CoordinateFrame
+from app.models.floor_plan import FloorPlan
+from app.models.zone import Zone
+from app.models.obstacle import Obstacle
+from app.models.camera_config import CameraConfig
+from app.models.calibration import Calibration
+from app.models.version_sync_event import VersionSyncEvent
 
 __all__ = [
     "Base",
@@ -24,4 +32,12 @@ __all__ = [
     "StoreSettings",
     "AlertConfig",
     "PhysicalCamera",
+    "StoreConfigVersion",
+    "CoordinateFrame",
+    "FloorPlan",
+    "Zone",
+    "Obstacle",
+    "CameraConfig",
+    "Calibration",
+    "VersionSyncEvent",
 ]

@@ -10,6 +10,7 @@ import AcceptInvite from './pages/AcceptInvite'
 import OwnerDashboard from './pages/OwnerDashboard'
 
 import StoreConfig from './pages/StoreConfig'
+import StoreConfigEdit from './pages/StoreConfigEdit'
 import LiveMonitoring from './pages/LiveMonitoring'
 import Analytics from './pages/Analytics'
 import Employees from './pages/Employees'
@@ -34,6 +35,7 @@ export default function App() {
           <Route index element={<Navigate to="live" replace />} />
           <Route path="dashboard" element={<Navigate to="live" replace />} />
           <Route path="config" element={<StoreConfig />} />
+          <Route path="config/edit" element={<StoreConfigEdit />} />
           <Route path="live" element={<LiveMonitoring />} />
           <Route path="analytics" element={<Analytics />} />
           <Route path="employees" element={<Employees />} />
