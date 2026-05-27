@@ -118,8 +118,16 @@ services:
     build:
       context: ./services/iep2-vision
       dockerfile: Dockerfile
+    environment:
+      IEP2_TEST1_DIR: /app/testing-data/Test1
+      YOLO_CONFIG_DIR: /tmp/ultralytics
+      MPLCONFIGDIR: /tmp/matplotlib
     ports:
       - "8002:8002"
+    volumes:
+      - ./testing-data:/app/testing-data:ro
+      - iep2_runtime:/app/runtime
+      - iep2_model_cache:/root/.cache
 
   iep3-alerts:
     build:
@@ -147,3 +155,5 @@ volumes:
   redis_data:
   minio_data:
   grafana_data:
+  iep2_runtime:
+  iep2_model_cache:
