@@ -246,6 +246,7 @@ function SectionsPanel({ slug, sections, selectedSectionId, onSelect, onSections
                   ref={editInputRef}
                   value={editName}
                   onChange={e => setEditName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Escape') cancelEdit() }}
                   className="flex-1 text-sm border border-blue-400 rounded px-2 py-0.5 focus:outline-none focus:ring-2 focus:ring-blue-200 min-w-0"
                   disabled={busy}
                 />
@@ -314,6 +315,7 @@ function SectionsPanel({ slug, sections, selectedSectionId, onSelect, onSections
               ref={addInputRef}
               value={newName}
               onChange={e => setNewName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Escape') cancelAdd() }}
               placeholder="Section name…"
               className="flex-1 text-sm border border-blue-400 rounded px-2 py-0.5 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-white min-w-0"
               disabled={busy}

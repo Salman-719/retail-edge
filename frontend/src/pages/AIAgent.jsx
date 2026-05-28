@@ -65,6 +65,7 @@ function ReportModal({ report, onClose }) {
 function ReportPanel() {
   const [tab, setTab] = useState('daily')
   const [viewing, setViewing] = useState(null)
+  const [demoBanner, setDemoBanner] = useState(true)
 
   const reports = tab === 'daily' ? MOCK_DAILY_REPORTS : MOCK_WEEKLY_REPORTS
 
@@ -86,6 +87,14 @@ function ReportPanel() {
           </button>
         ))}
       </div>
+
+      {/* Demo data banner */}
+      {demoBanner && (
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-800 text-xs px-4 py-2 flex items-center justify-between shrink-0">
+          <span>Showing sample reports.</span>
+          <button onClick={() => setDemoBanner(false)} className="ml-3 text-amber-600 hover:text-amber-900 leading-none">✕</button>
+        </div>
+      )}
 
       {/* Report list */}
       {/* MOCK: replace with GET /store/{slug}/agent/reports?type={tab} */}

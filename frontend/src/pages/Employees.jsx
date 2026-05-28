@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { Pencil, UserX, UserCheck, Trash2, Search, Users } from 'lucide-react'
+import { Pencil, UserX, UserCheck, Trash2, Search, Users, ShieldOff } from 'lucide-react'
 import { useAuth } from '../store'
 import { usePageTitle } from '../components/PageMeta'
 import { TableSkeleton } from '../components/Skeletons'
@@ -545,6 +545,7 @@ export default function Employees() {
   if (role === 'viewer') {
     return (
       <div className="flex flex-col items-center justify-center h-full text-gray-400">
+        <ShieldOff size={40} className="text-gray-300 mb-3" />
         <p className="text-lg font-medium text-gray-500">Access Restricted</p>
         <p className="text-sm mt-1">You don't have permission to view employees.</p>
       </div>

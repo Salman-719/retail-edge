@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { Calendar } from 'lucide-react'
+import { Calendar, RefreshCw } from 'lucide-react'
 import { useAuth } from '../store'
 import { usePageTitle } from '../components/PageMeta'
 import { TableSkeleton } from '../components/Skeletons'
@@ -692,6 +692,7 @@ export default function Shifts() {
   const [employees, setEmployees] = useState([])
   const [sections, setSections] = useState([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   const [filterStatus, setFilterStatus] = useState('')
   const [filterDate, setFilterDate] = useState('')
@@ -700,6 +701,7 @@ export default function Shifts() {
 
   const fetchData = useCallback(async () => {
     setLoading(true)
+    setError('')
     try {
       const params = {}
       if (filterStatus) params.status = filterStatus
@@ -717,7 +719,9 @@ export default function Shifts() {
       setShifts(sh)
       setEmployees(emps)
       setSections(secs)
-    } catch {}
+    } catch (err) {
+      setError(err.response?.data?.detail?.error || err.message || 'Failed to load shifts')
+    }
     setLoading(false)
   }, [slug, filterStatus, filterDate])
 
@@ -809,7 +813,15 @@ export default function Shifts() {
 
           {/* List view table */}
           <div className="flex-1 overflow-auto p-6">
-            {loading ? (
+            {error ? (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-center space-y-3">
+                <RefreshCw size={28} className="mx-auto text-red-400" />
+                <p className="text-sm font-medium text-red-700">{error}</p>
+                <button onClick={fetchData} className="btn-outline text-xs py-1.5 border-red-300 text-red-600 hover:bg-red-100">
+                  Retry
+                </button>
+              </div>
+            ) : loading ? (
               <TableSkeleton rows={6} cols={6} />
             ) : shifts.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 text-center">

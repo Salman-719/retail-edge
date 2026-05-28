@@ -313,10 +313,6 @@ export default function Analytics() {
                 className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            {/* MOCK: wire date range into API calls once backend is available */}
-            <span className="text-xs text-gray-400 italic">
-              (date range applied when API is connected)
-            </span>
           </div>
         </div>
 
