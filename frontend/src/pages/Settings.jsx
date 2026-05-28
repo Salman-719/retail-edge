@@ -43,6 +43,16 @@ function Section({ title, description, children }) {
   )
 }
 
+const DEFAULT_SETTINGS = {
+  chunk_duration_sec: 300,
+  chunk_overlap_sec: 30,
+  frame_sample_rate_fps: 5,
+  activation_countdown_sec: 60,
+  active_config_cache_ttl_sec: 300,
+  shift_start_grace_min: 15,
+  absence_threshold_min: 15,
+}
+
 export default function Settings() {
   const { slug } = useParams()
   const { state } = useAuth()
@@ -53,6 +63,7 @@ export default function Settings() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(null) // 'settings' | 'alerts' | null
   const [saved, setSaved] = useState(null)   // 'settings' | 'alerts' | null
+  const [restored, setRestored] = useState(null) // 'settings' | 'alerts' | null
   const [error, setError] = useState('')
 
   const fetchData = useCallback(async () => {
@@ -119,6 +130,29 @@ export default function Settings() {
 
   function updateAlert(field, value) {
     setAlertConfig(a => ({ ...a, [field]: value }))
+  }
+
+  function resetSettings() {
+    setSettings(s => ({
+      ...s,
+      chunk_duration_sec: DEFAULT_SETTINGS.chunk_duration_sec,
+      chunk_overlap_sec: DEFAULT_SETTINGS.chunk_overlap_sec,
+      frame_sample_rate_fps: DEFAULT_SETTINGS.frame_sample_rate_fps,
+      activation_countdown_sec: DEFAULT_SETTINGS.activation_countdown_sec,
+      active_config_cache_ttl_sec: DEFAULT_SETTINGS.active_config_cache_ttl_sec,
+    }))
+    setRestored('settings')
+    setTimeout(() => setRestored(null), 3000)
+  }
+
+  function resetAlerts() {
+    setAlertConfig(a => ({
+      ...a,
+      shift_start_grace_min: DEFAULT_SETTINGS.shift_start_grace_min,
+      absence_threshold_min: DEFAULT_SETTINGS.absence_threshold_min,
+    }))
+    setRestored('alerts')
+    setTimeout(() => setRestored(null), 3000)
   }
 
   if (role === 'viewer') {
@@ -188,9 +222,17 @@ export default function Settings() {
               </FieldRow>
 
               <div className="py-4 flex items-center justify-end gap-3">
+                {restored === 'settings' && (
+                  <span className="text-sm text-amber-600 font-medium">Defaults restored — click Save to apply.</span>
+                )}
                 {saved === 'settings' && (
                   <span className="text-sm text-green-600 font-medium">Saved</span>
                 )}
+                <button
+                  onClick={resetSettings}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold text-gray-600 border border-gray-300 hover:bg-gray-50 transition-colors">
+                  Reset to defaults
+                </button>
                 <button
                   onClick={handleSaveSettings}
                   disabled={saving === 'settings'}
@@ -243,9 +285,17 @@ export default function Settings() {
               </FieldRow>
 
               <div className="py-4 flex items-center justify-end gap-3">
+                {restored === 'alerts' && (
+                  <span className="text-sm text-amber-600 font-medium">Defaults restored — click Save to apply.</span>
+                )}
                 {saved === 'alerts' && (
                   <span className="text-sm text-green-600 font-medium">Saved</span>
                 )}
+                <button
+                  onClick={resetAlerts}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold text-gray-600 border border-gray-300 hover:bg-gray-50 transition-colors">
+                  Reset to defaults
+                </button>
                 <button
                   onClick={handleSaveAlerts}
                   disabled={saving === 'alerts'}

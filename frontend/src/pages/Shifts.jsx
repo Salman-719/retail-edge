@@ -27,6 +27,15 @@ const ATTENDANCE_BADGE = {
   on_break: 'bg-yellow-100 text-yellow-700',
 }
 
+// Role badge colours reused on calendar cards
+const ROLE_CAL_BADGE = {
+  cashier: 'bg-green-100 text-green-700',
+  supervisor: 'bg-purple-100 text-purple-700',
+  security: 'bg-red-100 text-red-700',
+  shelf_stocker: 'bg-yellow-100 text-yellow-700',
+  manager: 'bg-blue-100 text-blue-700',
+}
+
 function fmt(dt) {
   if (!dt) return '—'
   return new Date(dt).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
@@ -42,6 +51,167 @@ function toLocalInput(iso) {
   const d = new Date(iso)
   const pad = n => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+// Monday of the week containing `date`
+function weekStart(date) {
+  const d = new Date(date)
+  const day = d.getDay() // 0=Sun
+  const diff = (day === 0 ? -6 : 1 - day)
+  d.setDate(d.getDate() + diff)
+  d.setHours(0, 0, 0, 0)
+  return d
+}
+
+function addDays(date, n) {
+  const d = new Date(date)
+  d.setDate(d.getDate() + n)
+  return d
+}
+
+function isoDate(date) {
+  const pad = n => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}`
+}
+
+// ── Mock calendar shifts ──────────────────────────────────────────────────────
+// Offsets are relative to the Monday of whatever week is displayed.
+// MOCK: replace with real shifts from listShifts filtered by week range.
+function buildMockCalendarShifts(monday) {
+  return [
+    { id: 'mock-1', dayOffset: 0, employee: 'Sara K.',    role: 'cashier',      start: '08:00', end: '16:00' },
+    { id: 'mock-2', dayOffset: 1, employee: 'James T.',   role: 'supervisor',   start: '09:00', end: '17:00' },
+    { id: 'mock-3', dayOffset: 2, employee: 'Lena M.',    role: 'shelf_stocker',start: '06:00', end: '14:00' },
+    { id: 'mock-4', dayOffset: 4, employee: 'Omar R.',    role: 'security',     start: '14:00', end: '22:00' },
+    { id: 'mock-5', dayOffset: 6, employee: 'Priya N.',   role: 'cashier',      start: '10:00', end: '18:00' },
+  ]
+}
+
+// ── Calendar view ─────────────────────────────────────────────────────────────
+
+const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+function CalendarView({ shifts }) {
+  const [monday, setMonday] = useState(() => weekStart(new Date()))
+
+  const mockShifts = buildMockCalendarShifts(monday)
+
+  const weekLabel = (() => {
+    const sun = addDays(monday, 6)
+    const fmtD = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    return `${fmtD(monday)} – ${fmtD(sun)}, ${monday.getFullYear()}`
+  })()
+
+  const today = isoDate(new Date())
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      {/* Week navigation */}
+      <div className="flex items-center justify-between px-6 py-3 border-b border-gray-100 bg-white shrink-0">
+        <button
+          onClick={() => setMonday(d => addDays(d, -7))}
+          className="p-1.5 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition-colors"
+          aria-label="Previous week"
+        >
+          ‹
+        </button>
+        <span className="text-sm font-medium text-gray-700">{weekLabel}</span>
+        <button
+          onClick={() => setMonday(d => addDays(d, 7))}
+          className="p-1.5 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition-colors"
+          aria-label="Next week"
+        >
+          ›
+        </button>
+      </div>
+
+      {/* 7-column grid */}
+      <div className="flex-1 overflow-auto p-4">
+        <div className="grid grid-cols-7 gap-2 min-w-[640px]">
+          {DAY_LABELS.map((label, i) => {
+            const date = addDays(monday, i)
+            const dateStr = isoDate(date)
+            const isToday = dateStr === today
+            const dayShifts = mockShifts.filter(s => s.dayOffset === i)
+
+            return (
+              <div key={i} className="flex flex-col gap-1.5">
+                {/* Day header */}
+                <div className={`text-center py-1.5 rounded-lg text-xs font-semibold ${
+                  isToday
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-100 text-gray-600'
+                }`}>
+                  <div>{label}</div>
+                  <div className={`text-xs font-normal mt-0.5 ${isToday ? 'text-blue-100' : 'text-gray-400'}`}>
+                    {date.getDate()}
+                  </div>
+                </div>
+
+                {/* Shift cards */}
+                {dayShifts.length === 0 ? (
+                  <div className="h-12 rounded-lg border border-dashed border-gray-200" />
+                ) : (
+                  dayShifts.map(s => (
+                    <div
+                      key={s.id}
+                      className="bg-white border border-gray-200 rounded-lg px-2 py-2 shadow-sm hover:shadow transition-shadow"
+                    >
+                      <p className="text-xs font-semibold text-gray-900 truncate">{s.employee}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">{s.start} – {s.end}</p>
+                      <span className={`inline-block mt-1 text-xs px-1.5 py-0.5 rounded-full font-medium ${ROLE_CAL_BADGE[s.role] || 'bg-gray-100 text-gray-600'}`}>
+                        {s.role.replace('_', ' ')}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            )
+          })}
+        </div>
+        {/* MOCK: replace buildMockCalendarShifts with listShifts filtered by week */}
+        <p className="text-xs text-gray-400 italic mt-3 text-center">
+          Calendar shows mock data — connect to listShifts API when backend is available.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+// ── View toggle (segmented control) ──────────────────────────────────────────
+
+function ViewToggle({ view, onChange }) {
+  return (
+    <div className="flex rounded-lg border border-gray-300 overflow-hidden shrink-0">
+      {['list', 'calendar'].map(v => (
+        <button
+          key={v}
+          onClick={() => onChange(v)}
+          className={`px-3 py-1.5 text-sm font-medium capitalize transition-colors ${
+            view === v
+              ? 'bg-gray-800 text-white'
+              : 'bg-white text-gray-600 hover:bg-gray-50'
+          }`}
+        >
+          {v === 'list' ? 'List' : 'Calendar'}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ── Tooltip wrapper ───────────────────────────────────────────────────────────
+
+function Tooltip({ text, children }) {
+  return (
+    <div className="relative group">
+      {children}
+      <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg leading-snug text-center opacity-0 group-hover:opacity-100 transition-opacity z-20">
+        {text}
+        <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800" />
+      </div>
+    </div>
+  )
 }
 
 // ── Create/Edit Shift Modal ───────────────────────────────────────────────────
@@ -166,7 +336,7 @@ function ShiftModal({ slug, shift, employees, sections, onClose, onDone }) {
   )
 }
 
-// ── Shift Detail Panel (assignments + breaks) ─────────────────────────────────
+// ── Breaks panel ──────────────────────────────────────────────────────────────
 
 function BreaksPanel({ slug, shift, assignment, onClose }) {
   const [breaks, setBreaks] = useState([])
@@ -205,9 +375,8 @@ function BreaksPanel({ slug, shift, assignment, onClose }) {
   }
 
   async function handleEndBreak(br) {
-    const now = new Date().toISOString()
     try {
-      await patchBreak(slug, shift.id, assignment.id, br.id, { break_end: now })
+      await patchBreak(slug, shift.id, assignment.id, br.id, { break_end: new Date().toISOString() })
       fetchBreaks()
     } catch {}
   }
@@ -239,7 +408,12 @@ function BreaksPanel({ slug, shift, assignment, onClose }) {
               {breaks.map(br => (
                 <div key={br.id} className="flex items-center gap-3 bg-gray-50 rounded-lg px-3 py-2">
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-gray-900">{fmtTime(br.break_start)} – {br.break_end ? fmtTime(br.break_end) : <span className="text-yellow-600">ongoing</span>}</p>
+                    <p className="text-sm text-gray-900">
+                      {fmtTime(br.break_start)} – {br.break_end
+                        ? fmtTime(br.break_end)
+                        : <span className="text-yellow-600">ongoing</span>
+                      }
+                    </p>
                     <p className="text-xs text-gray-400">{br.break_type}</p>
                   </div>
                   <div className="flex gap-1 shrink-0">
@@ -300,6 +474,8 @@ function BreaksPanel({ slug, shift, assignment, onClose }) {
     </div>
   )
 }
+
+// ── Assignments panel ─────────────────────────────────────────────────────────
 
 function AssignmentsPanel({ slug, shift, employees, onClose }) {
   const [assignments, setAssignments] = useState([])
@@ -510,6 +686,7 @@ export default function Shifts() {
   const { state } = useAuth()
   const role = state.currentMember?.role || (state.user?.account_type === 'owner' ? 'owner' : null)
 
+  const [view, setView] = useState('list')
   const [shifts, setShifts] = useState([])
   const [employees, setEmployees] = useState([])
   const [sections, setSections] = useState([])
@@ -519,7 +696,6 @@ export default function Shifts() {
   const [filterDate, setFilterDate] = useState('')
 
   const [modal, setModal] = useState(null)
-  // modal: null | 'create' | 'generate' | { type: 'edit', shift } | { type: 'assignments', shift }
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -574,112 +750,133 @@ export default function Shifts() {
   }
 
   return (
-    <div className="flex flex-col h-full overflow-auto">
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Header */}
       <header className="px-6 py-4 border-b border-gray-200 bg-white flex items-center justify-between shrink-0">
         <div>
           <h1 className="font-semibold text-gray-900">Shifts</h1>
           <p className="text-xs text-gray-400 mt-0.5">Manage shift instances, assignments and attendance</p>
         </div>
-        <div className="flex gap-2">
-          <button onClick={() => setModal('generate')}
-            className="px-3 py-1.5 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors">
-            Generate from Patterns
-          </button>
-          <button onClick={() => setModal('create')}
+        <div className="flex items-center gap-2">
+          <ViewToggle view={view} onChange={setView} />
+          <Tooltip text="Automatically creates shift instances for the next 4 weeks based on saved shift pattern templates.">
+            <button
+              onClick={() => setModal('generate')}
+              className="px-3 py-1.5 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+            >
+              Generate from Patterns
+            </button>
+          </Tooltip>
+          <button
+            onClick={() => setModal('create')}
             className="px-3 py-1.5 rounded-lg text-sm font-semibold text-white"
-            style={{ backgroundColor: '#1B3A5C' }}>
+            style={{ backgroundColor: '#1B3A5C' }}
+          >
             + Create Shift
           </button>
         </div>
       </header>
 
-      {/* Filters */}
-      <div className="px-6 py-3 border-b border-gray-100 bg-white flex items-end gap-3 shrink-0">
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Status</label>
-          <select value={filterStatus} onChange={e => { setFilterStatus(e.target.value) }}
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All statuses</option>
-            {SHIFT_STATUS.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
+      {/* Calendar view */}
+      {view === 'calendar' ? (
+        <div className="flex-1 overflow-hidden bg-gray-50">
+          <CalendarView shifts={shifts} />
         </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Date</label>
-          <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)}
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-        </div>
-        {(filterStatus || filterDate) && (
-          <button onClick={() => { setFilterStatus(''); setFilterDate('') }}
-            className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50">
-            Clear
-          </button>
-        )}
-      </div>
-
-      {/* Table */}
-      <div className="flex-1 p-6">
-        {loading ? (
-          <div className="text-sm text-gray-400 py-8 text-center">Loading…</div>
-        ) : shifts.length === 0 ? (
-          <div className="text-sm text-gray-400 py-8 text-center">
-            No shifts found. Create one manually or generate from shift patterns.
+      ) : (
+        <>
+          {/* List view filters */}
+          <div className="px-6 py-3 border-b border-gray-100 bg-white flex items-end gap-3 shrink-0">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Status</label>
+              <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
+                className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">All statuses</option>
+                {SHIFT_STATUS.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Date</label>
+              <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)}
+                className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            {(filterStatus || filterDate) && (
+              <button onClick={() => { setFilterStatus(''); setFilterDate('') }}
+                className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50">
+                Clear
+              </button>
+            )}
           </div>
-        ) : (
-          <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-gray-50 border-b border-gray-200">
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Employee</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden sm:table-cell">Section</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Scheduled</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden md:table-cell">Actual</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
-                  <th className="px-4 py-2.5"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {shifts.map((shift, i) => (
-                  <tr key={shift.id} className={`${i < shifts.length - 1 ? 'border-b border-gray-100' : ''} hover:bg-gray-50 transition-colors`}>
-                    <td className="px-4 py-3 font-medium text-gray-900">{getEmployeeName(shift.employee_id)}</td>
-                    <td className="px-4 py-3 text-gray-500 hidden sm:table-cell">{getSectionName(shift.section_id)}</td>
-                    <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
-                      {fmt(shift.scheduled_start)}<br />
-                      <span className="text-gray-400">→ {fmtTime(shift.scheduled_end)}</span>
-                    </td>
-                    <td className="px-4 py-3 text-gray-500 text-xs hidden md:table-cell">
-                      {shift.actual_start ? (
-                        <>{fmtTime(shift.actual_start)} → {shift.actual_end ? fmtTime(shift.actual_end) : <span className="text-green-600">ongoing</span>}</>
-                      ) : '—'}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_BADGE[shift.status] || 'bg-gray-100 text-gray-600'}`}>
-                        {shift.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <button onClick={() => setModal({ type: 'assignments', shift })}
-                          className="text-xs px-2 py-1 rounded text-gray-600 hover:bg-gray-100 transition-colors">
-                          Assignments
-                        </button>
-                        <button onClick={() => setModal({ type: 'edit', shift })}
-                          className="text-xs px-2 py-1 rounded text-blue-600 hover:bg-blue-50 transition-colors">
-                          Edit
-                        </button>
-                        <button onClick={() => handleDelete(shift)}
-                          className="text-xs px-2 py-1 rounded text-red-500 hover:bg-red-50 transition-colors">
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
 
+          {/* List view table */}
+          <div className="flex-1 overflow-auto p-6">
+            {loading ? (
+              <div className="text-sm text-gray-400 py-8 text-center">Loading…</div>
+            ) : shifts.length === 0 ? (
+              <div className="text-sm text-gray-400 py-8 text-center">
+                No shifts found. Create one manually or generate from shift patterns.
+              </div>
+            ) : (
+              <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Employee</th>
+                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden sm:table-cell">Section</th>
+                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Scheduled</th>
+                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden md:table-cell">Actual</th>
+                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+                      <th className="px-4 py-2.5"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shifts.map((shift, i) => (
+                      <tr key={shift.id} className={`${i < shifts.length - 1 ? 'border-b border-gray-100' : ''} hover:bg-gray-50 transition-colors`}>
+                        <td className="px-4 py-3 font-medium text-gray-900">{getEmployeeName(shift.employee_id)}</td>
+                        <td className="px-4 py-3 text-gray-500 hidden sm:table-cell">{getSectionName(shift.section_id)}</td>
+                        <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
+                          {fmt(shift.scheduled_start)}<br />
+                          <span className="text-gray-400">→ {fmtTime(shift.scheduled_end)}</span>
+                        </td>
+                        <td className="px-4 py-3 text-gray-500 text-xs hidden md:table-cell">
+                          {shift.actual_start ? (
+                            <>{fmtTime(shift.actual_start)} → {shift.actual_end
+                              ? fmtTime(shift.actual_end)
+                              : <span className="text-green-600">ongoing</span>
+                            }</>
+                          ) : '—'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_BADGE[shift.status] || 'bg-gray-100 text-gray-600'}`}>
+                            {shift.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            <button onClick={() => setModal({ type: 'assignments', shift })}
+                              className="text-xs px-2 py-1 rounded text-gray-600 hover:bg-gray-100 transition-colors">
+                              Assignments
+                            </button>
+                            <button onClick={() => setModal({ type: 'edit', shift })}
+                              className="text-xs px-2 py-1 rounded text-blue-600 hover:bg-blue-50 transition-colors">
+                              Edit
+                            </button>
+                            <button onClick={() => handleDelete(shift)}
+                              className="text-xs px-2 py-1 rounded text-red-500 hover:bg-red-50 transition-colors">
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Modals */}
       {modal === 'create' && (
         <ShiftModal slug={slug} employees={employees} sections={sections} onClose={() => setModal(null)} onDone={fetchData} />
       )}

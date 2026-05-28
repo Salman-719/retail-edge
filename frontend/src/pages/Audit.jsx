@@ -3,6 +3,32 @@ import { useParams } from 'react-router-dom'
 import { useAuth } from '../store'
 import { getAuditLog } from '../api'
 
+function CopyableId({ id }) {
+  const [copied, setCopied] = useState(false)
+  function handleCopy() {
+    navigator.clipboard.writeText(id).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+  return (
+    <span className="relative group/id inline-block">
+      <button
+        onClick={handleCopy}
+        title={id}
+        className="text-xs text-gray-400 font-mono hover:text-blue-600 transition-colors cursor-pointer"
+      >
+        {id.slice(0, 8)}…
+      </button>
+      {copied && (
+        <span className="absolute -top-6 left-0 bg-gray-800 text-white text-xs px-2 py-0.5 rounded whitespace-nowrap z-10">
+          Copied!
+        </span>
+      )}
+    </span>
+  )
+}
+
 const ACTION_GROUPS = {
   Auth: ['login', 'logout', 'password_reset'],
   Store: ['store_created', 'store_updated'],
@@ -12,24 +38,12 @@ const ACTION_GROUPS = {
   Shifts: ['shift_pattern_created', 'shift_pattern_updated', 'shift_pattern_deleted', 'shift_created', 'shift_updated', 'shift_deleted', 'shift_employee_assigned', 'shift_attendance_updated', 'break_created'],
 }
 
-const ACTION_BADGE = {
-  login: 'bg-green-100 text-green-700',
-  logout: 'bg-gray-100 text-gray-600',
-  store_created: 'bg-blue-100 text-blue-700',
-  store_updated: 'bg-blue-100 text-blue-700',
-  member_invited: 'bg-purple-100 text-purple-700',
-  member_removed: 'bg-red-100 text-red-700',
-  member_role_changed: 'bg-purple-100 text-purple-700',
-  permission_changed: 'bg-purple-100 text-purple-700',
-  draft_created: 'bg-yellow-100 text-yellow-700',
-  draft_discarded: 'bg-orange-100 text-orange-700',
-  version_activated: 'bg-green-100 text-green-700',
-  version_rolled_back: 'bg-orange-100 text-orange-700',
-  employee_created: 'bg-teal-100 text-teal-700',
-  employee_updated: 'bg-teal-100 text-teal-700',
-  employee_deleted: 'bg-red-100 text-red-700',
-  shift_created: 'bg-indigo-100 text-indigo-700',
-  shift_deleted: 'bg-red-100 text-red-700',
+function actionBadgeClass(action) {
+  const label = actionLabel(action)
+  if (label.includes('Deleted') || label.includes('Removed')) return 'bg-red-100 text-red-700'
+  if (label.includes('Created') || label.includes('Activated') || label.includes('Login')) return 'bg-green-100 text-green-700'
+  if (label.includes('Updated') || label.includes('Assigned') || label.includes('Changed')) return 'bg-amber-100 text-amber-700'
+  return 'bg-gray-100 text-gray-600'
 }
 
 const ENTITY_TYPES = ['store', 'store_config_version', 'member', 'employee', 'employee_section', 'shift_pattern', 'shift_instance', 'shift_assignment', 'break_record']
@@ -206,7 +220,7 @@ export default function Audit() {
                   <tr key={entry.id} className={`${i < entries.length - 1 ? 'border-b border-gray-100' : ''} hover:bg-gray-50 transition-colors`}>
                     <td className="px-4 py-3 text-gray-500 whitespace-nowrap text-xs">{formatDate(entry.created_at)}</td>
                     <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${ACTION_BADGE[entry.action] || 'bg-gray-100 text-gray-600'}`}>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${actionBadgeClass(entry.action)}`}>
                         {actionLabel(entry.action)}
                       </span>
                     </td>
@@ -215,14 +229,14 @@ export default function Audit() {
                         <div>
                           <span className="text-xs text-gray-600">{entry.entity_type.replace(/_/g, ' ')}</span>
                           {entry.entity_id && (
-                            <p className="text-xs text-gray-400 font-mono">{entry.entity_id.slice(0, 8)}…</p>
+                            <p><CopyableId id={entry.entity_id} /></p>
                           )}
                         </div>
                       ) : <span className="text-gray-300">—</span>}
                     </td>
                     <td className="px-4 py-3 hidden lg:table-cell">
                       {entry.user_id
-                        ? <span className="text-xs text-gray-500 font-mono">{entry.user_id.slice(0, 8)}…</span>
+                        ? <CopyableId id={entry.user_id} />
                         : <span className="text-gray-300">—</span>}
                     </td>
                     <td className="px-4 py-3 hidden lg:table-cell">

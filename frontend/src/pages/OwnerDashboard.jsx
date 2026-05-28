@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useNavigate, Navigate } from 'react-router-dom'
 import { useAuth } from '../store'
-import { listStores, createStore, logout, saveTokens } from '../api'
+import { listStores, createStore, patchStore, logout } from '../api'
 
 const TIMEZONES = [
   'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
@@ -31,9 +31,13 @@ export default function OwnerDashboard() {
   const [stores, setStores] = useState([])
   const [loadingStores, setLoadingStores] = useState(true)
   const [showModal, setShowModal] = useState(false)
+  const [editStore, setEditStore] = useState(null)
   const [form, setForm] = useState({ name: '', slug: '', timezone: 'UTC', currency: 'USD', address: '' })
   const [formError, setFormError] = useState('')
   const [creating, setCreating] = useState(false)
+  const [editForm, setEditForm] = useState({ name: '', timezone: 'UTC', currency: 'USD', address: '' })
+  const [editError, setEditError] = useState('')
+  const [editing, setEditing] = useState(false)
 
   useEffect(() => {
     listStores()
@@ -49,6 +53,18 @@ export default function OwnerDashboard() {
       if (name === 'name') next.slug = slugify(value)
       return next
     })
+  }
+
+  function openEditModal(store, e) {
+    e.stopPropagation()
+    setEditStore(store)
+    setEditForm({
+      name: store.name,
+      timezone: store.timezone || 'UTC',
+      currency: store.currency || 'USD',
+      address: store.address || '',
+    })
+    setEditError('')
   }
 
   async function handleCreate(e) {
@@ -74,6 +90,29 @@ export default function OwnerDashboard() {
       setFormError(typeof detail === 'string' ? detail : detail?.error || 'Failed to create store')
     } finally {
       setCreating(false)
+    }
+  }
+
+  async function handleEdit(e) {
+    e.preventDefault()
+    setEditError('')
+    if (!editForm.name.trim()) { setEditError('Store name is required'); return }
+    setEditing(true)
+    try {
+      await patchStore(editStore.slug, {
+        name: editForm.name.trim() || undefined,
+        timezone: editForm.timezone || undefined,
+        currency: editForm.currency || undefined,
+        address: editForm.address.trim() || undefined,
+      })
+      const updated = await listStores()
+      setStores(updated.stores || updated)
+      setEditStore(null)
+    } catch (err) {
+      const detail = err.response?.data?.detail
+      setEditError(typeof detail === 'string' ? detail : detail?.error || 'Failed to update store')
+    } finally {
+      setEditing(false)
     }
   }
 
@@ -130,30 +169,40 @@ export default function OwnerDashboard() {
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {stores.map(store => (
-              <button
-                key={store.id}
-                onClick={() => {
-                  dispatch({ type: 'SET_STORE', payload: store })
-                  navigate(`/store/${store.slug}/live`)
-                }}
-                className="text-left bg-white border border-gray-200 rounded-xl p-5 hover:border-blue-400 hover:shadow-sm transition-all group"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1 min-w-0">
-                    <p className="font-semibold text-gray-900 truncate group-hover:text-blue-700 transition-colors">
-                      {store.name}
-                    </p>
-                    <p className="text-xs text-gray-400 mt-0.5">{store.slug}</p>
+              <div key={store.id} className="relative group">
+                <button
+                  onClick={() => {
+                    dispatch({ type: 'SET_STORE', payload: store })
+                    navigate(`/store/${store.slug}/live`)
+                  }}
+                  className="w-full text-left bg-white border border-gray-200 rounded-xl p-5 hover:border-blue-400 hover:shadow-sm transition-all"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1 min-w-0 pr-6">
+                      <p className="font-semibold text-gray-900 truncate group-hover:text-blue-700 transition-colors">
+                        {store.name}
+                      </p>
+                      <p className="text-xs text-gray-400 mt-0.5">{store.slug}</p>
+                    </div>
+                    <span className={`ml-2 shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[store.status] || STATUS_COLORS.inactive}`}>
+                      {store.status || 'inactive'}
+                    </span>
                   </div>
-                  <span className={`ml-2 shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[store.status] || STATUS_COLORS.inactive}`}>
-                    {store.status || 'inactive'}
-                  </span>
-                </div>
-                {store.address && (
-                  <p className="text-xs text-gray-400 mt-2 truncate">{store.address}</p>
-                )}
-                <p className="text-xs text-gray-400 mt-1">{store.timezone} · {store.currency}</p>
-              </button>
+                  {store.address && (
+                    <p className="text-xs text-gray-400 mt-2 truncate">{store.address}</p>
+                  )}
+                  <p className="text-xs text-gray-400 mt-1">{store.timezone} · {store.currency}</p>
+                </button>
+                <button
+                  onClick={(e) => openEditModal(store, e)}
+                  title="Edit store"
+                  className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-gray-700 bg-white rounded p-1"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                </button>
+              </div>
             ))}
           </div>
         )}
@@ -259,6 +308,94 @@ export default function OwnerDashboard() {
                   style={{ backgroundColor: '#1B3A5C' }}
                 >
                   {creating ? 'Creating…' : 'Create Store'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Store Modal */}
+      {editStore && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">Edit Store</h3>
+              <button
+                onClick={() => { setEditStore(null); setEditError('') }}
+                className="text-gray-400 hover:text-gray-600 text-lg leading-none"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleEdit} className="px-6 py-4 space-y-4">
+              {editError && (
+                <div className="bg-red-50 text-red-700 text-sm px-3 py-2 rounded-lg border border-red-200">
+                  {editError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Store Name <span className="text-red-500">*</span></label>
+                <input
+                  type="text"
+                  required
+                  value={editForm.name}
+                  onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
+                  <select
+                    value={editForm.timezone}
+                    onChange={e => setEditForm(f => ({ ...f, timezone: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    {TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Currency</label>
+                  <select
+                    value={editForm.currency}
+                    onChange={e => setEditForm(f => ({ ...f, currency: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Address <span className="text-gray-400 font-normal">(optional)</span></label>
+                <input
+                  type="text"
+                  value={editForm.address}
+                  onChange={e => setEditForm(f => ({ ...f, address: e.target.value }))}
+                  placeholder="e.g. 123 Main St, City"
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => { setEditStore(null); setEditError('') }}
+                  className="flex-1 py-2 px-4 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editing}
+                  className="flex-1 py-2 px-4 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-50"
+                  style={{ backgroundColor: '#1B3A5C' }}
+                >
+                  {editing ? 'Saving…' : 'Save Changes'}
                 </button>
               </div>
             </form>

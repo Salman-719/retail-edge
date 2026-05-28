@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
+import { Pencil, UserX, UserCheck, Trash2 } from 'lucide-react'
 import { useAuth } from '../store'
 import {
   listEmployees, createEmployee, patchEmployee, deleteEmployee,
@@ -22,6 +23,51 @@ const ROLE_BADGE = {
   delivery: 'bg-orange-100 text-orange-700',
   customer_service: 'bg-teal-100 text-teal-700',
 }
+
+// Role options for the filter dropdown
+const ROLE_FILTER_OPTIONS = [
+  { value: '', label: 'All Roles' },
+  { value: 'supervisor', label: 'Supervisor' },
+  { value: 'cashier', label: 'Cashier' },
+  { value: 'shelf_stocker', label: 'Stock' },
+  { value: 'security', label: 'Security' },
+]
+
+// ─── Icon button with tooltip ─────────────────────────────────────────────────
+
+function IconBtn({ icon: Icon, label, onClick, colorClass = 'text-gray-500 hover:bg-gray-100 hover:text-gray-800' }) {
+  return (
+    <div className="relative group">
+      <button
+        onClick={onClick}
+        className={`p-1.5 rounded-lg transition-colors ${colorClass}`}
+        aria-label={label}
+      >
+        <Icon size={15} strokeWidth={1.75} />
+      </button>
+      <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-0.5 bg-gray-800 text-white text-xs rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity z-10">
+        {label}
+      </div>
+    </div>
+  )
+}
+
+// ─── Section/Shift count badge ────────────────────────────────────────────────
+
+function CountBadge({ count, label, onClick, loading }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={loading}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50 whitespace-nowrap"
+    >
+      <span className="font-bold">{loading ? '…' : count}</span>
+      <span>{label}</span>
+    </button>
+  )
+}
+
+// ─── Employee modal ───────────────────────────────────────────────────────────
 
 function EmployeeModal({ slug, employee, onClose, onDone }) {
   const editing = !!employee
@@ -128,6 +174,8 @@ function EmployeeModal({ slug, employee, onClose, onDone }) {
     </div>
   )
 }
+
+// ─── Sections panel ───────────────────────────────────────────────────────────
 
 function SectionsPanel({ slug, employee, sections, onClose }) {
   const [assignments, setAssignments] = useState([])
@@ -256,6 +304,8 @@ function SectionsPanel({ slug, employee, sections, onClose }) {
     </div>
   )
 }
+
+// ─── Shift patterns panel ─────────────────────────────────────────────────────
 
 function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
   const [patterns, setPatterns] = useState([])
@@ -421,6 +471,49 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
   )
 }
 
+// ─── Badge cell with lazy count fetch ────────────────────────────────────────
+// Fetches count once on mount, shows pill, opens modal on click.
+
+function SectionsBadge({ slug, employee, onClick }) {
+  const [count, setCount] = useState(null)
+
+  useEffect(() => {
+    listEmployeeSections(slug, employee.id)
+      .then(data => setCount(data.length))
+      .catch(() => setCount(0))
+  }, [slug, employee.id])
+
+  return (
+    <CountBadge
+      count={count ?? '…'}
+      label={count === 1 ? 'Section' : 'Sections'}
+      loading={count === null}
+      onClick={onClick}
+    />
+  )
+}
+
+function ShiftsBadge({ slug, employee, onClick }) {
+  const [count, setCount] = useState(null)
+
+  useEffect(() => {
+    listShiftPatterns(slug, { employee_id: employee.id })
+      .then(data => setCount(data.length))
+      .catch(() => setCount(0))
+  }, [slug, employee.id])
+
+  return (
+    <CountBadge
+      count={count ?? '…'}
+      label={count === 1 ? 'Shift' : 'Shifts'}
+      loading={count === null}
+      onClick={onClick}
+    />
+  )
+}
+
+// ─── Main page ────────────────────────────────────────────────────────────────
+
 export default function Employees() {
   const { slug } = useParams()
   const { state } = useAuth()
@@ -430,8 +523,9 @@ export default function Employees() {
   const [sections, setSections] = useState([])
   const [loading, setLoading] = useState(true)
   const [showAll, setShowAll] = useState(false)
-  const [modal, setModal] = useState(null) // null | 'create' | { type: 'edit'|'sections'|'patterns', employee }
+  const [modal, setModal] = useState(null)
   const [search, setSearch] = useState('')
+  const [roleFilter, setRoleFilter] = useState('')
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -484,11 +578,15 @@ export default function Employees() {
     }
   }
 
-  const filtered = employees.filter(e =>
-    e.name.toLowerCase().includes(search.toLowerCase()) ||
-    (e.employee_code || '').toLowerCase().includes(search.toLowerCase()) ||
-    e.role.toLowerCase().includes(search.toLowerCase())
-  )
+  // Client-side filtering: text search + role dropdown
+  const filtered = employees.filter(e => {
+    const matchesSearch =
+      e.name.toLowerCase().includes(search.toLowerCase()) ||
+      (e.employee_code || '').toLowerCase().includes(search.toLowerCase()) ||
+      e.role.toLowerCase().includes(search.toLowerCase())
+    const matchesRole = roleFilter === '' || e.role === roleFilter
+    return matchesSearch && matchesRole
+  })
 
   return (
     <div className="flex flex-col h-full overflow-auto">
@@ -505,14 +603,24 @@ export default function Employees() {
         </button>
       </header>
 
-      <div className="px-6 py-3 border-b border-gray-100 bg-white flex items-center gap-3 shrink-0">
+      {/* Search bar + role filter + show inactive */}
+      <div className="px-6 py-3 border-b border-gray-100 bg-white flex items-center gap-3 shrink-0 flex-wrap">
         <input
           type="search"
           placeholder="Search by name, code or role…"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          className="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="flex-1 min-w-36 border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
+        <select
+          value={roleFilter}
+          onChange={e => setRoleFilter(e.target.value)}
+          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+        >
+          {ROLE_FILTER_OPTIONS.map(o => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
         <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer whitespace-nowrap">
           <input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} className="rounded" />
           Show inactive
@@ -524,7 +632,7 @@ export default function Employees() {
           <div className="text-sm text-gray-400 py-8 text-center">Loading…</div>
         ) : filtered.length === 0 ? (
           <div className="text-sm text-gray-400 py-8 text-center">
-            {search ? 'No employees match your search.' : 'No employees yet. Add one to get started.'}
+            {search || roleFilter ? 'No employees match your filters.' : 'No employees yet. Add one to get started.'}
           </div>
         ) : (
           <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
@@ -535,6 +643,7 @@ export default function Employees() {
                   <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Role</th>
                   <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden sm:table-cell">Code</th>
                   <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden md:table-cell">Status</th>
+                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Assignments</th>
                   <th className="px-4 py-2.5"></th>
                 </tr>
               </thead>
@@ -564,41 +673,53 @@ export default function Employees() {
                         {emp.is_active ? 'Active' : 'Inactive'}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <button
+
+                    {/* Clickable badge counts */}
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <SectionsBadge
+                          slug={slug}
+                          employee={emp}
                           onClick={() => setModal({ type: 'sections', employee: emp })}
-                          className="text-xs px-2 py-1 rounded text-gray-600 hover:bg-gray-100 transition-colors">
-                          Sections
-                        </button>
-                        <button
+                        />
+                        <ShiftsBadge
+                          slug={slug}
+                          employee={emp}
                           onClick={() => setModal({ type: 'patterns', employee: emp })}
-                          className="text-xs px-2 py-1 rounded text-gray-600 hover:bg-gray-100 transition-colors">
-                          Shifts
-                        </button>
-                        <button
+                        />
+                      </div>
+                    </td>
+
+                    {/* Icon action buttons */}
+                    <td className="px-4 py-3">
+                      <div className="flex items-center justify-end gap-0.5">
+                        <IconBtn
+                          icon={Pencil}
+                          label="Edit"
                           onClick={() => setModal({ type: 'edit', employee: emp })}
-                          className="text-xs px-2 py-1 rounded text-blue-600 hover:bg-blue-50 transition-colors">
-                          Edit
-                        </button>
+                          colorClass="text-blue-500 hover:bg-blue-50 hover:text-blue-700"
+                        />
                         {emp.is_active ? (
-                          <button
+                          <IconBtn
+                            icon={UserX}
+                            label="Deactivate"
                             onClick={() => handleDeactivate(emp)}
-                            className="text-xs px-2 py-1 rounded text-orange-500 hover:bg-orange-50 transition-colors">
-                            Deactivate
-                          </button>
+                            colorClass="text-orange-500 hover:bg-orange-50 hover:text-orange-700"
+                          />
                         ) : (
-                          <button
+                          <IconBtn
+                            icon={UserCheck}
+                            label="Reactivate"
                             onClick={() => handleReactivate(emp)}
-                            className="text-xs px-2 py-1 rounded text-green-600 hover:bg-green-50 transition-colors">
-                            Reactivate
-                          </button>
+                            colorClass="text-green-600 hover:bg-green-50 hover:text-green-700"
+                          />
                         )}
-                        <button
+                        <IconBtn
+                          icon={Trash2}
+                          label="Delete"
                           onClick={() => handleDelete(emp)}
-                          className="text-xs px-2 py-1 rounded text-red-500 hover:bg-red-50 transition-colors">
-                          Delete
-                        </button>
+                          colorClass="text-red-500 hover:bg-red-50 hover:text-red-700"
+                        />
                       </div>
                     </td>
                   </tr>

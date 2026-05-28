@@ -4,6 +4,7 @@ import { useAuth } from '../store'
 import {
   listMembers, inviteMember, listInvitations,
   cancelInvitation, patchMember, removeMember,
+  requestDraftDiscard, getDraft,
 } from '../api'
 
 const ROLE_LABELS = { manager: 'Manager', viewer: 'Viewer' }
@@ -225,17 +226,38 @@ export default function Members() {
   const [loading, setLoading] = useState(true)
   const [showInvite, setShowInvite] = useState(false)
   const [editMember, setEditMember] = useState(null)
+  const [activeDraft, setActiveDraft] = useState(null)
+  const [discardRequesting, setDiscardRequesting] = useState(false)
+  const [discardSent, setDiscardSent] = useState(false)
 
   const fetchData = useCallback(() => {
     setLoading(true)
-    Promise.all([listMembers(slug), listInvitations(slug)])
-      .then(([m, inv]) => {
+    Promise.all([
+      listMembers(slug),
+      listInvitations(slug),
+      getDraft(slug).catch(() => null),
+    ])
+      .then(([m, inv, draft]) => {
         setMembers(m.members || m)
         setInvitations(inv.invitations || inv)
+        setActiveDraft(draft)
       })
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [slug])
+
+  async function handleRequestDraftDiscard() {
+    if (!window.confirm('Send an email to the draft owner requesting they discard the current draft?')) return
+    setDiscardRequesting(true)
+    try {
+      await requestDraftDiscard(slug)
+      setDiscardSent(true)
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to send request')
+    } finally {
+      setDiscardRequesting(false)
+    }
+  }
 
   useEffect(() => { fetchData() }, [fetchData])
 
@@ -288,6 +310,29 @@ export default function Members() {
           <div className="text-sm text-gray-400 py-8 text-center">Loading…</div>
         ) : (
           <>
+            {/* Draft discard request — shown to managers when a draft exists */}
+            {activeDraft && role === 'manager' && (
+              <div className="bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-yellow-800">An active draft exists</p>
+                  <p className="text-xs text-yellow-600 mt-0.5">
+                    Draft: <span className="font-mono">{activeDraft.label || activeDraft.id}</span>
+                  </p>
+                </div>
+                {discardSent ? (
+                  <span className="text-xs text-green-700 bg-green-100 px-3 py-1.5 rounded-lg font-medium">Request sent</span>
+                ) : (
+                  <button
+                    onClick={handleRequestDraftDiscard}
+                    disabled={discardRequesting}
+                    className="text-xs px-3 py-1.5 rounded-lg border border-yellow-400 text-yellow-800 hover:bg-yellow-100 transition-colors disabled:opacity-50 shrink-0"
+                  >
+                    {discardRequesting ? 'Sending…' : 'Request discard'}
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Active Members */}
             <section>
               <h2 className="text-sm font-semibold text-gray-700 mb-3">Active Members ({members.length})</h2>

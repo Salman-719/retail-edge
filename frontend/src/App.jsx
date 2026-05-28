@@ -17,6 +17,7 @@ import Employees from './pages/Employees'
 import Shifts from './pages/Shifts'
 import Members from './pages/Members'
 import Audit from './pages/Audit'
+import AIAgent from './pages/AIAgent'
 import Settings from './pages/Settings'
 
 export default function App() {
@@ -39,6 +40,7 @@ export default function App() {
           <Route path="config/edit" element={<StoreConfigEdit />} />
           <Route path="live" element={<LiveMonitoring />} />
           <Route path="analytics" element={<Analytics />} />
+          <Route path="agent" element={<AIAgent />} />
           <Route path="employees" element={<Employees />} />
           <Route path="shifts" element={<Shifts />} />
           <Route path="members" element={<Members />} />

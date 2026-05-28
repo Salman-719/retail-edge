@@ -6,7 +6,7 @@ import {
   deleteCameraConfig, deleteCamera, deleteDraft, deleteObstacle, deleteZone,
   getActiveVersion, getDraft, getDraftCameraConfigs, getDraftFloorPlan, getDraftObstacles,
   getDraftZones, getCalibrations, getSyncEvent, listSections, placeCameraConfig,
-  setFloorPlanScale, uploadCameraFrame, uploadFloorPlan, verifyCalibration,
+  setFloorPlanScale, updateCameraConfig, uploadCameraFrame, uploadFloorPlan, verifyCalibration,
 } from '../api'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -280,6 +280,10 @@ export default function StoreConfigEdit() {
   const [selectedConfigId, setSelectedConfigId] = useState(null)
   const selectedConfig = cameraConfigs.find(cc => cc.id === selectedConfigId) ?? null
 
+  // Step 3 — inline camera config editing
+  const [editingConfigId, setEditingConfigId] = useState(null)
+  const [editCameraForm, setEditCameraForm] = useState({ height_meters: '', fov_deg: '' })
+
   // Steps 5-6 — per-camera correspondences and computed calibration results
   const [correspondencesMap, setCorrespondencesMap] = useState({})
   const [calibResultsMap, setCalibResultsMap] = useState({})
@@ -313,7 +317,7 @@ export default function StoreConfigEdit() {
         cameraConfigs.every(cc => cc.status !== 'pending')
       case 5: return cameraConfigs.length > 0 &&
         cameraConfigs.every(cc =>
-          (correspondencesMap[cc.id]?.length >= 4) ||
+          (correspondencesMap[cc.id]?.length >= 8) ||
           ['calibrated', 'verified'].includes(cc.status)
         )
       case 6: return cameraConfigs.length > 0 &&
@@ -552,6 +556,24 @@ export default function StoreConfigEdit() {
     }
   }
 
+  async function handleUpdateCameraConfig(e) {
+    e.preventDefault()
+    if (!editingConfigId) return
+    setSaving(true)
+    try {
+      const body = {}
+      if (editCameraForm.height_meters !== '') body.height_meters = parseFloat(editCameraForm.height_meters)
+      if (editCameraForm.fov_deg !== '') body.fov_deg = parseFloat(editCameraForm.fov_deg)
+      const updated = await updateCameraConfig(slug, editingConfigId, body)
+      setCameraConfigs(prev => prev.map(c => c.id === editingConfigId ? { ...c, ...updated } : c))
+      setEditingConfigId(null)
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   // ─── Steps 5-6: Correspondences and homography ───────────────────────────
 
   function handleFrameClickForCorrespondence(x, y) {
@@ -576,7 +598,7 @@ export default function StoreConfigEdit() {
 
   async function handleComputeHomographyFor(configId) {
     const corr = correspondencesMap[configId] || []
-    if (corr.length < 4) return
+    if (corr.length < 8) return
     setSaving(true)
     try {
       const result = await computeHomography(slug, configId, corr)
@@ -982,20 +1004,70 @@ export default function StoreConfigEdit() {
               <div className="space-y-1 max-w-lg">
                 <p className="text-xs font-medium text-gray-500 uppercase mb-2">Placed Cameras</p>
                 {cameraConfigs.map(cc => (
-                  <div key={cc.id}
-                    className="flex items-center justify-between bg-gray-50 border border-gray-100 rounded px-3 py-2 text-sm"
-                  >
-                    <span className="font-medium">{cc.physical_camera_name}</span>
-                    <span className="text-xs text-gray-400 mx-2">
-                      ({Math.round(cc.position_x)}, {Math.round(cc.position_y)})
-                      {cc.height_meters != null ? ` · ${cc.height_meters}m` : ''}
-                    </span>
-                    <button
-                      onClick={() => handleDeleteCamera(cc)}
-                      className="text-xs text-red-400 hover:text-red-600 flex-shrink-0"
-                    >
-                      Delete
-                    </button>
+                  <div key={cc.id} className="bg-gray-50 border border-gray-100 rounded text-sm">
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <span className="font-medium">{cc.physical_camera_name}</span>
+                      <span className="text-xs text-gray-400 mx-2">
+                        ({Math.round(cc.position_x)}, {Math.round(cc.position_y)})
+                        {cc.height_meters != null ? ` · ${cc.height_meters}m` : ''}
+                        {cc.fov_deg != null ? ` · ${cc.fov_deg}°` : ''}
+                      </span>
+                      <div className="flex gap-2 flex-shrink-0">
+                        <button
+                          onClick={() => {
+                            if (editingConfigId === cc.id) { setEditingConfigId(null); return }
+                            setEditingConfigId(cc.id)
+                            setEditCameraForm({
+                              height_meters: cc.height_meters ?? '',
+                              fov_deg: cc.fov_deg ?? '',
+                            })
+                          }}
+                          className="text-xs text-blue-500 hover:text-blue-700"
+                        >
+                          {editingConfigId === cc.id ? 'Cancel' : 'Edit'}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteCamera(cc)}
+                          className="text-xs text-red-400 hover:text-red-600"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                    {editingConfigId === cc.id && (
+                      <form
+                        onSubmit={handleUpdateCameraConfig}
+                        className="border-t border-gray-200 px-3 py-2 flex items-center gap-3 flex-wrap"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <label className="text-xs text-gray-500">Height (m):</label>
+                          <input
+                            type="number" step="0.1" min="0.1"
+                            value={editCameraForm.height_meters}
+                            onChange={e => setEditCameraForm(f => ({ ...f, height_meters: e.target.value }))}
+                            className="w-20 border border-gray-300 rounded px-2 py-1 text-xs"
+                            placeholder="e.g. 3.5"
+                          />
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <label className="text-xs text-gray-500">FOV (°):</label>
+                          <input
+                            type="number" step="1" min="1" max="360"
+                            value={editCameraForm.fov_deg}
+                            onChange={e => setEditCameraForm(f => ({ ...f, fov_deg: e.target.value }))}
+                            className="w-20 border border-gray-300 rounded px-2 py-1 text-xs"
+                            placeholder="e.g. 90"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={saving}
+                          className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium disabled:opacity-50"
+                        >
+                          {saving ? 'Saving…' : 'Save'}
+                        </button>
+                      </form>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1076,7 +1148,7 @@ export default function StoreConfigEdit() {
             <div>
               <h2 className="text-xl font-semibold mb-1">Point Correspondences</h2>
               <p className="text-sm text-gray-500">
-                For each camera: click a point on its frame, then click the matching spot on the floor plan. Repeat ≥ 4 times.
+                For each camera: click a point on its frame, then click the matching spot on the floor plan. Repeat ≥ 8 times, spread across the full frame.
                 {pendingPixelPt && (
                   <span className="ml-2 text-blue-600 font-medium">→ Now click the matching location on the floor plan</span>
                 )}
@@ -1199,7 +1271,7 @@ export default function StoreConfigEdit() {
                   {!alreadyDone && (
                     <button
                       onClick={() => handleComputeHomographyFor(cc.id)}
-                      disabled={corr.length < 4 || saving}
+                      disabled={corr.length < 8 || saving}
                       className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm disabled:opacity-50"
                     >
                       {saving ? 'Computing…' : `Compute (${corr.length} pairs)`}

@@ -7,6 +7,7 @@ const NAV = [
   { label: 'Store Config', path: 'config' },
   { label: 'Live Monitoring', path: 'live' },
   { label: 'Analytics', path: 'analytics' },
+  { label: 'AI Assistant', path: 'agent' },
   { label: 'Employees', path: 'employees' },
   { label: 'Shifts', path: 'shifts' },
   { label: 'Members', path: 'members' },

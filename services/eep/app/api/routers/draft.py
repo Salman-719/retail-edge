@@ -1244,6 +1244,18 @@ async def compute_homography_calibration(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"error": str(exc), "code": "HOMOGRAPHY_FAILED"})
 
+    if result["coverage_score"] < 0.25:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": (
+                    f"Points are too clustered (coverage {result['coverage_score']:.2f} < 0.25). "
+                    "Add more points spread across different areas of the camera frame."
+                ),
+                "code": "POOR_COVERAGE",
+            },
+        )
+
     now = datetime.now(timezone.utc)
 
     # Demote any prior current calibration for this config

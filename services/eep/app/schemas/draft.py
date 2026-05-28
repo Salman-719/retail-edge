@@ -261,9 +261,9 @@ class HomographyRequest(BaseModel):
 
     @field_validator("correspondences")
     @classmethod
-    def min_four_pairs(cls, v: list[Correspondence]) -> list[Correspondence]:
-        if len(v) < 4:
-            raise ValueError("at least 4 point correspondences required")
+    def min_eight_pairs(cls, v: list[Correspondence]) -> list[Correspondence]:
+        if len(v) < 8:
+            raise ValueError("at least 8 point correspondences required")
         return v
 
 
