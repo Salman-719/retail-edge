@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { usePageTitle } from '../components/PageMeta'
+import { StatsSkeleton } from '../components/Skeletons'
+import SectionTabs from '../components/SectionTabs'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
 import { getActiveVersion } from '../api'
 
@@ -206,6 +209,7 @@ function AlertCard({ alert, onDismiss }) {
 
 export default function LiveMonitoring() {
   const { slug } = useParams()
+  usePageTitle('Live Monitoring')
 
   // MOCK: replace with API call to GET /store/{slug}/live/summary
   const [kpi] = useState(MOCK_KPI)
@@ -219,18 +223,23 @@ export default function LiveMonitoring() {
   // MOCK: replace with API call to GET /store/{slug}/live/positions
   const [people] = useState(MOCK_PEOPLE)
 
-  const [section, setSection] = useState(null)
+  const [sections, setSections] = useState([])
+  const [selectedSectionId, setSelectedSectionId] = useState(null)
   const [loadingConfig, setLoadingConfig] = useState(true)
 
   useEffect(() => {
     getActiveVersion(slug)
       .then(v => {
-        const defaultSec = v?.sections?.find(s => s.is_default) || v?.sections?.[0] || null
-        setSection(defaultSec)
+        const secs = v?.sections || []
+        setSections(secs)
+        const defaultSec = secs.find(s => s.is_default) || secs[0] || null
+        setSelectedSectionId(defaultSec?.id || null)
       })
-      .catch(() => setSection(null))
+      .catch(() => setSections([]))
       .finally(() => setLoadingConfig(false))
   }, [slug])
+
+  const selectedSection = sections.find(s => s.id === selectedSectionId) || sections[0] || null
 
   function dismissAlert(id) {
     setAlerts(prev => prev.filter(a => a.id !== id))
@@ -242,8 +251,8 @@ export default function LiveMonitoring() {
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <header className="bg-white border-b border-gray-200 px-6 py-4 shrink-0 flex items-center justify-between">
         <div>
-          <h1 className="font-semibold text-gray-900">Live Monitoring</h1>
-          <p className="text-xs text-gray-400 mt-0.5">Real-time multi-camera tracking</p>
+          <h1 className="page-title">Live Monitoring</h1>
+          <p className="page-subtitle">Real-time multi-camera tracking</p>
         </div>
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
@@ -255,6 +264,7 @@ export default function LiveMonitoring() {
 
         {/* ── KPI Bar ─────────────────────────────────────────────────────── */}
         {/* MOCK: replace kpi state with API call to GET /store/{slug}/live/summary */}
+        {loadingConfig && <StatsSkeleton count={4} />}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <KpiCard label="Total People"   value={kpi.total_people} />
           <KpiCard label="Customers"      value={kpi.customers} />
@@ -267,9 +277,10 @@ export default function LiveMonitoring() {
 
           {/* Floor plan — 70% */}
           <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-col" style={{ flex: '0 0 70%' }}>
-            <div className="flex items-center justify-between mb-3 shrink-0">
+            {/* Title row */}
+            <div className="flex items-center justify-between shrink-0">
               <h2 className="text-sm font-semibold text-gray-700">
-                {section?.name || 'Floor Plan'}
+                {selectedSection?.name || 'Floor Plan'}
               </h2>
               <div className="flex items-center gap-4 text-xs text-gray-500">
                 <span className="flex items-center gap-1.5">
@@ -283,15 +294,25 @@ export default function LiveMonitoring() {
                 </span>
               </div>
             </div>
-            <div className="flex-1 min-h-0">
+
+            {/* Section tab bar — only when multiple sections */}
+            <div className="mt-2.5 mb-1 shrink-0">
+              <SectionTabs
+                sections={sections}
+                selectedId={selectedSectionId}
+                onChange={setSelectedSectionId}
+              />
+            </div>
+
+            <div className={`flex-1 min-h-0 ${sections.length > 1 ? '' : 'mt-3'}`}>
               {loadingConfig ? (
                 <div className="flex items-center justify-center h-full text-gray-400 text-sm">Loading floor plan…</div>
               ) : (
                 <FloorPlanCanvas
-                  floorPlan={section?.floor_plan}
-                  zones={section?.zones || []}
-                  obstacles={section?.obstacles || []}
-                  cameraConfigs={section?.camera_configs || []}
+                  floorPlan={selectedSection?.floor_plan}
+                  zones={selectedSection?.zones || []}
+                  obstacles={selectedSection?.obstacles || []}
+                  cameraConfigs={selectedSection?.camera_configs || []}
                   people={people}
                 />
               )}
@@ -325,10 +346,17 @@ export default function LiveMonitoring() {
         </div>
 
         {/* ── Camera Health Strip ──────────────────────────────────────────── */}
-        {/* MOCK: replace cameras state with GET /store/{slug}/cameras/health */}
+        {/* Uses selectedSection.camera_configs when available, falls back to MOCK_CAMERAS */}
         <div className="bg-white border border-gray-200 rounded-xl px-5 py-3 flex items-center gap-2 flex-wrap shrink-0">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-2">Camera Status</span>
-          {cameras.map(cam => (
+          {(selectedSection?.camera_configs?.length > 0
+            ? selectedSection.camera_configs.map(cc => ({
+                id: cc.id,
+                name: cc.physical_camera_name,
+                online: cc.status === 'verified',
+              }))
+            : cameras
+          ).map(cam => (
             <div
               key={cam.id}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium ${

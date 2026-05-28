@@ -1,7 +1,9 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { Pencil, UserX, UserCheck, Trash2 } from 'lucide-react'
+import { Pencil, UserX, UserCheck, Trash2, Search, Users } from 'lucide-react'
 import { useAuth } from '../store'
+import { usePageTitle } from '../components/PageMeta'
+import { TableSkeleton } from '../components/Skeletons'
 import {
   listEmployees, createEmployee, patchEmployee, deleteEmployee,
   listEmployeeSections, assignEmployeeSection, removeEmployeeSection,
@@ -164,8 +166,7 @@ function EmployeeModal({ slug, employee, onClose, onDone }) {
               Cancel
             </button>
             <button type="submit" disabled={loading}
-              className="flex-1 py-2 px-4 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
-              style={{ backgroundColor: '#1B3A5C' }}>
+              className="btn-primary flex-1">
               {loading ? 'Saving…' : (editing ? 'Save' : 'Add Employee')}
             </button>
           </div>
@@ -285,8 +286,7 @@ function SectionsPanel({ slug, employee, sections, onClose }) {
                   Cancel
                 </button>
                 <button onClick={handleAssign} disabled={!selectedSection}
-                  className="flex-1 py-1.5 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
-                  style={{ backgroundColor: '#1B3A5C' }}>
+                  className="btn-primary flex-1 py-1.5">
                   Assign
                 </button>
               </div>
@@ -453,8 +453,7 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
                   Cancel
                 </button>
                 <button onClick={handleCreate}
-                  className="flex-1 py-1.5 text-sm font-semibold text-white rounded-lg"
-                  style={{ backgroundColor: '#1B3A5C' }}>
+                  className="btn-primary flex-1 py-1.5">
                   Add Pattern
                 </button>
               </div>
@@ -518,6 +517,7 @@ export default function Employees() {
   const { slug } = useParams()
   const { state } = useAuth()
   const role = state.currentMember?.role || (state.user?.account_type === 'owner' ? 'owner' : null)
+  usePageTitle('Employees')
 
   const [employees, setEmployees] = useState([])
   const [sections, setSections] = useState([])
@@ -592,26 +592,28 @@ export default function Employees() {
     <div className="flex flex-col h-full overflow-auto">
       <header className="px-6 py-4 border-b border-gray-200 bg-white flex items-center justify-between shrink-0">
         <div>
-          <h1 className="font-semibold text-gray-900">Employees</h1>
-          <p className="text-xs text-gray-400 mt-0.5">Manage staff, sections and schedules</p>
+          <h1 className="page-title">Employees</h1>
+          <p className="page-subtitle">Manage staff, sections and schedules</p>
         </div>
         <button
           onClick={() => setModal('create')}
-          className="px-3 py-1.5 rounded-lg text-sm font-semibold text-white"
-          style={{ backgroundColor: '#1B3A5C' }}>
+          className="btn-primary">
           + Add Employee
         </button>
       </header>
 
       {/* Search bar + role filter + show inactive */}
       <div className="px-6 py-3 border-b border-gray-100 bg-white flex items-center gap-3 shrink-0 flex-wrap">
-        <input
-          type="search"
-          placeholder="Search by name, code or role…"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          className="flex-1 min-w-36 border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
+        <div className="relative flex-1 min-w-36">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          <input
+            type="search"
+            placeholder="Search by name, code or role…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="w-full border border-gray-200 rounded-lg pl-9 pr-3 py-1.5 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          />
+        </div>
         <select
           value={roleFilter}
           onChange={e => setRoleFilter(e.target.value)}
@@ -629,27 +631,40 @@ export default function Employees() {
 
       <div className="flex-1 p-6">
         {loading ? (
-          <div className="text-sm text-gray-400 py-8 text-center">Loading…</div>
+          <TableSkeleton rows={6} cols={6} />
         ) : filtered.length === 0 ? (
-          <div className="text-sm text-gray-400 py-8 text-center">
-            {search || roleFilter ? 'No employees match your filters.' : 'No employees yet. Add one to get started.'}
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-4">
+              <Users size={28} className="text-blue-400" />
+            </div>
+            <p className="text-base font-semibold text-gray-700 mb-1">
+              {search || roleFilter ? 'No employees match your filters' : 'No employees yet'}
+            </p>
+            <p className="text-sm text-gray-400 mb-5">
+              {search || roleFilter ? 'Try adjusting your search or filter.' : 'Add your first employee to get started.'}
+            </p>
+            {!search && !roleFilter && (
+              <button onClick={() => setModal('create')} className="btn-primary">
+                + Add Employee
+              </button>
+            )}
           </div>
         ) : (
-          <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          <div className="bg-white border border-gray-100 rounded-xl overflow-hidden shadow-sm">
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-200">
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Name</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Role</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden sm:table-cell">Code</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden md:table-cell">Status</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Assignments</th>
-                  <th className="px-4 py-2.5"></th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Role</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider hidden sm:table-cell">Code</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider hidden md:table-cell">Status</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Assignments</th>
+                  <th className="px-4 py-3"></th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.map((emp, i) => (
-                  <tr key={emp.id} className={`${i < filtered.length - 1 ? 'border-b border-gray-100' : ''} ${!emp.is_active ? 'opacity-50' : ''}`}>
+                  <tr key={emp.id} className={`border-b border-gray-100 last:border-0 hover:bg-blue-50 transition-colors ${i % 2 === 1 ? 'bg-gray-50/50' : 'bg-white'} ${!emp.is_active ? 'opacity-50' : ''}`}>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2.5">
                         <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0"
@@ -663,13 +678,13 @@ export default function Employees() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${ROLE_BADGE[emp.role] || 'bg-gray-100 text-gray-600'}`}>
+                      <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${ROLE_BADGE[emp.role] || 'bg-gray-100 text-gray-600'}`}>
                         {ROLE_LABEL[emp.role] || emp.role}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-gray-500 hidden sm:table-cell">{emp.employee_code || '—'}</td>
                     <td className="px-4 py-3 hidden md:table-cell">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${emp.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                      <span className={`text-xs px-3 py-1 rounded-full font-medium ${emp.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
                         {emp.is_active ? 'Active' : 'Inactive'}
                       </span>
                     </td>

@@ -1,18 +1,37 @@
 import React from 'react'
 import { NavLink, useNavigate, useParams } from 'react-router-dom'
+import {
+  Store, Radio, BarChart2, Bot, Users, Calendar,
+  UserCheck, ClipboardList, SlidersHorizontal,
+} from 'lucide-react'
 import { useAuth } from '../store'
 import { logout } from '../api'
 
-const NAV = [
-  { label: 'Store Config', path: 'config' },
-  { label: 'Live Monitoring', path: 'live' },
-  { label: 'Analytics', path: 'analytics' },
-  { label: 'AI Assistant', path: 'agent' },
-  { label: 'Employees', path: 'employees' },
-  { label: 'Shifts', path: 'shifts' },
-  { label: 'Members', path: 'members' },
-  { label: 'Audit Log', path: 'audit' },
-  { label: 'Settings', path: 'settings' },
+const NAV_GROUPS = [
+  {
+    label: null,
+    items: [
+      { label: 'Live Monitoring', path: 'live',      Icon: Radio },
+      { label: 'Analytics',       path: 'analytics', Icon: BarChart2 },
+      { label: 'AI Assistant',    path: 'agent',     Icon: Bot },
+    ],
+  },
+  {
+    label: 'Management',
+    items: [
+      { label: 'Store Config', path: 'config',    Icon: Store },
+      { label: 'Employees',    path: 'employees', Icon: Users },
+      { label: 'Shifts',       path: 'shifts',    Icon: Calendar },
+      { label: 'Members',      path: 'members',   Icon: UserCheck },
+    ],
+  },
+  {
+    label: 'System',
+    items: [
+      { label: 'Audit Log', path: 'audit',    Icon: ClipboardList },
+      { label: 'Settings',  path: 'settings', Icon: SlidersHorizontal },
+    ],
+  },
 ]
 
 export default function Sidebar() {
@@ -30,36 +49,54 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="w-56 min-h-screen flex flex-col shrink-0" style={{ backgroundColor: '#1B3A5C' }}>
-      <div className="px-4 py-5 border-b border-blue-900">
-        <h1 className="text-white font-bold text-sm leading-tight">RetailVision AI</h1>
+    <aside
+      className="w-56 min-h-screen flex flex-col shrink-0"
+      style={{ background: 'linear-gradient(180deg, #1a2744 0%, #0f1729 100%)' }}
+    >
+      {/* Logo */}
+      <div className="px-4 py-5 border-b border-white/10">
+        <h1 className="text-white font-bold text-sm leading-tight tracking-wide">RetailVision AI</h1>
         {state.currentStore && (
-          <p className="text-blue-300 text-xs mt-0.5 truncate">{state.currentStore.name}</p>
+          <p className="text-blue-300/70 text-xs mt-1 truncate">{state.currentStore.name}</p>
         )}
       </div>
 
-      <nav className="flex-1 py-3 px-2 flex flex-col gap-0.5">
-        {NAV.map(({ label, path }) => (
-          <NavLink
-            key={path}
-            to={`/store/${slug}/${path}`}
-            className={({ isActive }) =>
-              `block px-3 py-2 rounded-lg text-sm transition-colors ${
-                isActive
-                  ? 'bg-blue-600 text-white font-semibold'
-                  : 'text-blue-200 hover:bg-blue-900 hover:text-white'
-              }`
-            }
-          >
-            {label}
-          </NavLink>
+      {/* Nav */}
+      <nav className="flex-1 py-3 px-2 flex flex-col">
+        {NAV_GROUPS.map((group, gi) => (
+          <div key={gi}>
+            {group.label && (
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-500 px-4 pt-5 pb-1">
+                {group.label}
+              </p>
+            )}
+            <div className="flex flex-col gap-0.5">
+              {group.items.map(({ label, path, Icon }) => (
+                <NavLink
+                  key={path}
+                  to={`/store/${slug}/${path}`}
+                  className={({ isActive }) =>
+                    `nav-item flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all duration-150 border-l-2 pl-[10px] ${
+                      isActive
+                        ? 'bg-blue-600/20 text-white font-semibold border-blue-500 active'
+                        : 'text-blue-200/80 hover:bg-blue-500/10 hover:text-white border-transparent'
+                    }`
+                  }
+                >
+                  <Icon size={15} className="nav-icon shrink-0" />
+                  {label}
+                </NavLink>
+              ))}
+            </div>
+          </div>
         ))}
       </nav>
 
-      <div className="px-2 py-3 border-t border-blue-900">
+      {/* Sign out */}
+      <div className="px-2 py-3 border-t border-white/10">
         <button
           onClick={handleLogout}
-          className="w-full text-left px-3 py-2 rounded-lg text-sm text-blue-300 hover:bg-blue-800 hover:text-white transition-colors"
+          className="w-full text-left px-3 py-2 rounded-lg text-sm text-blue-300/70 hover:bg-blue-500/10 hover:text-white transition-colors"
         >
           Sign Out
         </button>

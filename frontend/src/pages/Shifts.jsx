@@ -1,6 +1,9 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
+import { Calendar } from 'lucide-react'
 import { useAuth } from '../store'
+import { usePageTitle } from '../components/PageMeta'
+import { TableSkeleton } from '../components/Skeletons'
 import {
   listShifts, createShift, patchShift, deleteShift, generateShifts,
   listShiftAssignments, createShiftAssignment, patchShiftAssignment, deleteShiftAssignment,
@@ -325,8 +328,7 @@ function ShiftModal({ slug, shift, employees, sections, onClose, onDone }) {
               Cancel
             </button>
             <button type="submit" disabled={loading}
-              className="flex-1 py-2 px-4 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
-              style={{ backgroundColor: '#1B3A5C' }}>
+              className="btn-primary flex-1">
               {loading ? 'Saving…' : (editing ? 'Save' : 'Create Shift')}
             </button>
           </div>
@@ -458,7 +460,7 @@ function BreaksPanel({ slug, shift, assignment, onClose }) {
                 <button onClick={() => { setAdding(false); setError('') }}
                   className="flex-1 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50">Cancel</button>
                 <button onClick={handleCreate}
-                  className="flex-1 py-1.5 text-sm font-semibold text-white rounded-lg" style={{ backgroundColor: '#1B3A5C' }}>
+                  className="btn-primary flex-1 py-1.5">
                   Add Break
                 </button>
               </div>
@@ -597,8 +599,7 @@ function AssignmentsPanel({ slug, shift, employees, onClose }) {
                   <button onClick={() => { setAdding(false); setError('') }}
                     className="flex-1 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50">Cancel</button>
                   <button onClick={handleAssign} disabled={!selectedEmployee}
-                    className="flex-1 py-1.5 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
-                    style={{ backgroundColor: '#1B3A5C' }}>
+                    className="btn-primary flex-1 py-1.5">
                     Assign
                   </button>
                 </div>
@@ -668,8 +669,7 @@ function GenerateModal({ slug, onClose, onDone }) {
               Cancel
             </button>
             <button type="submit" disabled={loading}
-              className="flex-1 py-2 px-4 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
-              style={{ backgroundColor: '#1B3A5C' }}>
+              className="btn-primary flex-1">
               {loading ? 'Generating…' : 'Generate'}
             </button>
           </div>
@@ -685,6 +685,7 @@ export default function Shifts() {
   const { slug } = useParams()
   const { state } = useAuth()
   const role = state.currentMember?.role || (state.user?.account_type === 'owner' ? 'owner' : null)
+  usePageTitle('Shifts')
 
   const [view, setView] = useState('list')
   const [shifts, setShifts] = useState([])
@@ -754,8 +755,8 @@ export default function Shifts() {
       {/* Header */}
       <header className="px-6 py-4 border-b border-gray-200 bg-white flex items-center justify-between shrink-0">
         <div>
-          <h1 className="font-semibold text-gray-900">Shifts</h1>
-          <p className="text-xs text-gray-400 mt-0.5">Manage shift instances, assignments and attendance</p>
+          <h1 className="page-title">Shifts</h1>
+          <p className="page-subtitle">Manage shift instances, assignments and attendance</p>
         </div>
         <div className="flex items-center gap-2">
           <ViewToggle view={view} onChange={setView} />
@@ -769,8 +770,7 @@ export default function Shifts() {
           </Tooltip>
           <button
             onClick={() => setModal('create')}
-            className="px-3 py-1.5 rounded-lg text-sm font-semibold text-white"
-            style={{ backgroundColor: '#1B3A5C' }}
+            className="btn-primary"
           >
             + Create Shift
           </button>
@@ -810,27 +810,42 @@ export default function Shifts() {
           {/* List view table */}
           <div className="flex-1 overflow-auto p-6">
             {loading ? (
-              <div className="text-sm text-gray-400 py-8 text-center">Loading…</div>
+              <TableSkeleton rows={6} cols={6} />
             ) : shifts.length === 0 ? (
-              <div className="text-sm text-gray-400 py-8 text-center">
-                No shifts found. Create one manually or generate from shift patterns.
+              <div className="flex flex-col items-center justify-center py-20 text-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-4">
+                  <Calendar size={28} className="text-blue-400" />
+                </div>
+                <p className="text-base font-semibold text-gray-700 mb-1">No shifts found</p>
+                <p className="text-sm text-gray-400 mb-5">
+                  Create a shift manually or generate from saved shift patterns.
+                </p>
+                <div className="flex gap-2">
+                  <button onClick={() => setModal('generate')}
+                    className="btn-outline text-xs py-1.5">
+                    Generate from Patterns
+                  </button>
+                  <button onClick={() => setModal('create')} className="btn-primary text-xs py-1.5">
+                    + Create Shift
+                  </button>
+                </div>
               </div>
             ) : (
-              <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+              <div className="bg-white border border-gray-100 rounded-xl overflow-hidden shadow-sm">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Employee</th>
-                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden sm:table-cell">Section</th>
-                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Scheduled</th>
-                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden md:table-cell">Actual</th>
-                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
-                      <th className="px-4 py-2.5"></th>
+                      <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Employee</th>
+                      <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider hidden sm:table-cell">Section</th>
+                      <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Scheduled</th>
+                      <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider hidden md:table-cell">Actual</th>
+                      <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                      <th className="px-4 py-3"></th>
                     </tr>
                   </thead>
                   <tbody>
                     {shifts.map((shift, i) => (
-                      <tr key={shift.id} className={`${i < shifts.length - 1 ? 'border-b border-gray-100' : ''} hover:bg-gray-50 transition-colors`}>
+                      <tr key={shift.id} className={`border-b border-gray-100 last:border-0 hover:bg-blue-50 transition-colors ${i % 2 === 1 ? 'bg-gray-50/50' : 'bg-white'}`}>
                         <td className="px-4 py-3 font-medium text-gray-900">{getEmployeeName(shift.employee_id)}</td>
                         <td className="px-4 py-3 text-gray-500 hidden sm:table-cell">{getSectionName(shift.section_id)}</td>
                         <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
@@ -846,7 +861,7 @@ export default function Shifts() {
                           ) : '—'}
                         </td>
                         <td className="px-4 py-3">
-                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_BADGE[shift.status] || 'bg-gray-100 text-gray-600'}`}>
+                          <span className={`text-xs px-3 py-1 rounded-full font-medium ${STATUS_BADGE[shift.status] || 'bg-gray-100 text-gray-600'}`}>
                             {shift.status}
                           </span>
                         </td>

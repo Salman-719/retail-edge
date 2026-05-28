@@ -6,6 +6,8 @@ import {
 } from 'recharts'
 import { Stage, Layer, Image as KonvaImage, Rect } from 'react-konva'
 import { getActiveVersion } from '../api'
+import { usePageTitle } from '../components/PageMeta'
+import SectionTabs from '../components/SectionTabs'
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
 
@@ -191,6 +193,7 @@ function DonutLabel({ cx, cy, midAngle, innerRadius, outerRadius, percent }) {
 
 export default function Analytics() {
   const { slug } = useParams()
+  usePageTitle('Analytics')
 
   const today = new Date().toISOString().slice(0, 10)
   const weekAgo = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10)
@@ -206,26 +209,39 @@ export default function Analytics() {
   // MOCK: replace with GET /store/{slug}/analytics/heatmap
   const [heatGrid]       = useState(buildHeatmapMock)
 
+  const [sections, setSections] = useState([])
+  const [selectedSectionId, setSelectedSectionId] = useState(null)
   const [floorPlan, setFloorPlan] = useState(null)
   const [loadingFp, setLoadingFp] = useState(true)
 
   useEffect(() => {
     getActiveVersion(slug)
       .then(v => {
-        const sec = v?.sections?.find(s => s.is_default) || v?.sections?.[0]
-        setFloorPlan(sec?.floor_plan || null)
+        const secs = v?.sections || []
+        setSections(secs)
+        const defaultSec = secs.find(s => s.is_default) || secs[0] || null
+        setSelectedSectionId(defaultSec?.id || null)
+        setFloorPlan(defaultSec?.floor_plan || null)
       })
-      .catch(() => setFloorPlan(null))
+      .catch(() => { setSections([]); setFloorPlan(null) })
       .finally(() => setLoadingFp(false))
   }, [slug])
+
+  // When the selected section changes, sync the floor plan
+  useEffect(() => {
+    const sec = sections.find(s => s.id === selectedSectionId)
+    if (sec) setFloorPlan(sec.floor_plan || null)
+  }, [selectedSectionId, sections])
+
+  const selectedSection = sections.find(s => s.id === selectedSectionId) || sections[0] || null
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <header className="bg-white border-b border-gray-200 px-6 py-4 shrink-0">
-        <h1 className="font-semibold text-gray-900">Analytics</h1>
-        <p className="text-xs text-gray-400 mt-0.5">Historical traffic patterns and zone performance</p>
+        <h1 className="page-title">Analytics</h1>
+        <p className="page-subtitle">Historical traffic patterns and zone performance</p>
       </header>
 
       <div className="flex-1 overflow-y-auto p-5 space-y-5">
@@ -260,9 +276,16 @@ export default function Analytics() {
           </span>
         </div>
 
+        {/* ── Section selector ─────────────────────────────────────────────── */}
+        <SectionTabs
+          sections={sections}
+          selectedId={selectedSectionId}
+          onChange={setSelectedSectionId}
+        />
+
         {/* ── Zone Traffic line chart ──────────────────────────────────────── */}
         {/* MOCK: replace zoneTraffic with GET /store/{slug}/analytics/zone-traffic */}
-        <Section title="Zone Traffic — Hourly Foot Traffic">
+        <Section title={`Zone Traffic — ${selectedSection?.name || 'Hourly Foot Traffic'}`}>
           <ResponsiveContainer width="100%" height={280}>
             <LineChart data={zoneTraffic} margin={{ top: 4, right: 24, left: 0, bottom: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
@@ -363,11 +386,9 @@ export default function Analytics() {
 
         {/* ── Heatmap ──────────────────────────────────────────────────────── */}
         {/* MOCK: replace heatGrid with GET /store/{slug}/analytics/heatmap */}
-        <Section title="Dwell-Time Heatmap">
+        <Section title={`Dwell-Time Heatmap — ${selectedSection?.name || ''}`}>
           {loadingFp ? (
-            <div className="flex items-center justify-center h-48 text-gray-400 text-sm">
-              Loading floor plan…
-            </div>
+            <div className="skeleton h-48 w-full rounded-lg" />
           ) : (
             <>
               <HeatmapCanvas floorPlan={floorPlan} grid={heatGrid} />

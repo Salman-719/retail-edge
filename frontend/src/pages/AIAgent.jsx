@@ -4,6 +4,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts'
 import api from '../api'
+import { usePageTitle } from '../components/PageMeta'
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
 
@@ -280,6 +281,7 @@ function now() {
 
 export default function AIAgent() {
   const { slug } = useParams()
+  usePageTitle('AI Assistant')
 
   return (
     <>
@@ -294,8 +296,8 @@ export default function AIAgent() {
       <div className="flex flex-col h-full overflow-hidden">
         {/* Header */}
         <header className="bg-white border-b border-gray-200 px-6 py-4 shrink-0">
-          <h1 className="font-semibold text-gray-900">AI Assistant</h1>
-          <p className="text-xs text-gray-400 mt-0.5">Natural language retail analytics assistant</p>
+          <h1 className="page-title">AI Assistant</h1>
+          <p className="page-subtitle">Natural language retail analytics assistant</p>
         </header>
 
         {/* Two-panel layout */}
