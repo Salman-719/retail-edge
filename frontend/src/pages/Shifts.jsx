@@ -751,7 +751,7 @@ export default function Shifts() {
   }
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="page-enter flex flex-col h-full overflow-hidden">
       {/* Header */}
       <header className="px-6 py-4 border-b border-gray-200 bg-white flex items-center justify-between shrink-0">
         <div>

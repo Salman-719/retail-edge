@@ -211,6 +211,8 @@ export default function LiveMonitoring() {
   const { slug } = useParams()
   usePageTitle('Live Monitoring')
 
+  const [demoBannerVisible, setDemoBannerVisible] = useState(true)
+
   // MOCK: replace with API call to GET /store/{slug}/live/summary
   const [kpi] = useState(MOCK_KPI)
 
@@ -246,7 +248,7 @@ export default function LiveMonitoring() {
   }
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="page-enter flex flex-col h-full overflow-hidden">
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <header className="bg-white border-b border-gray-200 px-6 py-4 shrink-0 flex items-center justify-between">
@@ -259,6 +261,14 @@ export default function LiveMonitoring() {
           <span className="text-xs text-gray-500">Live</span>
         </div>
       </header>
+
+      {/* ── Demo data banner ────────────────────────────────────────────────── */}
+      {demoBannerVisible && (
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-800 text-xs px-6 py-2 flex items-center justify-between shrink-0">
+          <span>Showing demo data — live backend not connected.</span>
+          <button onClick={() => setDemoBannerVisible(false)} className="ml-4 text-amber-600 hover:text-amber-900 leading-none">✕</button>
+        </div>
+      )}
 
       <div className="flex-1 overflow-auto p-5 space-y-4">
 
@@ -273,10 +283,10 @@ export default function LiveMonitoring() {
         </div>
 
         {/* ── Main Panel ──────────────────────────────────────────────────── */}
-        <div className="flex gap-4 min-h-0" style={{ height: 'calc(100vh - 340px)', minHeight: 320 }}>
+        <div className="flex flex-col lg:flex-row gap-4">
 
-          {/* Floor plan — 70% */}
-          <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-col" style={{ flex: '0 0 70%' }}>
+          {/* Floor plan — 70% on lg+ */}
+          <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-col min-h-[280px] lg:flex-[0_0_70%]">
             {/* Title row */}
             <div className="flex items-center justify-between shrink-0">
               <h2 className="text-sm font-semibold text-gray-700">
@@ -319,8 +329,8 @@ export default function LiveMonitoring() {
             </div>
           </div>
 
-          {/* Alerts feed — 30% */}
-          <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-col" style={{ flex: '0 0 calc(30% - 1rem)' }}>
+          {/* Alerts feed — 30% on lg+, capped on small screens */}
+          <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-col max-h-[300px] lg:max-h-none lg:flex-1">
             <div className="flex items-center justify-between mb-3 shrink-0">
               <h2 className="text-sm font-semibold text-gray-700">Active Alerts</h2>
               {alerts.length > 0 && (

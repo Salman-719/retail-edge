@@ -149,7 +149,7 @@ function Bubble({ msg }) {
           {msg.text}
         </div>
         {msg.chart && <InlineChart chart={msg.chart} />}
-        <span className="text-xs text-gray-300 mx-1">{msg.ts}</span>
+        <span className={`text-[10px] text-gray-400 mx-1 ${isUser ? 'self-end' : 'self-start'}`}>{msg.ts}</span>
       </div>
     </div>
   )
@@ -293,7 +293,7 @@ export default function AIAgent() {
         }
       `}</style>
 
-      <div className="flex flex-col h-full overflow-hidden">
+      <div className="page-enter flex flex-col h-full overflow-hidden">
         {/* Header */}
         <header className="bg-white border-b border-gray-200 px-6 py-4 shrink-0">
           <h1 className="page-title">AI Assistant</h1>

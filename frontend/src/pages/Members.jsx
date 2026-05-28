@@ -3,18 +3,18 @@ import { useParams } from 'react-router-dom'
 import { Users, Clock } from 'lucide-react'
 import { useAuth } from '../store'
 import { usePageTitle } from '../components/PageMeta'
+import { TableSkeleton } from '../components/Skeletons'
 import {
   listMembers, inviteMember, listInvitations,
   cancelInvitation, patchMember, removeMember,
   requestDraftDiscard, getDraft,
 } from '../api'
 
-const ROLE_LABELS = { manager: 'Manager', viewer: 'Viewer' }
-
-const ROLE_BADGE = {
-  owner: 'bg-purple-100 text-purple-700',
+const ROLE_COLORS = {
+  admin:   'bg-purple-100 text-purple-700',
   manager: 'bg-blue-100 text-blue-700',
-  viewer: 'bg-gray-100 text-gray-600',
+  viewer:  'bg-gray-100 text-gray-600',
+  owner:   'bg-amber-100 text-amber-700',
 }
 
 function InviteModal({ slug, onClose, onDone }) {
@@ -291,7 +291,7 @@ export default function Members() {
   }
 
   return (
-    <div className="flex flex-col h-full overflow-auto">
+    <div className="page-enter flex flex-col h-full overflow-auto">
       <header className="px-6 py-4 border-b border-gray-200 bg-white flex items-center justify-between shrink-0">
         <div>
           <h1 className="page-title">Members</h1>
@@ -307,23 +307,7 @@ export default function Members() {
 
       <div className="flex-1 p-6 space-y-6">
         {loading ? (
-          <div className="space-y-4">
-            {[0, 1].map(i => (
-              <div key={i} className="bg-white border border-gray-100 rounded-xl p-4 space-y-2">
-                <div className="skeleton h-3 w-32" />
-                {[0, 1, 2].map(j => (
-                  <div key={j} className="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0">
-                    <div className="skeleton w-8 h-8 rounded-full" style={{ borderRadius: '50%' }} />
-                    <div className="flex-1 space-y-1.5">
-                      <div className="skeleton h-3 w-36" />
-                      <div className="skeleton h-2.5 w-48" />
-                    </div>
-                    <div className="skeleton h-6 w-16 rounded-full" />
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
+          <TableSkeleton rows={6} />
         ) : (
           <>
             {/* Draft discard request — shown to managers when a draft exists */}
@@ -378,8 +362,8 @@ export default function Members() {
                         <p className="text-sm font-medium text-gray-900 truncate">{m.name || '—'}</p>
                         <p className="text-xs text-gray-400 truncate">{m.email}</p>
                       </div>
-                      <span className={`text-xs px-3 py-1 rounded-full font-medium ${ROLE_BADGE[m.role] || ROLE_BADGE.viewer}`}>
-                        {ROLE_LABELS[m.role] || m.role}
+                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full inline-block capitalize ${ROLE_COLORS[m.role] || ROLE_COLORS.viewer}`}>
+                        {m.role}
                       </span>
                       <span className="text-xs px-3 py-1 rounded-full font-medium bg-green-100 text-green-700">
                         Active
@@ -427,7 +411,7 @@ export default function Members() {
                       <div className="flex-1 min-w-0">
                         <p className="text-sm text-gray-900 truncate">{inv.email}</p>
                         <p className="text-xs text-gray-400 mt-0.5">
-                          {ROLE_LABELS[inv.role] || inv.role} · expires {new Date(inv.expires_at).toLocaleDateString()}
+                          {inv.role} · expires {new Date(inv.expires_at).toLocaleDateString()}
                         </p>
                       </div>
                       <span className="text-xs bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full font-medium">Pending</span>

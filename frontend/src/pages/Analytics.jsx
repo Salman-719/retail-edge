@@ -195,10 +195,28 @@ export default function Analytics() {
   const { slug } = useParams()
   usePageTitle('Analytics')
 
+  const [demoBannerVisible, setDemoBannerVisible] = useState(true)
+
   const today = new Date().toISOString().slice(0, 10)
   const weekAgo = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10)
   const [from, setFrom] = useState(weekAgo)
   const [to,   setTo]   = useState(today)
+  const [activePreset, setActivePreset] = useState('7 days')
+
+  const PRESETS = [
+    { label: 'Today',   days: 0 },
+    { label: '7 days',  days: 6 },
+    { label: '30 days', days: 29 },
+    { label: '90 days', days: 89 },
+  ]
+
+  function applyPreset(preset) {
+    const end = new Date()
+    const start = new Date(Date.now() - preset.days * 86400000)
+    setTo(end.toISOString().slice(0, 10))
+    setFrom(start.toISOString().slice(0, 10))
+    setActivePreset(preset.label)
+  }
 
   // MOCK: replace with GET /store/{slug}/analytics/zone-traffic
   const [zoneTraffic]    = useState(buildZoneTrafficMock)
@@ -236,7 +254,7 @@ export default function Analytics() {
   const selectedSection = sections.find(s => s.id === selectedSectionId) || sections[0] || null
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="page-enter flex flex-col h-full overflow-hidden">
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <header className="bg-white border-b border-gray-200 px-6 py-4 shrink-0">
@@ -244,36 +262,62 @@ export default function Analytics() {
         <p className="page-subtitle">Historical traffic patterns and zone performance</p>
       </header>
 
+      {/* ── Demo data banner ────────────────────────────────────────────────── */}
+      {demoBannerVisible && (
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-800 text-xs px-6 py-2 flex items-center justify-between shrink-0">
+          <span>Showing demo data — live backend not connected.</span>
+          <button onClick={() => setDemoBannerVisible(false)} className="ml-4 text-amber-600 hover:text-amber-900 leading-none">✕</button>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto p-5 space-y-5">
 
         {/* ── Date range picker ────────────────────────────────────────────── */}
-        <div className="bg-white border border-gray-200 rounded-xl px-5 py-4 flex items-center gap-4 flex-wrap">
-          <span className="text-sm font-medium text-gray-600 shrink-0">Date range</span>
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-gray-500">From</label>
-            <input
-              type="date"
-              value={from}
-              max={to}
-              onChange={e => setFrom(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
+        <div className="bg-white border border-gray-200 rounded-xl px-5 py-4 space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-medium text-gray-500 shrink-0">Quick select</span>
+            {PRESETS.map(preset => (
+              <button
+                key={preset.label}
+                onClick={() => applyPreset(preset)}
+                className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  activePreset === preset.label
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
           </div>
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-gray-500">To</label>
-            <input
-              type="date"
-              value={to}
-              min={from}
-              max={today}
-              onChange={e => setTo(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
+          <div className="flex items-center gap-4 flex-wrap">
+            <span className="text-sm font-medium text-gray-600 shrink-0">Date range</span>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-500">From</label>
+              <input
+                type="date"
+                value={from}
+                max={to}
+                onChange={e => { setFrom(e.target.value); setActivePreset(null) }}
+                className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-500">To</label>
+              <input
+                type="date"
+                value={to}
+                min={from}
+                max={today}
+                onChange={e => { setTo(e.target.value); setActivePreset(null) }}
+                className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            {/* MOCK: wire date range into API calls once backend is available */}
+            <span className="text-xs text-gray-400 italic">
+              (date range applied when API is connected)
+            </span>
           </div>
-          {/* MOCK: wire date range into API calls once backend is available */}
-          <span className="text-xs text-gray-400 italic">
-            (date range applied when API is connected)
-          </span>
         </div>
 
         {/* ── Section selector ─────────────────────────────────────────────── */}

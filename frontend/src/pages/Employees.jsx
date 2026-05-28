@@ -589,7 +589,7 @@ export default function Employees() {
   })
 
   return (
-    <div className="flex flex-col h-full overflow-auto">
+    <div className="page-enter flex flex-col h-full overflow-auto">
       <header className="px-6 py-4 border-b border-gray-200 bg-white flex items-center justify-between shrink-0">
         <div>
           <h1 className="page-title">Employees</h1>

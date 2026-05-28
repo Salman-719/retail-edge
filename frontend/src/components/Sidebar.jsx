@@ -1,11 +1,11 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { NavLink, useNavigate, useParams } from 'react-router-dom'
 import {
   Store, Radio, BarChart2, Bot, Users, Calendar,
   UserCheck, ClipboardList, SlidersHorizontal,
 } from 'lucide-react'
 import { useAuth } from '../store'
-import { logout } from '../api'
+import { logout, getActiveAlerts, getActiveVersion } from '../api'
 
 const NAV_GROUPS = [
   {
@@ -38,6 +38,20 @@ export default function Sidebar() {
   const { slug } = useParams()
   const { state, dispatch } = useAuth()
   const navigate = useNavigate()
+  const [alertCount, setAlertCount] = useState(0)
+  const [hasUnmappedSection, setHasUnmappedSection] = useState(false)
+
+  useEffect(() => {
+    if (!slug) return
+    getActiveAlerts(slug)
+      .then(data => setAlertCount(Array.isArray(data) ? data.length : (data?.count ?? 0)))
+      .catch(() => {})
+    getActiveVersion(slug)
+      .then(v => setHasUnmappedSection(
+        (v?.sections || []).some(s => !s.floor_plan?.image_uploaded)
+      ))
+      .catch(() => {})
+  }, [slug])
 
   async function handleLogout() {
     try {
@@ -84,7 +98,15 @@ export default function Sidebar() {
                   }
                 >
                   <Icon size={15} className="nav-icon shrink-0" />
-                  {label}
+                  <span className="flex-1 truncate">{label}</span>
+                  {path === 'live' && alertCount > 0 && (
+                    <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center leading-none shrink-0">
+                      {alertCount}
+                    </span>
+                  )}
+                  {path === 'config' && hasUnmappedSection && (
+                    <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                  )}
                 </NavLink>
               ))}
             </div>

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { ExternalLink } from 'lucide-react'
+import { ExternalLink, RefreshCw, ClipboardList } from 'lucide-react'
 import { useAuth } from '../store'
 import { getAuditLog } from '../api'
 import { usePageTitle } from '../components/PageMeta'
@@ -182,7 +182,7 @@ export default function Audit() {
   }
 
   return (
-    <div className="flex flex-col h-full overflow-auto">
+    <div className="page-enter flex flex-col h-full overflow-auto">
       <header className="px-6 py-4 border-b border-gray-200 bg-white flex items-center justify-between shrink-0">
         <div>
           <h1 className="page-title">Audit Log</h1>
@@ -254,12 +254,21 @@ export default function Audit() {
 
       {/* Table */}
       <div className="flex-1 px-6 pb-6 min-h-0">
-        {error && (
-          <div className="bg-red-50 text-red-700 text-sm px-4 py-3 rounded-lg border border-red-200 mb-4">{error}</div>
-        )}
-
         {loading ? (
           <TableSkeleton rows={8} cols={5} />
+        ) : error ? (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-center space-y-3">
+            <RefreshCw size={28} className="mx-auto text-red-400" />
+            <p className="text-sm font-medium text-red-700">{error}</p>
+            <button onClick={fetchData} className="btn-outline text-xs py-1.5 border-red-300 text-red-600 hover:bg-red-100">
+              Retry
+            </button>
+          </div>
+        ) : entries.length === 0 && !hasFilters ? (
+          <div className="bg-white border border-gray-200 rounded-xl p-6 text-center space-y-3">
+            <ClipboardList size={28} className="mx-auto text-gray-300" />
+            <p className="text-sm text-gray-400">No audit events recorded yet.</p>
+          </div>
         ) : entries.length > 0 && (
           <div className="bg-white border border-gray-100 rounded-xl overflow-hidden shadow-sm">
             <table className="w-full text-sm">

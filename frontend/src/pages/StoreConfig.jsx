@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
-import { Plus, Pencil, Trash2, Check, X } from 'lucide-react'
+import { Plus, Pencil, Trash2, Check, X, Warehouse } from 'lucide-react'
 import {
   getDraft, getActiveVersion, listSections, listVersions, reactivateVersion,
   createSection, patchSection, deleteSection,
 } from '../api'
 import { usePageTitle } from '../components/PageMeta'
+import SectionTabs from '../components/SectionTabs'
 
 const ZONE_COLORS = {
   entrance: '#3b82f6',
@@ -109,9 +110,51 @@ function FloorPlanCanvas({ floorPlan, zones, obstacles, cameraConfigs }) {
   )
 }
 
+// ─── Section step progress ────────────────────────────────────────────────────
+
+const STEPS = [
+  { label: 'Floor Plan', done: s => !!s?.floor_plan?.image_uploaded },
+  { label: 'Zones',      done: s => (s?.zones?.length ?? 0) > 0 },
+  { label: 'Cameras',    done: s => (s?.camera_configs?.length ?? 0) > 0 },
+  { label: 'Obstacles',  done: s => (s?.obstacles?.length ?? 0) > 0 },
+]
+
+function SectionStepProgress({ section }) {
+  const completions = STEPS.map(step => step.done(section))
+  const currentIdx = completions.findIndex(c => !c)
+
+  return (
+    <div className="mb-4">
+      <div className="flex items-center">
+        {STEPS.map((step, i) => {
+          const done = completions[i]
+          const current = i === currentIdx
+          return (
+            <React.Fragment key={step.label}>
+              <div className="flex flex-col items-center gap-1">
+                <div className={`w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center ${
+                  done    ? 'bg-blue-600 text-white' :
+                  current ? 'bg-blue-100 text-blue-700 ring-2 ring-blue-400' :
+                            'bg-gray-100 text-gray-400'
+                }`}>
+                  {i + 1}
+                </div>
+                <span className="text-[10px] text-gray-400 whitespace-nowrap">{step.label}</span>
+              </div>
+              {i < STEPS.length - 1 && (
+                <div className="flex-1 h-px bg-gray-200 mx-1 mb-3.5" />
+              )}
+            </React.Fragment>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ─── Sections panel ───────────────────────────────────────────────────────────
 
-function SectionsPanel({ slug, sections, selectedSectionId, onSelect, onSectionsChanged, versionSections = [] }) {
+function SectionsPanel({ slug, sections, selectedSectionId, onSelect, onSectionsChanged, versionSections = [], onRequestAdd }) {
   // Build a lookup map from version data (has camera_configs, zones, floor_plan)
   const versionMap = Object.fromEntries(versionSections.map(s => [s.id, s]))
   const [adding, setAdding] = useState(false)
@@ -125,6 +168,9 @@ function SectionsPanel({ slug, sections, selectedSectionId, onSelect, onSections
 
   useEffect(() => { if (adding) addInputRef.current?.focus() }, [adding])
   useEffect(() => { if (editingId) editInputRef.current?.focus() }, [editingId])
+  useEffect(() => {
+    if (onRequestAdd) { onRequestAdd(() => { setAdding(true); setEditingId(null) }) }
+  }, [])
 
   async function handleCreate(e) {
     e.preventDefault()
@@ -304,6 +350,7 @@ export default function StoreConfig() {
   const [selectedSectionId, setSelectedSectionId] = useState(null)
   const [draft, setDraft] = useState(null)
   const [restoring, setRestoring] = useState(null)
+  const startAddingSectionRef = useRef(null)
 
   function reload() {
     setLoading(true)
@@ -386,7 +433,7 @@ export default function StoreConfig() {
   // No active config yet
   if (!version) {
     return (
-      <div className="flex flex-col h-full overflow-auto">
+      <div className="page-enter flex flex-col h-full overflow-auto">
         <header className="px-6 py-4 border-b border-gray-200 bg-white shrink-0 flex items-center justify-between">
           <div>
             <h1 className="page-title">Store Configuration</h1>
@@ -406,6 +453,7 @@ export default function StoreConfig() {
               selectedSectionId={selectedSectionId}
               onSelect={setSelectedSectionId}
               onSectionsChanged={handleSectionsChanged}
+              onRequestAdd={fn => { startAddingSectionRef.current = fn }}
             />
           </div>
 
@@ -424,12 +472,33 @@ export default function StoreConfig() {
                 </button>
               </div>
             )}
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center">
-              <p className="text-amber-800 font-semibold mb-1">No active configuration</p>
-              <p className="text-amber-700 text-sm">
-                Complete the onboarding wizard to configure floor plans, cameras and zones for each section.
-              </p>
-            </div>
+            {sections.length === 0 ? (
+              <div className="bg-white border border-gray-200 rounded-xl p-8 flex flex-col items-center justify-center text-center gap-4">
+                <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center">
+                  <Warehouse size={28} className="text-blue-500" />
+                </div>
+                <div>
+                  <h2 className="text-base font-semibold text-gray-800 mb-1">Set up your first section</h2>
+                  <p className="text-sm text-gray-500 max-w-sm">
+                    Sections represent distinct physical areas of your store, each covered by a dedicated camera group.
+                    Add a section to start mapping your floor plan, zones, and cameras.
+                  </p>
+                </div>
+                <button
+                  onClick={() => startAddingSectionRef.current?.()}
+                  className="btn-primary"
+                >
+                  Add Section
+                </button>
+              </div>
+            ) : (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center">
+                <p className="text-amber-800 font-semibold mb-1">No active configuration</p>
+                <p className="text-amber-700 text-sm">
+                  Complete the onboarding wizard to configure floor plans, cameras and zones for each section.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -443,7 +512,7 @@ export default function StoreConfig() {
     || null
 
   return (
-    <div className="flex flex-col h-full overflow-auto">
+    <div className="page-enter flex flex-col h-full overflow-auto">
       {/* Header */}
       <header className="px-6 py-4 border-b border-gray-200 bg-white shrink-0 flex items-center justify-between">
         <div>
@@ -516,6 +585,9 @@ export default function StoreConfig() {
                         cc.status === 'calibrated' ? 'bg-yellow-500' : 'bg-gray-400'
                       }`} />
                       <span className="text-gray-700 truncate">{cc.physical_camera_name}</span>
+                      {(!cc.position_x || cc.position_x === 0) && (!cc.position_y || cc.position_y === 0) && (
+                        <span className="text-[10px] bg-amber-50 text-amber-600 border border-amber-200 rounded px-1.5 py-0.5 ml-2 shrink-0">No position</span>
+                      )}
                       <span className="text-gray-400 text-xs capitalize ml-auto">{cc.status}</span>
                     </div>
                   ))}
@@ -541,12 +613,21 @@ export default function StoreConfig() {
 
           {/* Floor plan canvas */}
           <div className="lg:col-span-3 bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-semibold text-gray-700">
-                {selectedSection?.name || 'Floor Plan'}
-              </h3>
+            {selectedSection && <SectionStepProgress section={selectedSection} />}
+            <div className="flex items-center justify-between mb-3 gap-3">
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                <h3 className="text-sm font-semibold text-gray-700 shrink-0">
+                  {selectedSection?.name || 'Floor Plan'}
+                </h3>
+                <SectionTabs
+                  sections={mergedSections}
+                  selectedId={selectedSectionId}
+                  onChange={setSelectedSectionId}
+                  onAdd={() => startAddingSectionRef.current?.()}
+                />
+              </div>
               {selectedSection?.floor_plan?.scale_defined && (
-                <span className="text-xs text-gray-400 bg-gray-50 px-2 py-0.5 rounded border border-gray-200">
+                <span className="text-xs text-gray-400 bg-gray-50 px-2 py-0.5 rounded border border-gray-200 shrink-0">
                   {selectedSection.floor_plan.pixels_per_meter?.toFixed(1)} px/m
                 </span>
               )}

@@ -284,7 +284,7 @@ export default function Settings() {
 
   return (
     // pb-20 leaves room so the sticky bar never covers content
-    <div className="flex flex-col h-full overflow-auto pb-20">
+    <div className="page-enter flex flex-col h-full overflow-auto pb-20">
       <header className="px-6 py-4 border-b border-gray-200 bg-white shrink-0">
         <h1 className="page-title">Settings</h1>
         <p className="page-subtitle">Store configuration and alert thresholds</p>
