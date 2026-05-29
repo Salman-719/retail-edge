@@ -87,13 +87,14 @@ retail-edge/
 │   │   │   ├── models/         # SQLAlchemy ORM + Pydantic schemas
 │   │   │   └── utils/          # homography, heatmap, tracker, pdf_utils
 │   │   └── migrations/         # Alembic migrations
-│   ├── iep1-ingestion/         # Placeholder
+│   ├── iep1_ingestion/         # Placeholder
 │   ├── iep2_vision/            # IEP2 vision: detect/track/local-identity + Postgres persistence
 │   ├── iep3_reconciliation/    # IEP3 cross-camera reconciliation (Local ID -> Global ID)
-│   ├── iep4-alerts/            # Placeholder (was iep3-alerts)
-│   ├── iep5-analytics/         # Placeholder (was iep4-analytics)
-│   └── iep6-agent/             # Placeholder (was iep5-agent)
+│   ├── iep4_alerts/            # Placeholder (was iep3-alerts)
+│   ├── iep5_analytics/         # Placeholder (was iep4-analytics)
+│   └── iep6_agent/             # Placeholder (was iep5-agent)
 ├── common/                     # Shared package: config, db engine, ORM models, contracts, utils
+├── tools/                      # Orchestrator (EEP stand-in) + demo render/review/seed
 ├── tests/
 │   └── unit/                   # Pydantic schema & homography unit tests
 ├── infra/                      # Reserved for Terraform / k8s (Milestone 3)

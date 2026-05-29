@@ -7,9 +7,9 @@ global:
   scrape_interval: 15s
 
 scrape_configs:
-  - job_name: iep2-vision
+  - job_name: iep2_vision
     static_configs:
-      - targets: ["iep2-vision:8012"]
-  - job_name: iep3-reconciliation
+      - targets: ["iep2_vision:8012"]
+  - job_name: iep3_reconciliation
     static_configs:
-      - targets: ["iep3-reconciliation:8013"]
+      - targets: ["iep3_reconciliation:8013"]

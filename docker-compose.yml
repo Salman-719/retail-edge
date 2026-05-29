@@ -83,6 +83,22 @@ services:
 
   # ─── Services ─────────────────────────────────────────────────────────────────
 
+  # One-shot: applies the IEP2/IEP3 subsystem schema (Domain 9) idempotently
+  # (create_all, checkfirst), so an existing Postgres volume — where schema.sql's
+  # initdb already ran and won't re-run — gets the new tables. Reuses the
+  # lightweight reconciliation image (it bundles common/).
+  migrate:
+    build:
+      context: .
+      dockerfile: services/iep3_reconciliation/Dockerfile
+    command: ["python", "-m", "common.db.migrate"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   eep:
     build:
       context: ./services/eep
@@ -109,9 +125,9 @@ services:
       redis:
         condition: service_healthy
 
-  iep1-ingestion:
+  iep1_ingestion:
     build:
-      context: ./services/iep1-ingestion
+      context: ./services/iep1_ingestion
       dockerfile: Dockerfile
     ports:
       - "8001:8001"
@@ -119,7 +135,7 @@ services:
   # IEP2 vision (rebuilt): per-camera CLI worker. Build context is the repo root
   # so the image includes the shared common/ package. Launched per camera by the
   # M6 orchestrator (no long-running HTTP server / port).
-  iep2-vision:
+  iep2_vision:
     build:
       context: .
       dockerfile: services/iep2_vision/Dockerfile
@@ -136,11 +152,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     profiles: ["pipeline"]
     command: ["python", "-c", "import services.iep2_vision.app.main; print('iep2 ready')"]
 
   # IEP3 cross-camera reconciliation: single-instance coordinator/worker.
-  iep3-reconciliation:
+  iep3_reconciliation:
     build:
       context: .
       dockerfile: services/iep3_reconciliation/Dockerfile
@@ -152,26 +170,55 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     profiles: ["pipeline"]
     command: ["python", "-c", "import services.iep3_reconciliation.app.main; print('iep3 ready')"]
 
-  iep4-alerts:
+  # EEP stand-in: runs the full IEP2->IEP3 chain in one process against demo
+  # videos. Invoke as a one-off job (not a long-running server):
+  #   docker compose run --rm orchestrator python -m tools.orchestrator \
+  #     --store-id 00000000-0000-0000-0000-000000000001 \
+  #     --camera cam1=/app/testing-data/Test1/Camera1.mp4 \
+  #     --camera cam2=/app/testing-data/Test1/Camera2.mp4
+  orchestrator:
     build:
-      context: ./services/iep4-alerts
+      context: .
+      dockerfile: tools/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
+      REDIS_URL: redis://redis:6379/0
+      YOLO_CONFIG_DIR: /tmp/ultralytics
+      MPLCONFIGDIR: /tmp/matplotlib
+    volumes:
+      - ./testing-data:/app/testing-data:ro
+      - iep2_model_cache:/root/.cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles: ["pipeline"]
+
+  iep4_alerts:
+    build:
+      context: ./services/iep4_alerts
       dockerfile: Dockerfile
     ports:
       - "8004:8004"
 
-  iep5-analytics:
+  iep5_analytics:
     build:
-      context: ./services/iep5-analytics
+      context: ./services/iep5_analytics
       dockerfile: Dockerfile
     ports:
       - "8005:8005"
 
-  iep6-agent:
+  iep6_agent:
     build:
-      context: ./services/iep6-agent
+      context: ./services/iep6_agent
       dockerfile: Dockerfile
     ports:
       - "8006:8006"
