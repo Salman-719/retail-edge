@@ -2,15 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { useNavigate, Navigate } from 'react-router-dom'
 import { ArrowRight, Plus, Pencil } from 'lucide-react'
 import { useAuth } from '../store'
-import { listStores, createStore, patchStore, logout } from '../api'
-
-const TIMEZONES = [
-  'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-  'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Asia/Dubai', 'Asia/Beirut',
-  'Asia/Tokyo', 'Asia/Singapore', 'Australia/Sydney',
-]
-
-const CURRENCIES = ['USD', 'LBP']
+import { listStores, createStore, patchStore, deleteStore, logout } from '../api'
 
 // Derive initials from a store name (up to 2 chars)
 function initials(name) {
@@ -182,12 +174,13 @@ export default function OwnerDashboard() {
   const [loadingStores, setLoadingStores] = useState(true)
   const [showModal, setShowModal] = useState(false)
   const [editStore, setEditStore] = useState(null)
-  const [form, setForm] = useState({ name: '', slug: '', timezone: 'UTC', currency: 'USD', address: '' })
+  const [form, setForm] = useState({ name: '', slug: '', address: '' })
   const [formError, setFormError] = useState('')
   const [creating, setCreating] = useState(false)
-  const [editForm, setEditForm] = useState({ name: '', timezone: 'UTC', currency: 'USD', address: '' })
+  const [editForm, setEditForm] = useState({ name: '', address: '' })
   const [editError, setEditError] = useState('')
   const [editing, setEditing] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   useEffect(() => {
     listStores()
@@ -210,8 +203,6 @@ export default function OwnerDashboard() {
     setEditStore(store)
     setEditForm({
       name: store.name,
-      timezone: store.timezone || 'UTC',
-      currency: store.currency || 'USD',
       address: store.address || '',
     })
     setEditError('')
@@ -222,19 +213,18 @@ export default function OwnerDashboard() {
     setFormError('')
     if (!form.name.trim()) { setFormError('Store name is required'); return }
     if (!form.slug.match(/^[a-z0-9-]+$/)) { setFormError('Slug must be lowercase letters, numbers, and hyphens only'); return }
+    if (!form.address.trim()) { setFormError('Address is required'); return }
     setCreating(true)
     try {
       await createStore({
         name: form.name.trim(),
         slug: form.slug,
-        timezone: form.timezone,
-        currency: form.currency,
-        address: form.address.trim() || undefined,
+        address: form.address.trim(),
       })
       const updated = await listStores()
       setStores(updated.stores || updated)
       setShowModal(false)
-      setForm({ name: '', slug: '', timezone: 'UTC', currency: 'USD', address: '' })
+      setForm({ name: '', slug: '', address: '' })
     } catch (err) {
       const detail = err.response?.data?.detail
       setFormError(typeof detail === 'string' ? detail : detail?.error || 'Failed to create store')
@@ -247,13 +237,12 @@ export default function OwnerDashboard() {
     e.preventDefault()
     setEditError('')
     if (!editForm.name.trim()) { setEditError('Store name is required'); return }
+    if (!editForm.address.trim()) { setEditError('Address is required'); return }
     setEditing(true)
     try {
       await patchStore(editStore.slug, {
         name: editForm.name.trim() || undefined,
-        timezone: editForm.timezone || undefined,
-        currency: editForm.currency || undefined,
-        address: editForm.address.trim() || undefined,
+        address: editForm.address.trim(),
       })
       const updated = await listStores()
       setStores(updated.stores || updated)
@@ -263,6 +252,22 @@ export default function OwnerDashboard() {
       setEditError(typeof detail === 'string' ? detail : detail?.error || 'Failed to update store')
     } finally {
       setEditing(false)
+    }
+  }
+
+  async function handleDelete() {
+    if (!window.confirm(`Delete "${editStore.name}"? This cannot be undone.`)) return
+    setDeleting(true)
+    setEditError('')
+    try {
+      await deleteStore(editStore.slug)
+      setStores(prev => prev.filter(s => s.slug !== editStore.slug))
+      setEditStore(null)
+    } catch (err) {
+      const detail = err.response?.data?.detail
+      setEditError(typeof detail === 'string' ? detail : detail?.error || 'Failed to delete store')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -380,27 +385,10 @@ export default function OwnerDashboard() {
                 <p className="text-xs text-gray-400 mt-1">Lowercase letters, numbers, and hyphens only</p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
-                  <select name="timezone" value={form.timezone} onChange={onFormChange}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    {TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Currency</label>
-                  <select name="currency" value={form.currency} onChange={onFormChange}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                </div>
-              </div>
-
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Address <span className="text-gray-400 font-normal">(optional)</span></label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Address <span className="text-red-500">*</span></label>
                 <input
-                  name="address" type="text" value={form.address} onChange={onFormChange}
+                  name="address" type="text" required value={form.address} onChange={onFormChange}
                   placeholder="e.g. 123 Main St, City"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
@@ -449,28 +437,9 @@ export default function OwnerDashboard() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
-                  <select value={editForm.timezone}
-                    onChange={e => setEditForm(f => ({ ...f, timezone: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    {TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Currency</label>
-                  <select value={editForm.currency}
-                    onChange={e => setEditForm(f => ({ ...f, currency: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                </div>
-              </div>
-
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Address <span className="text-gray-400 font-normal">(optional)</span></label>
-                <input type="text" value={editForm.address}
+                <label className="block text-sm font-medium text-gray-700 mb-1">Address <span className="text-red-500">*</span></label>
+                <input type="text" required value={editForm.address}
                   onChange={e => setEditForm(f => ({ ...f, address: e.target.value }))}
                   placeholder="e.g. 123 Main St, City"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
@@ -482,8 +451,19 @@ export default function OwnerDashboard() {
                   className="flex-1 py-2 px-4 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors">
                   Cancel
                 </button>
-                <button type="submit" disabled={editing} className="btn-primary flex-1">
+                <button type="submit" disabled={editing || deleting} className="btn-primary flex-1">
                   {editing ? 'Saving…' : 'Save Changes'}
+                </button>
+              </div>
+
+              <div className="border-t border-gray-100 pt-4 mt-2">
+                <button
+                  type="button"
+                  onClick={handleDelete}
+                  disabled={deleting || editing}
+                  className="w-full py-2 px-4 rounded-lg text-sm font-medium text-red-600 border border-red-200 hover:bg-red-50 transition-colors disabled:opacity-50"
+                >
+                  {deleting ? 'Deleting…' : 'Delete Store'}
                 </button>
               </div>
             </form>

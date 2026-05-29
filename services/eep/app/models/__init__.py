@@ -20,6 +20,7 @@ from app.models.version_sync_event import VersionSyncEvent
 from app.models.employee import Employee, EmployeeSection
 from app.models.shift_pattern import ShiftPattern
 from app.models.shift_instance import ShiftInstance, ShiftAssignment, BreakRecord
+from app.models.password_reset_token import PasswordResetToken
 
 __all__ = [
     "Base",
@@ -49,4 +50,5 @@ __all__ = [
     "ShiftInstance",
     "ShiftAssignment",
     "BreakRecord",
+    "PasswordResetToken",
 ]

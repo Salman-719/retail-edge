@@ -17,13 +17,16 @@ from app.core.auth import (
 )
 from app.core.database import get_db
 from app.core.config import settings
+from app.core.email import send_password_reset_email
 from app.models.invitation import Invitation
+from app.models.password_reset_token import PasswordResetToken
 from app.models.refresh_token import RefreshToken
 from app.models.store import Store
 from app.models.store_member import StoreMember, StoreMemberPermission, StoreMemberSection
 from app.models.user import User
 from app.schemas.auth import (
     AcceptInviteRequest,
+    ForgotPasswordRequest,
     LoginRequest,
     LoginResponse,
     LogoutRequest,
@@ -31,6 +34,7 @@ from app.schemas.auth import (
     RefreshResponse,
     RegisterRequest,
     RegisterResponse,
+    ResetPasswordRequest,
     StoreRef,
 )
 
@@ -171,6 +175,68 @@ async def logout(body: LogoutRequest, db: AsyncSession = Depends(get_db)):
         )
         await write_audit_log(db, "logout", user_id=rt.user_id)
         await db.commit()
+
+
+@router.post("/forgot-password", status_code=200)
+async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    # Always return 200 — never reveal whether the email exists
+    result = await db.execute(select(User).where(User.email == body.email, User.is_active == True))
+    user = result.scalar_one_or_none()
+    if user:
+        # Invalidate any existing unused tokens for this user
+        await db.execute(
+            update(PasswordResetToken)
+            .where(
+                PasswordResetToken.user_id == user.id,
+                PasswordResetToken.used_at == None,
+            )
+            .values(used_at=datetime.now(timezone.utc))
+        )
+        raw_token = secrets.token_urlsafe(48)
+        prt = PasswordResetToken(
+            user_id=user.id,
+            token_hash=PasswordResetToken.hash_token(raw_token),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db.add(prt)
+        await db.commit()
+        await send_password_reset_email(user.email, raw_token)
+    return {"message": "If that email exists, a reset link has been sent"}
+
+
+@router.post("/reset-password", status_code=200)
+async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    token_hash = PasswordResetToken.hash_token(body.token)
+    result = await db.execute(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token_hash == token_hash,
+            PasswordResetToken.used_at == None,
+        )
+    )
+    prt = result.scalar_one_or_none()
+    if not prt or prt.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "This reset link is invalid or has expired.", "code": "RESET_TOKEN_INVALID"},
+        )
+
+    await db.execute(
+        update(User)
+        .where(User.id == prt.user_id)
+        .values(password_hash=hash_password(body.new_password))
+    )
+    prt.used_at = datetime.now(timezone.utc)
+
+    # Revoke all existing refresh tokens so old sessions are invalidated
+    await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == prt.user_id, RefreshToken.revoked_at == None)
+        .values(revoked_at=datetime.now(timezone.utc))
+    )
+
+    await write_audit_log(db, "password_reset", user_id=prt.user_id)
+    await db.commit()
+    return {"message": "Password updated successfully"}
 
 
 # ── Store-scoped auth endpoints ──────────────────────────────────────────────

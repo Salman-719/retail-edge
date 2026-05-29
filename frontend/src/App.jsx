@@ -7,6 +7,8 @@ import StoreLayout from './components/StoreLayout'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import AcceptInvite from './pages/AcceptInvite'
+import ForgotPassword from './pages/ForgotPassword'
+import ResetPassword from './pages/ResetPassword'
 import OwnerDashboard from './pages/OwnerDashboard'
 
 import StoreConfig from './pages/StoreConfig'
@@ -28,6 +30,8 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/accept-invite" element={<AcceptInvite />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
 
         {/* Owner dashboard */}
         <Route path="/dashboard" element={<PrivateRoute><OwnerDashboard /></PrivateRoute>} />

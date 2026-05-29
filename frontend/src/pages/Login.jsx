@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { Eye, EyeOff, Check } from 'lucide-react'
 import { useAuth } from '../store'
 import { login } from '../api'
@@ -13,6 +13,8 @@ const FEATURES = [
 export default function Login() {
   const { dispatch } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  const resetSuccess = location.state?.resetSuccess === true
   const [form, setForm] = useState({ email: '', password: '' })
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
@@ -124,6 +126,11 @@ export default function Login() {
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-5">
+              {resetSuccess && (
+                <div className="bg-green-50 text-green-800 text-sm px-4 py-3 rounded-lg border border-green-200">
+                  Password updated successfully. Sign in with your new password.
+                </div>
+              )}
               {error && (
                 <div className="bg-red-50 text-red-700 text-sm px-4 py-3 rounded-lg border border-red-200">
                   {error}
@@ -147,7 +154,12 @@ export default function Login() {
 
               {/* Password with show/hide */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1.5">Password</label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-sm font-medium text-gray-700">Password</label>
+                  <Link to="/forgot-password" className="text-xs text-blue-600 hover:text-blue-700">
+                    Forgot password?
+                  </Link>
+                </div>
                 <div className="relative">
                   <input
                     name="password"

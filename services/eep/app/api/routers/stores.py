@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
@@ -71,9 +71,7 @@ async def create_store(
         name=body.name,
         slug=body.slug,
         created_by=user_id,
-        timezone=body.timezone,
         address=body.address,
-        currency=body.currency,
     )
     db.add(store)
     await db.flush()
@@ -113,9 +111,7 @@ async def get_store(ctx: StoreContext = Depends(get_store_context)):
         id=s.id,
         name=s.name,
         slug=s.slug,
-        timezone=s.timezone,
         address=s.address,
-        currency=s.currency,
         status=s.status,
         operating_hours=s.operating_hours,
         created_at=s.created_at,
@@ -152,7 +148,24 @@ async def patch_store(
     result = await db.execute(select(Store).where(Store.id == ctx.store_id))
     s = result.scalar_one()
     return StoreDetail(
-        id=s.id, name=s.name, slug=s.slug, timezone=s.timezone,
-        address=s.address, currency=s.currency, status=s.status,
+        id=s.id, name=s.name, slug=s.slug,
+        address=s.address, status=s.status,
         operating_hours=s.operating_hours, created_at=s.created_at, updated_at=s.updated_at,
     )
+
+
+@router.delete("/store/{slug}", status_code=204)
+async def delete_store(
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+):
+    if not ctx.is_owner:
+        raise HTTPException(status_code=403, detail={"error": "Only the store owner can delete a store", "code": "OWNER_REQUIRED"})
+
+    await write_audit_log(
+        db, "store_deleted", store_id=ctx.store_id, user_id=ctx.user_id,
+        entity_type="store", entity_id=ctx.store_id,
+        before_state={"name": ctx.store.name, "slug": ctx.store.slug},
+    )
+    await db.execute(delete(Store).where(Store.id == ctx.store_id))
+    await db.commit()
