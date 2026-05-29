@@ -1,0 +1,7 @@
+# IEP3 cross-camera reconciliation. Pure data processing -- no opencv/torch/ffmpeg.
+numpy==1.26.4
+sqlalchemy[asyncio]==2.0.30
+asyncpg==0.29.0
+redis[asyncio]==5.0.4
+pydantic-settings==2.2.1
+prometheus-client==0.20.0

@@ -39,12 +39,13 @@ The platform is structured as a microservices architecture deployed via Docker C
 │  port 5432  │  │ port 6379│  │  port 9000 · UI: 9001    │
 └─────────────┘  └──────────┘  └─────────────────────────┘
 
-IEP Services (Milestone 3 — placeholders in Milestone 1/2):
-  IEP1 — Data Ingestion        port 8001
-  IEP2 — Vision (YOLO)         port 8002
-  IEP3 — Alerts & Rules        port 8003
-  IEP4 — Analytics             port 8004
-  IEP5 — AI Agent (LLM)        port 8005
+IEP Services:
+  IEP1 — Data Ingestion              port 8001  (placeholder)
+  IEP2 — Vision (detect/track/ReID)  per-camera CLI worker (writes to Postgres)
+  IEP3 — Cross-Camera Reconciliation single-instance worker (batch-triggered)
+  IEP4 — Alerts & Rules              port 8004  (placeholder)
+  IEP5 — Analytics                   port 8005  (placeholder)
+  IEP6 — AI Agent (LLM)              port 8006  (placeholder)
 ```
 
 ---
@@ -86,11 +87,13 @@ retail-edge/
 │   │   │   ├── models/         # SQLAlchemy ORM + Pydantic schemas
 │   │   │   └── utils/          # homography, heatmap, tracker, pdf_utils
 │   │   └── migrations/         # Alembic migrations
-│   ├── iep1-ingestion/         # Placeholder — Milestone 3
-│   ├── iep2-vision/            # Placeholder — Milestone 3
-│   ├── iep3-alerts/            # Placeholder — Milestone 3
-│   ├── iep4-analytics/         # Placeholder — Milestone 3
-│   └── iep5-agent/             # Placeholder — Milestone 3
+│   ├── iep1-ingestion/         # Placeholder
+│   ├── iep2_vision/            # IEP2 vision: detect/track/local-identity + Postgres persistence
+│   ├── iep3_reconciliation/    # IEP3 cross-camera reconciliation (Local ID -> Global ID)
+│   ├── iep4-alerts/            # Placeholder (was iep3-alerts)
+│   ├── iep5-analytics/         # Placeholder (was iep4-analytics)
+│   └── iep6-agent/             # Placeholder (was iep5-agent)
+├── common/                     # Shared package: config, db engine, ORM models, contracts, utils
 ├── tests/
 │   └── unit/                   # Pydantic schema & homography unit tests
 ├── infra/                      # Reserved for Terraform / k8s (Milestone 3)

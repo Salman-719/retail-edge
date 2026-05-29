@@ -1,4 +1,4 @@
-"""Integration fixtures for M4 (real PostgreSQL). See tests/integration_support.py."""
+"""Integration fixtures for M5 (real PostgreSQL). See tests/integration_support.py."""
 
 from __future__ import annotations
 

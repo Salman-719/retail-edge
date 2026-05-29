@@ -114,41 +114,65 @@ services:
     ports:
       - "8001:8001"
 
+  # IEP2 vision (rebuilt): per-camera CLI worker. Build context is the repo root
+  # so the image includes the shared common/ package. Launched per camera by the
+  # M6 orchestrator (no long-running HTTP server / port).
   iep2-vision:
     build:
-      context: ./services/iep2-vision
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/iep2_vision/Dockerfile
     environment:
-      IEP2_TEST1_DIR: /app/testing-data/Test1
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
+      REDIS_URL: redis://redis:6379/0
       YOLO_CONFIG_DIR: /tmp/ultralytics
       MPLCONFIGDIR: /tmp/matplotlib
-    ports:
-      - "8002:8002"
     volumes:
       - ./testing-data:/app/testing-data:ro
-      - iep2_runtime:/app/runtime
       - iep2_model_cache:/root/.cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles: ["pipeline"]
+    command: ["python", "-c", "import services.iep2_vision.app.main; print('iep2 ready')"]
 
-  iep3-alerts:
+  # IEP3 cross-camera reconciliation: single-instance coordinator/worker.
+  iep3-reconciliation:
     build:
-      context: ./services/iep3-alerts
-      dockerfile: Dockerfile
-    ports:
-      - "8003:8003"
+      context: .
+      dockerfile: services/iep3_reconciliation/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles: ["pipeline"]
+    command: ["python", "-c", "import services.iep3_reconciliation.app.main; print('iep3 ready')"]
 
-  iep4-analytics:
+  iep4-alerts:
     build:
-      context: ./services/iep4-analytics
+      context: ./services/iep4-alerts
       dockerfile: Dockerfile
     ports:
       - "8004:8004"
 
-  iep5-agent:
+  iep5-analytics:
     build:
-      context: ./services/iep5-agent
+      context: ./services/iep5-analytics
       dockerfile: Dockerfile
     ports:
       - "8005:8005"
+
+  iep6-agent:
+    build:
+      context: ./services/iep6-agent
+      dockerfile: Dockerfile
+    ports:
+      - "8006:8006"
 
 volumes:
   postgres_data:

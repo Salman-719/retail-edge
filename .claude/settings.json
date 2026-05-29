@@ -13,7 +13,10 @@
       "Bash(python -m pytest tests/common tests/iep2)",
       "Bash(docker exec *)",
       "Bash(break)",
-      "Bash(DATABASE_URL=\"postgresql+asyncpg://rv:rv@localhost:5544/rvtest\" RV_RUN_INTEGRATION=1 python -m pytest tests/iep2/integration -v)"
+      "Bash(DATABASE_URL=\"postgresql+asyncpg://rv:rv@localhost:5544/rvtest\" RV_RUN_INTEGRATION=1 python -m pytest tests/iep2/integration -v)",
+      "Bash(python -m pytest tests/iep3)",
+      "Bash(DATABASE_URL=\"postgresql+asyncpg://rv:rv@localhost:5544/rvtest\" RV_RUN_INTEGRATION=1 python -m pytest tests/iep2/integration tests/iep3/integration -v)",
+      "Bash(find services/iep3-alerts services/iep4-analytics services/iep5-agent -type f)"
     ]
   }
 }

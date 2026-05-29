@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 
-app = FastAPI(title="IEP4 — Analytics")
+app = FastAPI(title="IEP5 — Analytics")
 
 
 @app.get("/health")
 async def health():
-    return {"service": "iep4-analytics", "status": "ok"}
+    return {"service": "iep5-analytics", "status": "ok"}
