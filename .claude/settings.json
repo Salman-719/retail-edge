@@ -10,7 +10,10 @@
       "Bash(pwd -W)",
       "Bash(docker run *)",
       "Bash(python -m pytest tests/iep2/identity -v)",
-      "Bash(python -m pytest tests/common tests/iep2)"
+      "Bash(python -m pytest tests/common tests/iep2)",
+      "Bash(docker exec *)",
+      "Bash(break)",
+      "Bash(DATABASE_URL=\"postgresql+asyncpg://rv:rv@localhost:5544/rvtest\" RV_RUN_INTEGRATION=1 python -m pytest tests/iep2/integration -v)"
     ]
   }
 }
