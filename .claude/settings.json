@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pip list)",
+      "Bash(python -m pip install -q \"sqlalchemy[asyncio]==2.0.30\" \"asyncpg==0.29.0\" \"pydantic-settings==2.2.1\" \"pytest>=8\" \"pytest-asyncio>=0.23\" \"shapely==2.0.4\")",
+      "Bash(python -m pytest tests/common -v)",
+      "Bash(python -m pytest tests/common tests/iep2 -v)",
+      "Bash(docker version *)",
+      "Bash(docker rm *)",
+      "Bash(pwd -W)",
+      "Bash(docker run *)"
+    ]
+  }
+}

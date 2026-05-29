@@ -1,0 +1,17 @@
+# Root tooling config for the IEP2/IEP3 subsystem (common/ + services/iep*_*).
+# The repo root is the import root: `from common...` and
+# `from services.iep2_vision.app...` resolve from here.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.black]
+line-length = 120
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+ignore = ["E712"]  # `== True` is intentional in partial-index predicates

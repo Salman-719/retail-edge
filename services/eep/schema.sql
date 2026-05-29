@@ -683,3 +683,123 @@ CREATE INDEX idx_test_runs_status          ON test_runs(store_id, status);
 CREATE INDEX idx_test_runs_expires         ON test_runs(expires_at) WHERE status = 'complete';
 CREATE INDEX idx_test_run_cameras_run      ON test_run_cameras(test_run_id);
 CREATE INDEX idx_test_run_cameras_physical ON test_run_cameras(physical_camera_id);
+
+-- ============================================================================
+-- Domain 9 — IEP2 Vision (per-camera local identity) + IEP3 Reconciliation
+--            (cross-camera global identity)
+--
+-- These tables are owned by the IEP2/IEP3 subsystem and mirrored by the
+-- SQLAlchemy models in common/models/{iep2_tables,iep3_tables,shared_tables}.py.
+-- IEP2 writes tracking_history / local_embeddings / local_centroids; IEP3 reads
+-- tracking_history + local_centroids (read-only) and owns the global_* tables.
+-- ============================================================================
+
+-- IEP2: per-camera floor positions (2s buffered writes; read by IEP3 per batch)
+CREATE TABLE tracking_history (
+    id              BIGSERIAL PRIMARY KEY,
+    local_id        UUID    NOT NULL,
+    camera_id       VARCHAR(64) NOT NULL,
+    timestamp_ms    BIGINT  NOT NULL,
+    floor_x         FLOAT   NOT NULL,
+    floor_y         FLOAT   NOT NULL,
+    zone_id         VARCHAR(64),
+    bbox_confidence FLOAT,
+    bbox_area       FLOAT
+);
+
+-- IEP2: persistent per-LocalID embedding store (crash recovery + audit)
+CREATE TABLE local_embeddings (
+    local_id        UUID    NOT NULL,
+    captured_ts     BIGINT  NOT NULL,
+    camera_id       VARCHAR(64) NOT NULL,
+    embedding       BYTEA   NOT NULL,   -- float32[D] tobytes()
+    yolo_confidence FLOAT   NOT NULL,
+    is_init         BOOLEAN NOT NULL,
+    PRIMARY KEY (local_id, captured_ts)
+);
+
+-- IEP2: current centroid per LocalID (primary ReID interface for IEP3)
+CREATE TABLE local_centroids (
+    local_id         UUID    PRIMARY KEY,
+    camera_id        VARCHAR(64) NOT NULL,
+    centroid         BYTEA   NOT NULL,  -- float32[D] tobytes()
+    updated_at_batch INTEGER NOT NULL
+);
+
+-- IEP3: authoritative registry of store-wide identities
+CREATE TABLE global_identities (
+    global_id        UUID    PRIMARY KEY,
+    store_id         UUID    NOT NULL,
+    first_seen_ts    BIGINT  NOT NULL,
+    last_seen_ts     BIGINT  NOT NULL,
+    state            VARCHAR(16) NOT NULL,
+    lost_since_batch INTEGER,
+    last_floor_x     FLOAT,
+    last_floor_y     FLOAT,
+    CONSTRAINT state_valid CHECK (state IN ('active','lost','exited'))
+);
+
+-- IEP3: LocalID -> GlobalID linkage with full history
+CREATE TABLE global_local_mapping (
+    id                BIGSERIAL PRIMARY KEY,
+    global_id         UUID    NOT NULL REFERENCES global_identities(global_id),
+    camera_id         VARCHAR(64) NOT NULL,
+    local_id          UUID    NOT NULL,
+    is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+    linked_at_batch   INTEGER NOT NULL,
+    last_seen_batch   INTEGER NOT NULL,
+    unlinked_at_batch INTEGER
+);
+
+-- IEP3: per-camera centroid for each GlobalID (cross-camera ReID)
+CREATE TABLE global_embeddings (
+    global_id        UUID    NOT NULL REFERENCES global_identities(global_id),
+    camera_id        VARCHAR(64) NOT NULL,
+    centroid         BYTEA   NOT NULL,
+    updated_at_batch INTEGER NOT NULL,
+    PRIMARY KEY (global_id, camera_id)
+);
+
+-- IEP3: canonical store-wide position log (one row per GlobalID per batch)
+CREATE TABLE global_tracking_history (
+    id              BIGSERIAL PRIMARY KEY,
+    global_id       UUID    NOT NULL REFERENCES global_identities(global_id),
+    store_id        UUID    NOT NULL,
+    batch_number    INTEGER NOT NULL,
+    timestamp_ms    BIGINT  NOT NULL,
+    floor_x         FLOAT   NOT NULL,
+    floor_y         FLOAT   NOT NULL,
+    zone_id         VARCHAR(64),
+    source_camera   VARCHAR(64) NOT NULL,
+    source_local_id UUID    NOT NULL,
+    selection_score FLOAT   NOT NULL
+);
+
+-- Demo/seed calibration table (production IEP2 reads calibrations/zones instead)
+CREATE TABLE camera_calibrations (
+    cam_id        VARCHAR(64) PRIMARY KEY,
+    store_id      UUID  NOT NULL,
+    homography    DOUBLE PRECISION[] NOT NULL,  -- 9 elements, 3x3 row-major (validated in app)
+    zone_polygons JSONB NOT NULL
+);
+
+-- Domain 9 indexes
+CREATE INDEX ix_tracking_history_local_id_ts ON tracking_history(local_id, timestamp_ms);
+CREATE INDEX ix_tracking_history_ts          ON tracking_history(timestamp_ms);
+CREATE INDEX ix_tracking_history_camera_ts   ON tracking_history(camera_id, timestamp_ms);
+CREATE INDEX ix_local_embeddings_local_id    ON local_embeddings(local_id);
+CREATE INDEX ix_local_embeddings_camera_ts   ON local_embeddings(camera_id, captured_ts);
+CREATE INDEX ix_local_centroids_camera_id    ON local_centroids(camera_id);
+CREATE INDEX ix_global_identities_store_state ON global_identities(store_id, state);
+CREATE INDEX ix_global_identities_state_lost  ON global_identities(state, lost_since_batch);
+-- Only one ACTIVE LocalID per camera per GlobalID (partial unique index)
+CREATE UNIQUE INDEX uq_glm_global_camera_active ON global_local_mapping(global_id, camera_id)
+    WHERE is_active = TRUE;
+CREATE INDEX ix_global_local_mapping_local_id     ON global_local_mapping(local_id);
+CREATE INDEX ix_global_local_mapping_global_active ON global_local_mapping(global_id, is_active);
+CREATE INDEX ix_global_embeddings_global_id  ON global_embeddings(global_id);
+CREATE INDEX ix_gth_global_ts ON global_tracking_history(global_id, timestamp_ms);
+CREATE INDEX ix_gth_store_ts  ON global_tracking_history(store_id, timestamp_ms);
+CREATE INDEX ix_gth_batch     ON global_tracking_history(batch_number);
+CREATE INDEX ix_gth_zone_ts   ON global_tracking_history(zone_id, timestamp_ms);
+CREATE INDEX ix_camera_calibrations_store ON camera_calibrations(store_id);

@@ -1,0 +1,22 @@
+# IEP2 Vision (rebuilt). Vision stack ported from the previous iep2-vision
+# service, plus the shared DB/config/runtime deps the common/ package needs.
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+Pillow==10.4.0
+shapely==2.0.4
+
+# Detection / tracking / ReID backends (optional at runtime; the descriptor +
+# IoU fallbacks keep the pipeline runnable on CPU with no weights).
+ultralytics==8.3.89
+boxmot==19.0.0
+torchreid==0.2.5
+lap==0.5.13
+cython_bbox==0.1.5
+gdown==5.2.0
+
+# Persistence / events / config (M1 common package; used from M4 onward).
+sqlalchemy[asyncio]==2.0.30
+asyncpg==0.29.0
+redis[asyncio]==5.0.4
+pydantic-settings==2.2.1
+prometheus-client==0.20.0
