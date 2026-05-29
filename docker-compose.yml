@@ -54,6 +54,8 @@ services:
     image: prom/prometheus:v2.51.0
     ports:
       - "9090:9090"
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     restart: unless-stopped
 
   grafana:

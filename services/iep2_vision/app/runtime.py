@@ -11,6 +11,9 @@ is likewise injectable so e2e tests can capture emissions without Redis.
 
 from __future__ import annotations
 
+from time import perf_counter
+
+from services.iep2_vision.app import metrics
 from services.iep2_vision.app.calibration import load_calibration
 from services.iep2_vision.app.events import BatchEventEmitter
 from services.iep2_vision.app.identity.manager import LocalIdentityManager
@@ -65,9 +68,16 @@ class Iep2Runtime:
             window_start = frames[0].timestamp_ms
             window_end = frames[-1].timestamp_ms
             for sf in frames:
+                t0 = perf_counter()
                 frame_dets, tracker_out, _ = self._pipeline.process_frame(sf.frame)
                 await self._manager.process_frame(sf.frame, frame_dets, tracker_out, sf.timestamp_ms)
                 await self._db.maybe_flush()
+                metrics.frame_latency.labels(self._cam).observe(perf_counter() - t0)
+                metrics.detections_per_frame.labels(self._cam).observe(len(frame_dets))
+                for d in frame_dets:
+                    metrics.detection_confidence.labels(self._cam).observe(d.confidence)
             await self._db.maybe_flush(force=True)  # final flush for the batch
             self._manager.on_batch_boundary(batch_number)
+            metrics.active_tracks.labels(self._cam).set(len(self._manager.pools.active))
+            metrics.lost_pool_size.labels(self._cam).set(len(self._manager.pools.lost))
             await self._events.emit(self._store, self._cam, batch_number, window_start, window_end)

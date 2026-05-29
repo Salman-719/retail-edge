@@ -60,6 +60,15 @@ class BatchCoordinator:
             await self._fire(b)
         return stale
 
+    async def drain(self) -> list[int]:
+        """Fire every still-tracked batch (partial reconciliation) in order. Used
+        by the orchestrator after all cameras finish so trailing/uneven batches
+        are not left unprocessed."""
+        fired = sorted(self._windows)
+        for b in fired:
+            await self._fire(b)
+        return fired
+
     async def _fire(self, batch_number: int) -> None:
         window = self._windows.pop(batch_number)
         self._seen.pop(batch_number, None)

@@ -20,9 +20,20 @@ from common.models.shared_tables import CameraCalibration
 from services.iep2_vision.app.runtime import Iep2Runtime
 
 
+def _maybe_start_metrics() -> None:
+    import os
+
+    port = os.getenv("METRICS_PORT")
+    if port:
+        from services.iep2_vision.app.metrics import start_metrics_server
+
+        start_metrics_server(int(port))
+
+
 async def _main(store_id: str, camera_id: str, video_path: str, start_ms: int) -> None:
     get_settings()
     configure_logging("iep2-vision")
+    _maybe_start_metrics()
     async with session_scope() as session:
         cal = (
             await session.execute(select(CameraCalibration).where(CameraCalibration.cam_id == camera_id))

@@ -1,0 +1,15 @@
+# Prometheus scrape config for the IEP2+IEP3 subsystem.
+# IEP2 (per-camera worker) and IEP3 (reconciliation worker) each expose their
+# private metrics registry on /metrics when started with METRICS_PORT set (see
+# each service's main.py). Targets below assume the orchestrator/workers run with
+# those ports published on the compose network.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: iep2-vision
+    static_configs:
+      - targets: ["iep2-vision:8012"]
+  - job_name: iep3-reconciliation
+    static_configs:
+      - targets: ["iep3-reconciliation:8013"]

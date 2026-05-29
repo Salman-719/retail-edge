@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 
 from common.utils.embeddings import cosine_similarity, l2_normalize
+from services.iep3_reconciliation.app import metrics
 from services.iep3_reconciliation.app.reid.gates import cross_camera_gate
 
 
@@ -49,12 +50,16 @@ class ReidMatcher:
             )
             await self._repo.link(session, gid, obs.camera_id, obs.local_id, batch)
             await self._repo.upsert_global_centroid(session, gid, obs.camera_id, new_centroid, batch)
+            metrics.global_links.labels(outcome="new_global").inc()
             return
 
-        best_g, _ = max(above, key=lambda x: x[1])
+        best_g, best_score = max(above, key=lambda x: x[1])
+        was_lost = best_g.state == "lost"
         await self._repo.link(session, best_g.global_id, obs.camera_id, obs.local_id, batch)
         await self._repo.upsert_global_centroid(session, best_g.global_id, obs.camera_id, new_centroid, batch)
         await self._repo.reactivate_if_lost(session, best_g.global_id, obs.last_seen_ts)
+        metrics.global_links.labels(outcome="reactivated" if was_lost else "cross_camera").inc()
+        metrics.match_similarity.observe(best_score)  # ML signal
         # keep the GlobalID's position current for later same-batch gate checks
         await self._repo.update_global_last_position(
             session, best_g.global_id, obs.last_floor_x, obs.last_floor_y, obs.last_seen_ts

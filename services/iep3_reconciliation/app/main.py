@@ -22,6 +22,15 @@ async def run_service(store_id, cameras: list[str], frame_px: dict[str, int],
                       timeout_seconds: float | None = None) -> None:
     settings = get_settings()
     configure_logging("iep3-reconciliation")
+
+    import os
+
+    metrics_port = os.getenv("METRICS_PORT")
+    if metrics_port:
+        from services.iep3_reconciliation.app.metrics import start_metrics_server
+
+        start_metrics_server(int(metrics_port))
+
     repo = Iep3Repository(settings)
     reconciler = Reconciler(store_id, repo, settings, frame_px)
     coordinator = BatchCoordinator(
