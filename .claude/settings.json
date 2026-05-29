@@ -8,7 +8,9 @@
       "Bash(docker version *)",
       "Bash(docker rm *)",
       "Bash(pwd -W)",
-      "Bash(docker run *)"
+      "Bash(docker run *)",
+      "Bash(python -m pytest tests/iep2/identity -v)",
+      "Bash(python -m pytest tests/common tests/iep2)"
     ]
   }
 }
