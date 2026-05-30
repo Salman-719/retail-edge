@@ -49,8 +49,11 @@ class Iep2Runtime:
         self._embedder = embedder or create_reid_model(
             self._s.reid_backend, model_name=self._s.reid_model, weights=None, device=self._s.device,
         )
-        # the model's actual dim overrides config (spec mandate)
-        self._s.embedding_dim = self._embedder.embedding_dim
+        # The active model's dimension is authoritative, but we do NOT mutate the
+        # shared Settings singleton with it (a latent footgun for multi-camera-in-
+        # one-process runs). Embeddings are stored self-describing, so readers infer
+        # the dim from the bytes; we keep it on the runtime for reference/metrics.
+        self.embedding_dim = self._embedder.embedding_dim
 
         projector = FloorProjector(H, zones, bounds)
         self._pipeline = VisionPipeline(detector, tracker, projector, self._s)

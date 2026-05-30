@@ -13,11 +13,16 @@ def serialize_embedding(vec: np.ndarray) -> bytes:
     return arr.tobytes()
 
 
-def deserialize_embedding(blob: bytes, dim: int) -> np.ndarray:
-    """Inverse of serialize_embedding. ``dim`` comes from the active model's
-    embedding_dim, never hardcoded."""
+def deserialize_embedding(blob: bytes, dim: int | None = None) -> np.ndarray:
+    """Inverse of serialize_embedding. Embeddings are **self-describing**: a
+    float32 blob's length already encodes its dimension, so readers need not be
+    told it. This is what lets IEP3 — which runs with no ReID model — deserialize
+    exactly what IEP2 wrote, regardless of the active model's dimension.
+
+    Pass ``dim`` only to assert an expected dimension (a corruption / model-swap
+    guard); omit it to infer from the bytes."""
     arr = np.frombuffer(blob, dtype=np.float32)
-    if arr.shape[0] != dim:
+    if dim is not None and arr.shape[0] != dim:
         raise ValueError(f"embedding length {arr.shape[0]} != expected dim {dim}")
     return arr.copy()  # frombuffer is read-only; copy so callers can mutate
 

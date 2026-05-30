@@ -45,12 +45,12 @@ async def reconstruct_lost_pool(camera_id: str, current_batch: int, settings) ->
             ).scalar_one_or_none()
             if blob is None:
                 continue
-            centroid = deserialize_embedding(blob, settings.embedding_dim)
+            centroid = deserialize_embedding(blob)  # self-describing; dim inferred
             emb_rows = await session.execute(
                 text("SELECT embedding FROM local_embeddings WHERE local_id = :lid"),
                 {"lid": r.local_id},
             )
-            gallery = [deserialize_embedding(b, settings.embedding_dim) for (b,) in emb_rows]
+            gallery = [deserialize_embedding(b) for (b,) in emb_rows]
             lost[r.local_id] = LostEntry(
                 local_id=r.local_id,
                 camera_id=camera_id,

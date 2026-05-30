@@ -30,7 +30,7 @@ class Iep3Repository:
         blob = (
             await session.execute(select(LocalCentroid.centroid).where(LocalCentroid.local_id == local_id))
         ).scalar_one_or_none()
-        return deserialize_embedding(blob, self._s.embedding_dim) if blob is not None else None
+        return deserialize_embedding(blob) if blob is not None else None  # self-describing
 
     async def active_mapping_for(self, session, local_id) -> GlobalLocalMapping | None:
         return (
@@ -59,9 +59,7 @@ class Iep3Repository:
                     select(GlobalEmbedding).where(GlobalEmbedding.global_id == g.global_id)
                 )
             ).scalars().all()
-            centroids = {
-                c.camera_id: deserialize_embedding(c.centroid, self._s.embedding_dim) for c in cams
-            }
+            centroids = {c.camera_id: deserialize_embedding(c.centroid) for c in cams}
             result.append((g, centroids))
         return result
 

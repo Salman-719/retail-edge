@@ -26,6 +26,20 @@ def test_deserialize_dimension_mismatch_raises():
         deserialize_embedding(blob, dim=512)
 
 
+def test_deserialize_self_describing_infers_dim():
+    """No dim passed -> inferred from the blob (the IEP3-has-no-model path)."""
+    for n in (128, 512, 2048):
+        vec = np.linspace(-1, 1, n).astype(np.float32)
+        out = deserialize_embedding(serialize_embedding(vec))
+        assert out.shape == (n,)
+        np.testing.assert_allclose(out, vec, atol=1e-7)
+
+
+def test_deserialize_dim_none_never_raises():
+    blob = serialize_embedding(np.ones(2048, dtype=np.float32))
+    assert deserialize_embedding(blob).shape == (2048,)  # would have raised under old API
+
+
 def test_deserialized_array_is_writable():
     out = deserialize_embedding(serialize_embedding(np.ones(3, dtype=np.float32)), dim=3)
     out[0] = 5.0  # must not raise (frombuffer is read-only; we copy)

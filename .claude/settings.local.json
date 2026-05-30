@@ -17,7 +17,9 @@
       "Bash(docker run *)",
       "Bash(DATABASE_URL=\"postgresql+asyncpg://rv:rv@localhost:5544/rvtest\" RV_RUN_INTEGRATION=1 python -m pytest tests/iep2/integration tests/iep3/integration tests/pipeline/integration -v)",
       "Bash(DATABASE_URL=\"postgresql+asyncpg://rv:rv@localhost:5544/rvtest\" RV_RUN_INTEGRATION=1 python -m pytest tests/pipeline/integration/test_render.py -v)",
-      "Bash(DATABASE_URL=\"postgresql+asyncpg://rv:rv@localhost:5544/rvtest\" RV_RUN_INTEGRATION=1 python -m pytest tests)"
+      "Bash(DATABASE_URL=\"postgresql+asyncpg://rv:rv@localhost:5544/rvtest\" RV_RUN_INTEGRATION=1 python -m pytest tests)",
+      "Bash(python -m pytest tests/common tests/iep2 tests/iep3 tests/demo tests/pipeline -q)",
+      "Bash(DATABASE_URL=\"postgresql+asyncpg://rv:rv@localhost:5544/rvtest\" RV_RUN_INTEGRATION=1 python -m pytest tests/iep2/integration tests/iep3/integration tests/pipeline/integration -q)"
     ]
   }
 }

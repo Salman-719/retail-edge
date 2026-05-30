@@ -28,7 +28,9 @@ class Settings(BaseSettings):
 
     # ---- Identity / batch model ----
     batch_window_seconds: int = Field(default=60, ge=1)
-    embedding_dim: int = Field(default=512, ge=1)  # read from the active model at startup
+    # Advisory only: stored embeddings are self-describing (the float32 blob length
+    # encodes the dim), so readers infer it and never depend on this value.
+    embedding_dim: int = Field(default=512, ge=1)
     gallery_max_size: int = Field(default=8, ge=1, le=64)
     init_embeddings_count: int = Field(default=5, ge=1)
     sample_interval_frames: int = Field(default=15, ge=1)

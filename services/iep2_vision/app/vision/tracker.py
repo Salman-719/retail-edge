@@ -144,7 +144,8 @@ class ByteTrackTracker:
     """Motion-only ByteTrack via boxmot. Continuous for the process lifetime."""
 
     def __init__(self, min_hits: int, max_age: int, track_thresh: float, match_thresh: float):
-        from boxmot import ByteTrack  # heavy dep; imported lazily
+        # boxmot (>=18) moved trackers into submodules; import the concrete class.
+        from boxmot.trackers.bytetrack.bytetrack import ByteTrack  # heavy dep; imported lazily
 
         self._tracker = ByteTrack(
             track_thresh=track_thresh, match_thresh=match_thresh, track_buffer=max_age
@@ -177,14 +178,19 @@ class ByteTrackTracker:
 
 
 class BotSortTracker(ByteTrackTracker):
-    """Appearance-aided BoT-SORT via boxmot (upgrade path). Same protocol."""
+    """BoT-SORT via boxmot (upgrade path). Same protocol/output parsing as
+    ByteTrack. Constructed motion+CMC only (``with_reid=False``); IEP2 runs its
+    own OSNet gallery/ReID separately, so the tracker's internal ReID is not
+    needed and would require its own weights. To enable appearance-aided tracking
+    here, pass ``reid_model`` + ``with_reid=True`` (see boxmot BotSort signature)."""
 
     def __init__(self, min_hits: int, max_age: int, track_thresh: float, match_thresh: float):
-        from pathlib import Path
+        from boxmot.trackers.botsort.botsort import BotSort
 
-        from boxmot import BotSort
-
-        self._tracker = BotSort(reid_weights=Path("osnet_x0_25_msmt17.pt"), device="cpu", half=False)
+        self._tracker = BotSort(
+            track_high_thresh=track_thresh, match_thresh=match_thresh,
+            track_buffer=max_age, with_reid=False,
+        )
         self._min_hits = min_hits
         self._known_ids = set()
 
