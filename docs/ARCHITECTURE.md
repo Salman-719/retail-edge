@@ -19,7 +19,7 @@ store-wide position track per person. The pipeline is decomposed into numbered
 
 | Stage | Role | Form |
 |---|---|---|
-| **IEP1** ingestion | (placeholder) ingest camera frames | FastAPI stub, port 8001 |
+| **IEP1** ingestion | per-camera: sample source → JPEG frames in S3 → per-camera manifest stream | CLI worker, one process per camera |
 | **IEP2** vision | per-camera: detect → track → **Local ID** → PostgreSQL | CLI worker, one process per camera |
 | **IEP3** reconciliation | cross-camera: Local ID → **Global ID** → canonical global track | single-instance, batch-triggered worker |
 | **IEP4** alerts | (placeholder) rules/alerts | FastAPI stub, port 8004 |
@@ -27,14 +27,16 @@ store-wide position track per person. The pipeline is decomposed into numbered
 | **IEP6** agent | (placeholder) LLM agent | FastAPI stub, port 8006 |
 | **EEP** | API gateway / config / onboarding (existing) | FastAPI, port 8000 |
 
-This document covers **IEP2** and **IEP3** (the only fully-implemented inference
+This document covers **IEP1**, **IEP2** and **IEP3** (the implemented inference
 stages) plus the shared `common/` package and the `tools/` orchestrator/demo.
 
-**Scope boundary.** IEP2 currently reads a **video file** directly (testing/
-bring-up mode). The seam for live ingestion from IEP1 already exists (see §3,
-`SampledFrame`). IEP3 reads only IEP2's PostgreSQL output — the two services
-never call each other directly; they are decoupled through the database plus a
-`batch_complete` event.
+**Scope boundary.** IEP1 ingests each camera's source (a **video file** now, an
+RTSP stream in production) into S3 frames + a per-camera Redis manifest stream;
+IEP2 consumes those manifests (`RedisStreamFrameSource`) or, on the standalone
+fallback path, reads a video file directly (`VideoFrameSource`). IEP3 reads only
+IEP2's PostgreSQL output — the services are decoupled through the DB plus the
+`batch_complete` event. Capture timestamps flow end-to-end from the S3 key, so a
+disconnection's true elapsed time is preserved for the spatial-temporal gate.
 
 **EEP relationship.** In production, the EEP service owns camera lifecycle, the
 config state machine, and orchestration. For bring-up/demo/tests we ship a
@@ -61,21 +63,22 @@ retail-edge/
 │   │   ├── iep3_tables.py        # global_identities, global_local_mapping, global_embeddings, global_tracking_history
 │   │   └── shared_tables.py      # camera_calibrations (demo/seed)
 │   ├── contracts/                # pure dataclasses (no SQLAlchemy): geometry, detection, identity
+│   ├── s3.py                     # async S3 client (sync boto3 via asyncio.to_thread); IEP1 write / IEP2 read
 │   └── utils/                    # embeddings (serialize/normalize/cosine), time, jsonio
 │
 ├── services/
 │   ├── eep/                      # existing API gateway; OWNS services/eep/schema.sql
 │   │   └── schema.sql            # authoritative DDL; "Domain 9" = the 8 IEP2/IEP3 tables
-│   ├── iep1_ingestion/           # placeholder
+│   ├── iep1_ingestion/app/       # source + sampler + uploader + window + publisher + health + runtime + CLI
 │   ├── iep2_vision/app/          # vision + identity + persistence + ingest + runtime + CLI
 │   ├── iep3_reconciliation/app/  # reader + reid + selection + state + coordinator + CLI
 │   ├── iep4_alerts/ iep5_analytics/ iep6_agent/   # placeholders
 │
 ├── tools/
-│   ├── orchestrator.py           # EEP stand-in: N IEP2 runtimes + IEP3 in one process
+│   ├── orchestrator.py           # EEP stand-in: run_via_iep1 (default) | run (--direct); IEP1+IEP2+IEP3 in one process
 │   ├── seed_calibration.py       # writes demo camera_calibrations rows
 │   ├── demo/{colors,review_page,render}.py        # annotated video + synced HTML review
-│   └── Dockerfile                # orchestrator/job image (common + both services + tools)
+│   └── Dockerfile                # orchestrator/job image (common + all 3 service pkgs + tools)
 │
 ├── tests/                        # unit + integration + e2e (see §11)
 ├── infra/prometheus.yml          # scrape config
@@ -138,10 +141,14 @@ global tables. Two transports for the event:
 - **In-process emitter** (`tools/orchestrator._InProcessEmitter`) calling
   `coordinator.note(...)` directly — no Redis needed for orchestrated/test runs.
 
-**IEP1 streaming seam.** `services/iep2_vision/app/ingest/video_source.py` is the
-**only** module that changes when live ingestion arrives. Swapping
-`VideoFrameSource` for a `RedisStreamFrameSource` that yields the same
-`SampledFrame(frame, timestamp_ms, frame_index)` leaves M2/M3 logic untouched.
+**Ingest seam (now implemented).** IEP2 has two interchangeable ingest sources,
+selected by `iep2_source`: `RedisStreamFrameSource` (the IEP1-integrated path,
+`run_from_iep1`) and `VideoFrameSource` (the standalone/test fallback, `run`).
+The vision (M2) and identity (M3) layers are identical on both — they already
+consume `process_frame(..., timestamp_ms)`, so capture-time-from-key needed no
+change there. **IEP1's own production seam** is `services/iep1_ingestion/app/
+source/base.py` (`FrameSource`): `VideoFileSource` now, `RtspSource` later, with
+IEP1's body unchanged.
 
 ---
 
@@ -200,6 +207,18 @@ tests can `create_all`). **Ownership invariant:** IEP2 writes `tracking_history`
 - **`utils/embeddings.py`** — `serialize_embedding(vec)->bytes`, `deserialize_embedding(blob, dim=None)->np.ndarray` (self-describing: infers dim from byte length; pass `dim` only as an optional mismatch guard), `l2_normalize(vec, eps)`, `cosine_similarity(a,b)`.
 - **`utils/time.py`** — `now_ms()`, `ms_to_seconds(ms)`.
 - **`utils/jsonio.py`** — `write_json_atomic(path, data)` (temp + rename), `read_json(path)`.
+- **`s3.py`** — `S3Client(settings=None)`: sync boto3 wrapped in `asyncio.to_thread`; `async put_bytes(key, data, content_type)`, `async get_bytes(key)->bytes|None`, `async get_image(key)->np.ndarray|None` (cv2.imdecode), `async ensure_bucket()`. Shared by IEP1 (write) and IEP2 (read); DI-friendly (fakeable). Reuses the `S3_*` settings.
+
+### 6.1b `services/iep1_ingestion/app/` (camera ingestion)
+
+- **`source/base.py`** — `FrameSource` protocol (`frames()->Iterator[(capture_ts_ms, frame)]`, `is_available()`); the video/RTSP production seam.
+- **`source/video_source.py`** — `VideoFileSource(video_path, target_fps, start_epoch_ms)`: decimates a file to `target_fps`, stamping each frame's capture_ts from its **true source position** (`start + src_idx/src_fps`) so gaps are preserved. `source/rtsp_source.py` — documented stub.
+- **`sampler.py`** — `Sampler` (thin pass-through; the RTSP recovery-wrapper seam).
+- **`uploader.py`** — `S3Uploader(camera_id, settings, s3_client=None)`: JPEG-encode + `upload(ts, frame)->key|None` with bounded retry; key `frames/{cam}/{ts}.jpg`; plus a bounded drop-oldest `submit` queue for the live path.
+- **`window.py`** — `Gap`, `WindowManifest`, `WindowAccumulator(...)`: `add(ts, key)`; `close(window_start, window_end, batch_number)` → gap detection (`> 1.5×` sample interval) + status classification (online/degraded/offline by `online/offline_frame_ratio`).
+- **`publisher.py`** — `WindowPublisher(camera_id, redis_client=None)`: `XADD stream:iep1:{cam}` `{manifest: json}`; buffers (bounded, drop-oldest) and replays when Redis is down.
+- **`health.py`** — private Prometheus registry (`iep1_frames_captured_total`, `iep1_frames_dropped_total{reason}`, `iep1_window_captured_ratio`, `iep1_camera_status`, `iep1_s3_upload_seconds`, `iep1_window_publish_total{status}`), `emit_health(manifest)`, `start_metrics_server(port)`.
+- **`runtime.py`** — `Iep1Runtime(store_id, camera_id, settings, *, s3_client, redis_client).run(source, start_epoch_ms)`: capture-time-driven window loop (close on boundary crossing; dense monotonic `batch_number`; final partial at EOF). **`main.py`** — CLI `--store-id --camera-id --video --start-ms`, `METRICS_PORT`.
 
 ### 6.2 `services/iep2_vision/app/` (vision + identity + persistence)
 
@@ -229,10 +248,10 @@ tests can `create_all`). **Ownership invariant:** IEP2 writes `tracking_history`
 - **`batcher.py`** — `Batcher(source, batch_window_seconds, target_fps)` yields `(batch_number, list[SampledFrame])`, including a final partial batch.
 
 **Service plumbing**
-- **`recovery.py`** — `async reconstruct_lost_pool(camera_id, current_batch, settings) -> {local_id: LostEntry}` — warm restart: latest position per Local ID from `tracking_history` within TTL, centroid from `local_centroids`, gallery from `local_embeddings`.
+- **`recovery.py`** — `async reconstruct_lost_pool(camera_id, current_batch, settings) -> {local_id: LostEntry}` — warm restart: latest position per Local ID from `tracking_history` within TTL, centroid from `local_centroids`, gallery from `local_embeddings`. `async latest_batch_number(camera_id, ...)` reads `stream:iep1:{cam}` (xrevrange) to seed `current_batch` so `expiry_batch` aligns with IEP1's numbering on the redis path.
 - **`events.py`** — `BatchEventEmitter(redis_url=None)`; `STREAM = "stream:iep2:batch_complete"`; `async emit(...)` `XADD`s; redis imported lazily (optional for non-event paths).
 - **`metrics.py`** — private `REGISTRY`; `frame_latency`, `detections_per_frame`, `reid_resolutions`, `active_tracks`, `lost_pool_size`, **`detection_confidence`** (ML signal); `start_metrics_server(port)`.
-- **`runtime.py`** — `Iep2Runtime(store_id, camera_id, settings)`. `async setup(calibration_row, *, detector=None, tracker=None, embedder=None, persistence=None, events=None, warm_restart=True)` builds the pipeline from config unless components are injected (**DI for tests/CPU path**); records the active model's `embedding_dim` on the runtime (does **not** mutate the shared settings — embeddings are self-describing); warm-restarts the Lost pool. `async run(video_path, start_epoch_ms)` drives the batch loop (per frame: pipeline → manager → `maybe_flush` → metrics; per batch: force-flush → `on_batch_boundary` → gauges → emit).
+- **`runtime.py`** — `Iep2Runtime(store_id, camera_id, settings)`. `async setup(calibration_row, *, detector=None, tracker=None, embedder=None, persistence=None, events=None, warm_restart=True)` builds the pipeline from config unless components are injected (**DI for tests/CPU path**); passes a config-built `tracker_factory` to the pipeline (enables `reset_tracker`); records the active model's `embedding_dim` on the runtime (does **not** mutate the shared settings — embeddings are self-describing); warm-restarts the Lost pool, seeding `current_batch` from `latest_batch_number` when `iep2_source=="redis"`. `async run(video_path, start_epoch_ms)` is the **standalone/direct** loop (VideoFrameSource + Batcher). `async run_from_iep1(source)` is the **IEP1-integrated** loop: per window, fetch+process frames (capture_ts from key) or `on_empty_window` if offline; advance batch + emit `batch_complete` even when offline; reset the tracker after `offline_reset_windows` consecutive offline windows; `ack` after success.
 - **`main.py`** — CLI worker: `--store-id --camera-id --video --start-ms`; loads the demo `CameraCalibration` row; starts metrics server if `METRICS_PORT` set; runs one camera.
 
 ### 6.3 `services/iep3_reconciliation/app/`
@@ -250,7 +269,7 @@ tests can `create_all`). **Ownership invariant:** IEP2 writes `tracking_history`
 
 ### 6.4 `tools/`
 
-- **`orchestrator.py`** — `RunPlan(store_id, cameras: {cam: video}, frame_px: {cam: px})`; `_InProcessEmitter(coordinator)` (`emit(...)` → `coordinator.note(...)`); `async run(plan, calibrations, *, overrides=None, settings=None, start_ms=None)` builds the IEP3 reconciler + coordinator, launches one `Iep2Runtime` per camera via `asyncio.gather` (each wired to the in-process emitter; `overrides[cam]` injects detector/tracker/embedder for tests), then `coordinator.drain()`; `async load_calibrations(cam_ids)` reads demo `CameraCalibration` rows; `_main()` is the CLI.
+- **`orchestrator.py`** — `RunPlan(store_id, cameras: {cam: video}, frame_px: {cam: px})`; `_InProcessEmitter(coordinator)` (`emit(...)` → `coordinator.note(...)`). Two run modes: **`async run_via_iep1(plan, calibrations, *, overrides, settings, start_ms, s3_client, redis_client)`** (DEFAULT) — phase 1 launches one `Iep1Runtime` per camera (video → S3 + manifest stream), phase 2 launches one `Iep2Runtime.run_from_iep1` per camera via `_DrainingSource` (bounded xrange drain for finite videos) → IEP3 → `coordinator.drain()`. **`async run(plan, calibrations, *, overrides, settings, start_ms)`** (`--direct` fallback) — the original in-process direct-video chain (one `Iep2Runtime.run` per camera). `overrides[cam]` injects detector/tracker/embedder for tests; `async load_calibrations(cam_ids)` reads demo rows; `_main()` is the CLI (`--direct` selects the fallback).
 - **`seed_calibration.py`** — `async seed_calibration(store_id, cam_ids, *, homography=None, zone_polygons=None)` UPSERTs `camera_calibrations`; `IDENTITY_HOMOGRAPHY`, `DEFAULT_ZONES`; CLI `--store --cameras` (store name hashed to a uuid5).
 - **`demo/colors.py`** — `global_id_rgb/global_id_bgr/global_id_hex(global_id)` — deterministic colour per Global ID (stable across camera panels).
 - **`demo/review_page.py`** — `build_review_html(cameras, metrics, global_ids)` / `render_review_page(path, …)` — self-contained synchronized multi-camera HTML page + metrics table + Global-ID legend (vanilla JS `requestAnimationFrame` sync).
@@ -349,30 +368,41 @@ pip install pytest pytest-asyncio                         # test runner
 # Unit suite (CPU, no DB, no weights):
 pytest tests/common tests/iep2 tests/iep3 tests/demo tests/pipeline
 
-# Integration/e2e (needs Postgres):
+# Integration (needs Postgres only — most integration tests):
 docker run -d --name rv_pg -e POSTGRES_USER=rv -e POSTGRES_PASSWORD=rv \
   -e POSTGRES_DB=rvtest -p 5544:5432 postgres:15-alpine
 DATABASE_URL=postgresql+asyncpg://rv:rv@localhost:5544/rvtest \
   RV_RUN_INTEGRATION=1 pytest tests
+
+# Full IEP1→IEP2 e2e additionally needs MinIO + Redis (auto-skips if unreachable):
+docker run -d --name rv_minio -p 9100:9000 -e MINIO_ROOT_USER=retailvision \
+  -e MINIO_ROOT_PASSWORD=retailvision_dev minio/minio:latest server /data
+docker run -d --name rv_redis -p 6399:6379 redis:7-alpine
+DATABASE_URL=postgresql+asyncpg://rv:rv@localhost:5544/rvtest \
+  REDIS_URL=redis://localhost:6399/0 S3_ENDPOINT_URL=http://localhost:9100 \
+  S3_ACCESS_KEY=retailvision S3_SECRET_KEY=retailvision_dev S3_BUCKET=retailvision \
+  RV_RUN_INTEGRATION=1 pytest tests/pipeline/integration/test_iep1_to_iep2_e2e.py
 ```
 
 ### Docker (full stack + pipeline)
 ```bash
 # 1. Infra + schema. `migrate` is a one-shot that idempotently applies Domain 9
 #    (needed because schema.sql initdb only runs on a FRESH postgres volume).
-docker compose up -d --build postgres redis migrate
+docker compose up -d --build postgres redis minio migrate
 
 # 2. Build the pipeline images (profile-gated; not started by a plain `up`).
 docker compose --profile pipeline build
 
-# 3. Seed demo calibration + run the full IEP2→IEP3 chain (orchestrator job image
-#    bundles common + both services + tools):
+# 3. Seed demo calibration, then run the full IEP1→IEP2→IEP3 chain. The
+#    orchestrator job image bundles common + all 3 service packages + tools and
+#    defaults to the REAL chain (IEP1 → S3/Redis → IEP2 → IEP3):
 docker compose run --rm orchestrator python -m tools.seed_calibration \
   --store demo --cameras cam1,cam2
 docker compose run --rm orchestrator python -m tools.orchestrator \
   --store-id 00000000-0000-0000-0000-000000000001 \
   --camera cam1=/app/testing-data/Test1/Camera1.mp4 \
   --camera cam2=/app/testing-data/Test1/Camera2.mp4
+# add --direct to use the standalone fallback (IEP2 reads videos directly, no IEP1/S3/Redis)
 ```
 > The first real run **downloads the YOLO weights** (default `detector_backend=yolo11`)
 > into the mounted model-cache volume (one-time). For a weight-free run set
@@ -388,31 +418,37 @@ docker compose run --rm orchestrator python -m tools.orchestrator \
 ## 11. Testing strategy
 
 Test pyramid (`pyproject.toml` sets `asyncio_mode=auto`):
-- **Unit** (always run, CPU, no DB/weights): `tests/common`, `tests/iep2/{vision,identity,ingest}`,
+- **Unit** (always run, CPU, no DB/weights): `tests/common`, `tests/iep1`, `tests/iep2/{vision,identity,ingest}`,
   `tests/iep3/{test_gates,test_selection_score,test_coordinator}`, `tests/demo`.
 - **Integration** (gated by `RV_RUN_INTEGRATION=1` + a real Postgres): `tests/iep2/integration`,
   `tests/iep3/integration`, `tests/pipeline/integration`. Shared setup in
   `tests/integration_support.py` (`reset_settings_and_engine`, `prepare_db` = `create_all` +
   TRUNCATE); per-package `conftest.py` exposes the `pg` fixture.
-- **e2e**: `tests/pipeline/integration/test_full_pipeline.py` — the headline 3-camera scenario
-  through the orchestrator (Cam2+Cam3 → one Global ID, Cam1 separate, one canonical position per
-  global); `test_iep2_to_iep3.py` (chain), `test_render.py` (annotated-video smoke),
+- **e2e**: `test_full_pipeline.py` — 3-camera scenario via the **direct** orchestrator path;
+  `test_iep1_to_iep2_e2e.py` — same scenario via the **real IEP1→IEP2→IEP3 chain** (needs MinIO+Redis;
+  self-skips and self-wipes its S3 prefixes); `test_iep2_to_iep3.py`, `test_render.py`,
   `test_seed_calibration.py`.
 
-**Test doubles** (no real models/DB): `FakePersistence` + `LabelEmbedder` (`tests/iep2/identity/helpers.py`),
+**Test doubles** (no real models/DB/infra): `FakePersistence` + `LabelEmbedder` (`tests/iep2/identity/helpers.py`),
 `StubDetector` + `FixedEmbedder` + `write_video` + `identity_calibration` (`tests/pipeline/integration/helpers.py`),
-seed helpers (`tests/iep3/integration/seed.py`). Current status: **100 passed** (unit + integration).
+`FakeS3` + `FakeRedisStream` (`tests/fakes.py`, shared by IEP1/IEP2), seed helpers (`tests/iep3/integration/seed.py`).
+Current status: **108 unit passed / 20 skipped; 21 integration passed**.
 
 ---
 
 ## 12. Scaling & production path
 
 - **Replace the orchestrator with EEP.** `tools/orchestrator.py` is a single-process stand-in. EEP
-  manages camera lifecycle, retries, and the config state machine, launching IEP2 per camera and the
-  IEP3 coordinator as long-lived services.
+  manages camera lifecycle, retries, and the config state machine, launching one **IEP1** + one
+  **IEP2** worker per camera and the **IEP3** coordinator as long-lived services.
+- **IEP1 scales horizontally by camera** — one process per camera, no shared state, one S3 prefix and
+  one Redis stream each, so a failing camera affects only its own worker (it emits offline batches and
+  recovers). The live path swaps `VideoFileSource` for an `RtspSource` (same `FrameSource` seam) and
+  drives windows from a wall-clock timer so dead cameras still emit on schedule.
 - **IEP2 scales horizontally by camera** — one process per camera, stateless except for in-memory
-  pools that are warm-restarted from PostgreSQL (`recovery.reconstruct_lost_pool`). Add cameras = add
-  processes.
+  pools that are warm-restarted from PostgreSQL (`recovery.reconstruct_lost_pool`, batch seeded from
+  the IEP1 stream). Production uses `RedisStreamFrameSource` directly (unbounded consumer group + ack);
+  the orchestrator's bounded `_DrainingSource` is demo-only. Add cameras = add processes.
 - **IEP3 is single-instance, batch-triggered** (the reconciliation must serialize per store to keep
   Global IDs consistent). Scale by **store** (one IEP3 per store), not by replica.
 - **Switch transport to Redis** for distributed deployment: IEP2 keeps using `BatchEventEmitter`;
@@ -427,11 +463,12 @@ seed helpers (`tests/iep3/integration/seed.py`). Current status: **100 passed** 
 - **DB scaling**: the hot tables (`tracking_history`, `global_tracking_history`) already carry the
   needed indexes; partition them by time and add a retention job; consider read replicas for
   analytics consumers of `global_tracking_history`.
-- **Resilience**: `BatchCoordinator(timeout_seconds=…)` triggers **partial reconciliation** if a
-  camera never reports (crash) instead of stalling. Tune `batch_window_seconds` for the latency/
+- **Resilience**: with IEP1 emitting an offline batch every window for a down camera, IEP3's
+  `BatchCoordinator` always sees batch N from every camera and never stalls; `timeout_seconds` is
+  demoted to a fallback for IEP1 *itself* crashing. Tune `batch_window_seconds` for the latency/
   accuracy trade-off.
-- **Live ingestion**: implement `RedisStreamFrameSource` yielding `SampledFrame` and select it in the
-  IEP2 entrypoint — M2/M3 are untouched.
+- **Live ingestion**: implement `RtspSource` (IEP1's `FrameSource` seam) — IEP1's body and all of
+  IEP2/IEP3 are untouched; capture-time-from-key already carries real elapsed time through gaps.
 
 ---
 
@@ -451,6 +488,16 @@ seed helpers (`tests/iep3/integration/seed.py`). Current status: **100 passed** 
   boxes, persist a demo-only pixel bbox or re-run detection in the render pass.
 - **`IouTracker` / `DescriptorEmbedder`** are correctness-preserving **dev fallbacks**, not
   production-accurate. Production must use `bytetrack`/`botsort` + `osnet` with weights.
+- **IEP1 video-mode windowing is capture-time-driven, not wall-clock.** A window closes when a frame's
+  capture_ts crosses the boundary (deterministic, fast, content-aligned for finite files); intervening
+  empty windows close as offline so `batch_number` stays monotonic+dense. The spec's wall-clock timer +
+  offline-batch-on-dead-camera (needed when a *live* camera hangs with no frames) is the RTSP/live seam,
+  documented in `iep1_ingestion/app/runtime.py` but not built (a finite file can't hang).
+- **Orchestrator `_DrainingSource`** (demo only) reads each camera's manifests via `xrange` (all pending)
+  rather than a consumer group, so finite-video runs terminate instead of blocking on `xreadgroup`.
+  Production IEP2 uses `RedisStreamFrameSource`'s consumer group + ack directly (unbounded; cameras never
+  end). The e2e test wipes its cameras' S3 frame prefixes at setup so stale frames from a prior run can't
+  pollute it — apply the same hygiene for any repeatable run against a shared bucket.
 - **`embedding_dim` (resolved)** — embeddings are now **self-describing** (the float32 blob length
   encodes the dim), so `deserialize_embedding(blob)` infers it and no reader depends on config.
   `Iep2Runtime` no longer mutates the `Settings` singleton (it keeps the active dim on the runtime for

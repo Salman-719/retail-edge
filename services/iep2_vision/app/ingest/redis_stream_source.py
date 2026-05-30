@@ -90,8 +90,10 @@ class RedisStreamFrameSource:
 
     async def fetch_frames(self, batch: WindowBatch):
         """Yield ``(capture_ts_ms, frame)`` for each key in chronological order;
-        skip keys that fail to fetch (already counted as gaps by IEP1)."""
-        for key in sorted(batch.frame_keys):
+        skip keys that fail to fetch (already counted as gaps by IEP1). Keys are
+        ordered by their parsed capture timestamp (NOT lexically -- ``1000.jpg``
+        would sort before ``200.jpg`` as a string, scrambling the timeline)."""
+        for key in sorted(batch.frame_keys, key=self._ts_from_key):
             frame = await self._s3.get_image(key)
             if frame is not None:
                 yield self._ts_from_key(key), frame

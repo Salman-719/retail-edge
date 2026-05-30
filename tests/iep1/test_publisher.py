@@ -25,6 +25,18 @@ def _manifest(bn=0):
     )
 
 
+async def test_uuid_store_id_serializes():
+    import uuid
+
+    fake = FakeRedisStream()
+    pub = WindowPublisher("cam1", redis_client=fake, settings=get_settings())
+    m = _manifest(0)
+    m.store_id = uuid.uuid4()  # orchestrator passes a UUID, not a str
+    assert await pub.publish(m) is True
+    payload = json.loads(fake._streams["stream:iep1:cam1"][0][1][b"manifest"])
+    assert payload["store_id"] == str(m.store_id)
+
+
 async def test_manifest_round_trips_one_message_per_window():
     fake = FakeRedisStream()
     pub = WindowPublisher("cam1", redis_client=fake, settings=get_settings())

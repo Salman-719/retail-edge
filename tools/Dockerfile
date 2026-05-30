@@ -1,7 +1,8 @@
 # Orchestrator / demo job image.
 #
-# Carries everything the EEP stand-in needs to run the full IEP2->IEP3 chain in
-# one process: the shared common/ package, BOTH service packages, and tools/.
+# Carries everything the EEP stand-in needs to run the full IEP1->IEP2->IEP3 chain
+# in one process: the shared common/ package, ALL THREE service packages
+# (iep1_ingestion, iep2_vision, iep3_reconciliation), and tools/.
 # Build with the REPO ROOT as context:
 #   docker build -f tools/Dockerfile -t rv-orchestrator .
 # Invoke as a one-off job (see docker-compose `orchestrator` service):
@@ -26,6 +27,7 @@ COPY services/iep2_vision/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY common /app/common
+COPY services/iep1_ingestion /app/services/iep1_ingestion
 COPY services/iep2_vision /app/services/iep2_vision
 COPY services/iep3_reconciliation /app/services/iep3_reconciliation
 COPY tools /app/tools

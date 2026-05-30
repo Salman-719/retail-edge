@@ -21,6 +21,11 @@ log = logging.getLogger(__name__)
 
 
 def _ser(obj):
+    import uuid
+
+    # store_id may be a UUID (orchestrator) or a str (CLI); normalise either way.
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
     # Gap is a dataclass; asdict already expanded it, but keep a default for safety.
     if hasattr(obj, "__dict__"):
         return obj.__dict__

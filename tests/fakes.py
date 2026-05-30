@@ -75,5 +75,13 @@ class FakeRedisStream:
     async def xack(self, stream: str, group: str, msg_id) -> int:
         return 1
 
+    async def xrange(self, stream: str, count: int | None = None):
+        entries = self._streams.get(stream, [])
+        return entries[:count] if count else list(entries)
+
+    async def xrevrange(self, stream: str, count: int | None = None):
+        entries = list(reversed(self._streams.get(stream, [])))
+        return entries[:count] if count else entries
+
     def message_count(self, stream: str) -> int:
         return len(self._streams.get(stream, []))
