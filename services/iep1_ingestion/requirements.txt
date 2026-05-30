@@ -1,2 +1,8 @@
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
+# IEP1 ingestion. Reads a video source, writes JPEG frames to S3, publishes
+# window manifests to a per-camera Redis stream. No detection/tracking deps.
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+boto3==1.34.69
+redis[asyncio]==5.0.4
+pydantic-settings==2.2.1
+prometheus-client==0.20.0

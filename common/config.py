@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=10, ge=1, le=100)
     db_max_overflow: int = Field(default=20, ge=0, le=200)
 
+    # ---- S3 / object storage (EEP-compatible names; shared by IEP1 write + IEP2 read) ----
+    S3_ENDPOINT_URL: str = Field(default="http://localhost:9000")
+    S3_PUBLIC_URL: str = Field(default="")
+    S3_ACCESS_KEY: str = Field(default="retailvision")
+    S3_SECRET_KEY: str = Field(default="retailvision_dev")
+    S3_BUCKET: str = Field(default="retailvision")
+
     # ---- Identity / batch model ----
     batch_window_seconds: int = Field(default=60, ge=1)
     # Advisory only: stored embeddings are self-describing (the float32 blob length
@@ -80,6 +87,19 @@ class Settings(BaseSettings):
 
     # ---- Video ingest (M4) ----
     sample_rate_fps: float = Field(default=5.0, gt=0.0)
+
+    # ---- IEP1 ingestion ----
+    iep1_jpeg_quality: int = Field(default=85, ge=1, le=100)
+    iep1_s3_prefix: str = Field(default="frames")
+    iep1_upload_queue_max: int = Field(default=600, ge=1)   # ~2 windows before drop-oldest
+    iep1_s3_retry_attempts: int = Field(default=3, ge=1)
+    online_frame_ratio: float = Field(default=0.9, ge=0.0, le=1.0)   # >= -> online
+    offline_frame_ratio: float = Field(default=0.1, ge=0.0, le=1.0)  # < -> offline; between -> degraded
+    iep1_manifest_buffer_max: int = Field(default=30, ge=1)  # windows buffered if Redis is down
+
+    # ---- IEP2 source selection (IEP1 integration) ----
+    iep2_source: str = Field(default="video")   # "video" (standalone) | "redis" (IEP1-integrated)
+    offline_reset_windows: int = Field(default=5, ge=1)  # consecutive offline windows before tracker reset
 
     # ---- Logging ----
     log_level: str = Field(default="INFO")
