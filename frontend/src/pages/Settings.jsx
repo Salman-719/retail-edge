@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { Cpu, Bell, AlertTriangle } from 'lucide-react'
+import { Cpu, Bell } from 'lucide-react'
 import { useAuth } from '../store'
 import { getSettings, patchSettings, getAlertConfig, patchAlertConfig } from '../api'
 import { usePageTitle } from '../components/PageMeta'
@@ -75,37 +75,6 @@ function Section({ title, description, icon: Icon, iconColor, children }) {
 
 // ── Sticky save bar ───────────────────────────────────────────────────────────
 
-function StickyBar({ dirty, saving, onSave, onDiscard }) {
-  return (
-    <div
-      className="fixed bottom-0 left-0 right-0 z-40 transition-transform duration-300 ease-out"
-      style={{ transform: dirty ? 'translateY(0)' : 'translateY(100%)' }}
-    >
-      <div className="bg-white border-t border-gray-200 shadow-[0_-4px_16px_rgba(0,0,0,0.08)] px-6 py-3.5 flex items-center justify-between">
-        <div className="flex items-center gap-2 text-amber-600">
-          <AlertTriangle size={15} />
-          <span className="text-sm font-medium">You have unsaved changes</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onDiscard}
-            disabled={saving}
-            className="btn-outline py-1.5 text-xs disabled:opacity-40"
-          >
-            Discard
-          </button>
-          <button
-            onClick={onSave}
-            disabled={saving}
-            className="btn-primary py-1.5 text-xs disabled:opacity-50"
-          >
-            {saving ? 'Saving…' : 'Save changes'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
 
 // ── Default values ────────────────────────────────────────────────────────────
 
@@ -119,26 +88,6 @@ const DEFAULT_SETTINGS = {
   absence_threshold_min: 15,
 }
 
-// Shallow-equal two plain objects
-function shallowEq(a, b) {
-  if (!a || !b) return a === b
-  return Object.keys(a).every(k => a[k] === b[k])
-}
-
-// Keys that belong to each section (for dirty comparison)
-const SETTINGS_KEYS = [
-  'activation_countdown_sec', 'chunk_duration_sec', 'chunk_overlap_sec',
-  'frame_sample_rate_fps', 'active_config_cache_ttl_sec',
-]
-const ALERTS_KEYS = [
-  'shift_start_grace_min', 'absence_threshold_min', 'queue_people_threshold',
-  'queue_wait_min_threshold', 'queue_alert_cooldown_min',
-]
-
-function pick(obj, keys) {
-  if (!obj) return null
-  return Object.fromEntries(keys.map(k => [k, obj[k]]))
-}
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
@@ -150,46 +99,29 @@ export default function Settings() {
 
   const [settings, setSettings] = useState(null)
   const [alertConfig, setAlertConfig] = useState(null)
+
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(null) // 'settings' | 'alerts' | null
   const [restored, setRestored] = useState(null)
   const [error, setError] = useState('')
 
-  // Snapshots of the last saved server values — used to compute dirty state
-  const savedSettings = useRef(null)
-  const savedAlerts = useRef(null)
-
-  const fetchData = useCallback(async () => {
+  useEffect(() => {
+    let cancelled = false
     setLoading(true)
     setError('')
-    try {
-      const [s, a] = await Promise.all([getSettings(slug), getAlertConfig(slug)])
-      setSettings(s)
-      setAlertConfig(a)
-      savedSettings.current = s
-      savedAlerts.current = a
-    } catch (err) {
-      setError(err.response?.data?.detail?.error || 'Failed to load settings')
-    } finally {
-      setLoading(false)
-    }
+    Promise.all([getSettings(slug), getAlertConfig(slug)])
+      .then(([s, a]) => {
+        if (cancelled) return
+        setSettings(s)
+        setAlertConfig(a)
+      })
+      .catch(err => {
+        if (cancelled) return
+        setError(err.response?.data?.detail?.error || 'Failed to load settings')
+      })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [slug])
-
-  useEffect(() => { fetchData() }, [fetchData])
-
-  // Dirty flags — compare current state slices to saved snapshots
-  const settingsDirty = !shallowEq(
-    pick(settings, SETTINGS_KEYS),
-    pick(savedSettings.current, SETTINGS_KEYS)
-  )
-  const alertsDirty = !shallowEq(
-    pick(alertConfig, ALERTS_KEYS),
-    pick(savedAlerts.current, ALERTS_KEYS)
-  )
-  const anyDirty = settingsDirty || alertsDirty
-
-  // Which section's save to call from the unified bar
-  const activeSavingSection = settingsDirty ? 'settings' : 'alerts'
 
   async function handleSaveSettings() {
     setSaving('settings')
@@ -203,7 +135,6 @@ export default function Settings() {
         active_config_cache_ttl_sec: settings.active_config_cache_ttl_sec,
       })
       setSettings(updated)
-      savedSettings.current = updated
     } catch (err) {
       setError(err.response?.data?.detail?.error || 'Failed to save settings')
     } finally {
@@ -223,23 +154,11 @@ export default function Settings() {
         queue_alert_cooldown_min: alertConfig.queue_alert_cooldown_min,
       })
       setAlertConfig(updated)
-      savedAlerts.current = updated
     } catch (err) {
       setError(err.response?.data?.detail?.error || 'Failed to save alert config')
     } finally {
       setSaving(null)
     }
-  }
-
-  async function handleSaveAll() {
-    if (settingsDirty) await handleSaveSettings()
-    if (alertsDirty) await handleSaveAlerts()
-  }
-
-  function handleDiscard() {
-    if (settingsDirty && savedSettings.current) setSettings({ ...savedSettings.current })
-    if (alertsDirty && savedAlerts.current) setAlertConfig({ ...savedAlerts.current })
-    setRestored(null)
   }
 
   function updateSettings(field, value) {
@@ -372,13 +291,6 @@ export default function Settings() {
         )}
       </div>
 
-      {/* Sticky unsaved-changes bar */}
-      <StickyBar
-        dirty={anyDirty}
-        saving={saving !== null}
-        onSave={handleSaveAll}
-        onDiscard={handleDiscard}
-      />
     </div>
   )
 }

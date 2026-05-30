@@ -219,39 +219,86 @@ function Tooltip({ text, children }) {
 
 // ── Create/Edit Shift Modal ───────────────────────────────────────────────────
 
+const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+function dateForWeekday(startDateStr, targetDay) {
+  const d = new Date(startDateStr + 'T00:00:00')
+  const jsDay = d.getDay()
+  const currentDay = jsDay === 0 ? 6 : jsDay - 1
+  const diff = (targetDay - currentDay + 7) % 7
+  d.setDate(d.getDate() + diff)
+  return d.toISOString().slice(0, 10)
+}
+
 function ShiftModal({ slug, shift, employees, sections, onClose, onDone }) {
   const editing = !!shift
   const now = new Date()
   const inOneHour = new Date(now.getTime() + 3600000)
+  const today = now.toISOString().slice(0, 10)
 
   const [form, setForm] = useState({
     employee_id: shift?.employee_id || '',
     section_id: shift?.section_id || '',
+    // edit-only fields
     scheduled_start: shift ? toLocalInput(shift.scheduled_start) : toLocalInput(now.toISOString()),
     scheduled_end: shift ? toLocalInput(shift.scheduled_end) : toLocalInput(inOneHour.toISOString()),
-    break_duration_min: shift?.break_duration_min ?? 0,
+    // create-only fields
+    start_date: today,
+    selected_days: [0],
+    start_time: '09:00',
+    end_time: '17:00',
+    break_start: '',
+    break_end: '',
     status: shift?.status || 'scheduled',
   })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  function toggleDay(i) {
+    setForm(f => {
+      const has = f.selected_days.includes(i)
+      return { ...f, selected_days: has ? f.selected_days.filter(d => d !== i) : [...f.selected_days, i] }
+    })
+  }
 
   async function handleSubmit(e) {
     e.preventDefault()
     setError('')
     setLoading(true)
     try {
-      const body = {
-        employee_id: form.employee_id,
-        section_id: form.section_id,
-        scheduled_start: new Date(form.scheduled_start).toISOString(),
-        scheduled_end: new Date(form.scheduled_end).toISOString(),
-        break_duration_min: Number(form.break_duration_min),
-        status: form.status,
+      let break_duration_min = 0
+      if (form.break_start && form.break_end) {
+        const [sh, sm] = form.break_start.split(':').map(Number)
+        const [eh, em] = form.break_end.split(':').map(Number)
+        break_duration_min = Math.max(0, (eh * 60 + em) - (sh * 60 + sm))
       }
       if (editing) {
-        await patchShift(slug, shift.id, body)
+        await patchShift(slug, shift.id, {
+          employee_id: form.employee_id,
+          section_id: form.section_id,
+          scheduled_start: new Date(form.scheduled_start).toISOString(),
+          scheduled_end: new Date(form.scheduled_end).toISOString(),
+          break_duration_min,
+          status: form.status,
+        })
       } else {
-        await createShift(slug, body)
+        if (form.selected_days.length === 0) { setError('Select at least one day'); setLoading(false); return }
+        const st = form.start_time.length === 5 ? form.start_time + ':00' : form.start_time
+        const et = form.end_time.length === 5   ? form.end_time   + ':00' : form.end_time
+        await Promise.all(form.selected_days.map(day => {
+          const dateStr = dateForWeekday(form.start_date, day)
+          const scheduled_start = new Date(dateStr + 'T' + st).toISOString()
+          const endDateStr = et <= st ? (() => { const d = new Date(dateStr + 'T00:00:00'); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10) })() : dateStr
+          const scheduled_end = new Date(endDateStr + 'T' + et).toISOString()
+          return createShift(slug, {
+            employee_id: form.employee_id,
+            section_id: form.section_id,
+            scheduled_start,
+            scheduled_end,
+            break_duration_min,
+            status: form.status,
+          })
+        }))
       }
       onDone()
       onClose()
@@ -291,35 +338,84 @@ function ShiftModal({ slug, shift, employees, sections, onClose, onDone }) {
             </select>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Start <span className="text-red-500">*</span></label>
-              <input type="datetime-local" required value={form.scheduled_start}
-                onChange={e => setForm(f => ({ ...f, scheduled_start: e.target.value }))}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          {editing ? (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Start <span className="text-red-500">*</span></label>
+                <input type="datetime-local" required value={form.scheduled_start}
+                  onChange={e => setForm(f => ({ ...f, scheduled_start: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">End <span className="text-red-500">*</span></label>
+                <input type="datetime-local" required value={form.scheduled_end}
+                  onChange={e => setForm(f => ({ ...f, scheduled_end: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">End <span className="text-red-500">*</span></label>
-              <input type="datetime-local" required value={form.scheduled_end}
-                onChange={e => setForm(f => ({ ...f, scheduled_end: e.target.value }))}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-            </div>
-          </div>
+          ) : (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Start Date <span className="text-red-500">*</span></label>
+                <input type="date" required value={form.start_date}
+                  onChange={e => setForm(f => ({ ...f, start_date: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Days</label>
+                <div className="flex gap-1 flex-wrap">
+                  {DAYS.map((d, i) => (
+                    <button key={i} type="button" onClick={() => toggleDay(i)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                        form.selected_days.includes(i)
+                          ? 'bg-blue-500 border-blue-500 text-white'
+                          : 'bg-white border-gray-300 text-gray-600 hover:border-gray-400'
+                      }`}>
+                      {d}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Start Time <span className="text-red-500">*</span></label>
+                  <input type="time" required value={form.start_time}
+                    onChange={e => setForm(f => ({ ...f, start_time: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">End Time <span className="text-red-500">*</span></label>
+                  <input type="time" required value={form.end_time}
+                    onChange={e => setForm(f => ({ ...f, end_time: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+              </div>
+            </>
+          )}
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Break (min)</label>
-              <input type="number" min="0" max="480" value={form.break_duration_min}
-                onChange={e => setForm(f => ({ ...f, break_duration_min: e.target.value }))}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          <div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Break Start</label>
+                <input type="time" value={form.break_start}
+                  onChange={e => setForm(f => ({ ...f, break_start: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Break End</label>
+                <input type="time" value={form.break_end}
+                  onChange={e => setForm(f => ({ ...f, break_end: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
-              <select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                {SHIFT_STATUS.map(s => <option key={s} value={s}>{s}</option>)}
-              </select>
-            </div>
+            <p className="text-xs text-gray-400 mt-1">Leave empty for no break</p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
+            <select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              {SHIFT_STATUS.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
           </div>
 
           <div className="flex gap-2 pt-2">
@@ -630,15 +726,19 @@ function GenerateModal({ slug, onClose, onDone }) {
   const [form, setForm] = useState({ week_start_date: today })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState(null)
 
   async function handleGenerate(e) {
     e.preventDefault()
     setError('')
     setLoading(true)
     try {
-      await generateShifts(slug, { week_start_date: form.week_start_date })
+      const res = await generateShifts(slug, { week_start_date: form.week_start_date })
+      const count = Array.isArray(res) ? res.length : (res?.count ?? null)
+      const msg = count !== null ? `${count} shift${count !== 1 ? 's' : ''} generated successfully.` : 'Shifts generated successfully.'
+      setSuccess(msg)
       onDone()
-      onClose()
+      setTimeout(onClose, 2000)
     } catch (err) {
       const d = err.response?.data?.detail
       setError(typeof d === 'object' ? d.error : (d || 'Failed to generate shifts'))
@@ -655,7 +755,6 @@ function GenerateModal({ slug, onClose, onDone }) {
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
         </div>
         <form onSubmit={handleGenerate} className="px-6 py-4 space-y-3">
-          {error && <div className="bg-red-50 text-red-700 text-sm px-3 py-2 rounded-lg border border-red-200">{error}</div>}
           <p className="text-sm text-gray-600">This will create shift instances for the selected week based on all active shift patterns.</p>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Week starting (Monday)</label>
@@ -663,15 +762,19 @@ function GenerateModal({ slug, onClose, onDone }) {
               onChange={e => setForm({ week_start_date: e.target.value })}
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
+          {error && <div className="bg-red-50 text-red-700 text-sm px-3 py-2 rounded-lg border border-red-200">{error}</div>}
+          {success && <div className="bg-green-50 text-green-700 text-sm px-3 py-2 rounded-lg border border-green-200">{success}</div>}
           <div className="flex gap-2 pt-2">
             <button type="button" onClick={onClose}
               className="flex-1 py-2 px-4 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50">
-              Cancel
+              {success ? 'Done' : 'Cancel'}
             </button>
-            <button type="submit" disabled={loading}
-              className="btn-primary flex-1">
-              {loading ? 'Generating…' : 'Generate'}
-            </button>
+            {!success && (
+              <button type="submit" disabled={loading}
+                className="btn-primary flex-1">
+                {loading ? 'Generating…' : 'Generate'}
+              </button>
+            )}
           </div>
         </form>
       </div>
@@ -706,10 +809,8 @@ export default function Shifts() {
       const params = {}
       if (filterStatus) params.status = filterStatus
       if (filterDate) {
-        params.since = new Date(filterDate).toISOString()
-        const next = new Date(filterDate)
-        next.setDate(next.getDate() + 1)
-        params.until = next.toISOString()
+        params.from_date = filterDate
+        params.to_date = filterDate
       }
       const [sh, emps, secs] = await Promise.all([
         listShifts(slug, params),
@@ -856,45 +957,61 @@ export default function Shifts() {
                     </tr>
                   </thead>
                   <tbody>
-                    {shifts.map((shift, i) => (
-                      <tr key={shift.id} className={`border-b border-gray-100 last:border-0 hover:bg-blue-50 transition-colors ${i % 2 === 1 ? 'bg-gray-50/50' : 'bg-white'}`}>
-                        <td className="px-4 py-3 font-medium text-gray-900">{getEmployeeName(shift.employee_id)}</td>
-                        <td className="px-4 py-3 text-gray-500 hidden sm:table-cell">{getSectionName(shift.section_id)}</td>
-                        <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
-                          {fmt(shift.scheduled_start)}<br />
-                          <span className="text-gray-400">→ {fmtTime(shift.scheduled_end)}</span>
-                        </td>
-                        <td className="px-4 py-3 text-gray-500 text-xs hidden md:table-cell">
-                          {shift.actual_start ? (
-                            <>{fmtTime(shift.actual_start)} → {shift.actual_end
-                              ? fmtTime(shift.actual_end)
-                              : <span className="text-green-600">ongoing</span>
-                            }</>
-                          ) : '—'}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={`text-xs px-3 py-1 rounded-full font-medium ${STATUS_BADGE[shift.status] || 'bg-gray-100 text-gray-600'}`}>
-                            {shift.status}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            <button onClick={() => setModal({ type: 'assignments', shift })}
-                              className="text-xs px-2 py-1 rounded text-gray-600 hover:bg-gray-100 transition-colors">
-                              Assignments
-                            </button>
-                            <button onClick={() => setModal({ type: 'edit', shift })}
-                              className="text-xs px-2 py-1 rounded text-blue-600 hover:bg-blue-50 transition-colors">
-                              Edit
-                            </button>
-                            <button onClick={() => handleDelete(shift)}
-                              className="text-xs px-2 py-1 rounded text-red-500 hover:bg-red-50 transition-colors">
-                              Delete
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    {(() => {
+                      // Group shifts by employee, preserving order of first appearance
+                      const groups = []
+                      const seen = {}
+                      shifts.forEach(shift => {
+                        const eid = shift.employee_id
+                        if (!seen[eid]) { seen[eid] = []; groups.push({ eid, rows: seen[eid] }) }
+                        seen[eid].push(shift)
+                      })
+                      return groups.flatMap(({ eid, rows }) =>
+                        rows.map((shift, j) => (
+                          <tr key={shift.id} className={`border-b border-gray-100 last:border-0 hover:bg-blue-50 transition-colors bg-white`}>
+                            {j === 0 && (
+                              <td rowSpan={rows.length} className="px-4 py-3 font-medium text-gray-900 align-top border-r border-gray-100">
+                                {getEmployeeName(eid)}
+                              </td>
+                            )}
+                            <td className="px-4 py-3 text-gray-500 hidden sm:table-cell">{getSectionName(shift.section_id)}</td>
+                            <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
+                              {fmt(shift.scheduled_start)}<br />
+                              <span className="text-gray-400">→ {fmtTime(shift.scheduled_end)}</span>
+                            </td>
+                            <td className="px-4 py-3 text-gray-500 text-xs hidden md:table-cell">
+                              {shift.actual_start ? (
+                                <>{fmtTime(shift.actual_start)} → {shift.actual_end
+                                  ? fmtTime(shift.actual_end)
+                                  : <span className="text-green-600">ongoing</span>
+                                }</>
+                              ) : '—'}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className={`text-xs px-3 py-1 rounded-full font-medium ${STATUS_BADGE[shift.status] || 'bg-gray-100 text-gray-600'}`}>
+                                {shift.status}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <button onClick={() => setModal({ type: 'assignments', shift })}
+                                  className="text-xs px-2 py-1 rounded text-gray-600 hover:bg-gray-100 transition-colors">
+                                  Assignments
+                                </button>
+                                <button onClick={() => setModal({ type: 'edit', shift })}
+                                  className="text-xs px-2 py-1 rounded text-blue-600 hover:bg-blue-50 transition-colors">
+                                  Edit
+                                </button>
+                                <button onClick={() => handleDelete(shift)}
+                                  className="text-xs px-2 py-1 rounded text-red-500 hover:bg-red-50 transition-colors">
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )
+                    })()}
                   </tbody>
                 </table>
               </div>

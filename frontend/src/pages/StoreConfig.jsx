@@ -4,7 +4,7 @@ import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-kon
 import { Plus, Pencil, Trash2, Check, X, Warehouse } from 'lucide-react'
 import {
   getDraft, getActiveVersion, listSections, listVersions, reactivateVersion,
-  createSection, patchSection, deleteSection,
+  createSection, patchSection, deleteSection, getSyncEvent,
 } from '../api'
 import { usePageTitle } from '../components/PageMeta'
 import SectionTabs from '../components/SectionTabs'
@@ -352,6 +352,8 @@ export default function StoreConfig() {
   const [selectedSectionId, setSelectedSectionId] = useState(null)
   const [draft, setDraft] = useState(null)
   const [restoring, setRestoring] = useState(null)
+  const [pendingSyncEvent, setPendingSyncEvent] = useState(null)
+  const syncPollRef = useRef(null)
   const startAddingSectionRef = useRef(null)
 
   function reload() {
@@ -380,6 +382,26 @@ export default function StoreConfig() {
   }
 
   useEffect(() => { reload() }, [slug])
+
+  // Poll pending sync event for the draft version (shows progress bar in version history)
+  useEffect(() => {
+    clearInterval(syncPollRef.current)
+    const draftVersion = versions.find(v => v.status === 'draft')
+    if (!draftVersion?.pending_sync_event_id) { setPendingSyncEvent(null); return }
+    const eventId = draftVersion.pending_sync_event_id
+    getSyncEvent(slug, eventId).then(setPendingSyncEvent).catch(() => {})
+    syncPollRef.current = setInterval(async () => {
+      try {
+        const ev = await getSyncEvent(slug, eventId)
+        setPendingSyncEvent(ev)
+        if (ev.status !== 'pending') {
+          clearInterval(syncPollRef.current)
+          if (ev.status === 'executed') reload()
+        }
+      } catch { clearInterval(syncPollRef.current) }
+    }, 2000)
+    return () => clearInterval(syncPollRef.current)
+  }, [versions, slug])
 
   // Called by SectionsPanel after create/rename/delete
   function handleSectionsChanged(updated, deletedId) {
@@ -412,7 +434,16 @@ export default function StoreConfig() {
       await reactivateVersion(slug, versionId)
       reload()
     } catch (err) {
-      setError(err?.response?.data?.error || err.message)
+      const detail = err?.response?.data?.detail
+      const msg = (typeof detail === 'object' ? detail?.error : detail)
+        || err?.response?.data?.error
+        || err.message
+      const status = err?.response?.status
+      if (status === 409) {
+        setError('Cannot restore: a draft configuration already exists. Discard the current draft first.')
+      } else {
+        setError(msg || 'Failed to restore version.')
+      }
     } finally {
       setRestoring(null)
     }
@@ -510,7 +541,7 @@ export default function StoreConfig() {
   // Merge version sections with raw sections list so the panel always reflects latest state
   const mergedSections = sections.length > 0 ? sections : (version.sections || [])
   const selectedSection = version.sections?.find(s => s.id === selectedSectionId)
-    || version.sections?.[0]
+    || (selectedSectionId ? null : version.sections?.[0])
     || null
 
   return (
@@ -531,7 +562,7 @@ export default function StoreConfig() {
             </span>
           )}
           <button
-            onClick={() => navigate(`/store/${slug}/config/edit`)}
+            onClick={() => navigate(`/store/${slug}/config/edit${selectedSectionId ? `?section=${selectedSectionId}` : ''}`)}
             className="btn-primary"
           >
             {draft ? 'Continue Draft' : 'Edit Configuration'}
@@ -604,7 +635,7 @@ export default function StoreConfig() {
                   No zones or cameras configured for this section yet.
                 </p>
                 <button
-                  onClick={() => navigate(`/store/${slug}/config/edit`)}
+                  onClick={() => navigate(`/store/${slug}/config/edit?section=${selectedSectionId}`)}
                   className="mt-2 text-xs text-blue-600 hover:text-blue-800 font-medium"
                 >
                   Configure →
@@ -660,13 +691,20 @@ export default function StoreConfig() {
               </div>
             )}
             <div className="divide-y divide-gray-100">
-              {versions.map(v => (
-                <div key={v.id} className="flex items-center gap-3 text-sm py-2.5">
+              {versions.map(v => {
+                const isPending = v.status === 'draft' && pendingSyncEvent?.status === 'pending' && v.pending_sync_event_id
+                const countdown = isPending ? (pendingSyncEvent?.remaining_seconds ?? 0) : null
+                const totalSec = isPending ? (pendingSyncEvent?.countdown_sec ?? 30) : 30
+                const progress = isPending ? Math.min(100, 100 - (Math.max(0, countdown) / totalSec) * 100) : 0
+                return (
+                <div key={v.id} className="py-2.5 space-y-1.5">
+                  <div className="flex items-center gap-3 text-sm">
                   <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ${
                     v.status === 'active' ? 'bg-green-100 text-green-700' :
+                    isPending ? 'bg-yellow-100 text-yellow-700' :
                     v.status === 'draft' ? 'bg-blue-100 text-blue-700' :
                     'bg-gray-100 text-gray-500'
-                  }`}>{v.status}</span>
+                  }`}>{isPending ? 'Pending' : v.status}</span>
                   <span className="text-gray-700 font-medium truncate">{v.label || '(unlabeled)'}</span>
                   <span className="text-gray-400 text-xs ml-auto flex-shrink-0">
                     {v.active_from ? new Date(v.active_from).toLocaleDateString() : new Date(v.created_at).toLocaleDateString()}
@@ -681,7 +719,17 @@ export default function StoreConfig() {
                     </button>
                   )}
                 </div>
-              ))}
+                  {isPending && (
+                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-yellow-400 rounded-full transition-all"
+                        style={{ width: `${progress}%`, transitionDuration: '2000ms' }}
+                      />
+                    </div>
+                  )}
+                </div>
+                )
+              })}
             </div>
           </div>
         )}

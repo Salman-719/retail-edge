@@ -7,7 +7,7 @@ import { TableSkeleton } from '../components/Skeletons'
 import {
   listMembers, inviteMember, listInvitations,
   cancelInvitation, patchMember, removeMember,
-  requestDraftDiscard, getDraft,
+  requestDraftDiscard, getDraft, listSections,
 } from '../api'
 
 const ROLE_COLORS = {
@@ -22,9 +22,21 @@ function InviteModal({ slug, onClose, onDone }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [token, setToken] = useState(null)
+  const [sections, setSections] = useState([])
+  const [selectedSections, setSelectedSections] = useState([])
+
+  useEffect(() => {
+    listSections(slug).then(setSections).catch(() => {})
+  }, [slug])
 
   function onChange(e) {
     setForm(f => ({ ...f, [e.target.name]: e.target.value }))
+  }
+
+  function toggleSection(id) {
+    setSelectedSections(prev =>
+      prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
+    )
   }
 
   async function handleSubmit(e) {
@@ -36,7 +48,7 @@ function InviteModal({ slug, onClose, onDone }) {
         email: form.email.trim(),
         role: form.role,
         access_scope: form.access_scope,
-        section_ids: [],
+        section_ids: form.access_scope === 'section_scoped' ? selectedSections : [],
         permissions: {},
       })
       setToken(res.token || null)
@@ -120,6 +132,27 @@ function InviteModal({ slug, onClose, onDone }) {
               <option value="section_scoped">Specific Sections</option>
             </select>
           </div>
+
+          {form.access_scope === 'section_scoped' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Sections</label>
+              <div className="border border-gray-300 rounded-lg px-3 py-2 max-h-40 overflow-y-auto space-y-1.5">
+                {sections.length === 0 ? (
+                  <p className="text-xs text-gray-400">No sections available</p>
+                ) : sections.map(s => (
+                  <label key={s.id} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selectedSections.includes(s.id)}
+                      onChange={() => toggleSection(s.id)}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-sm text-gray-700">{s.name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="flex gap-2 pt-2">
             <button

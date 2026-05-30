@@ -273,6 +273,7 @@ class CalibrationResponse(BaseModel):
     method: str
     status: str
     is_current: bool
+    correspondences: list | None = None
     homography_matrix: list | None = None
     rms_reprojection_error: float | None = None
     max_reprojection_error: float | None = None
@@ -327,5 +328,6 @@ class SyncEventResponse(BaseModel):
     scheduled_at: datetime
     executed_at: datetime | None = None
     remaining_seconds: float | None = None
+    countdown_sec: int | None = None
 
     model_config = {"from_attributes": True}

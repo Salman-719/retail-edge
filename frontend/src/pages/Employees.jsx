@@ -26,13 +26,9 @@ const ROLE_BADGE = {
   customer_service: 'bg-teal-100 text-teal-700',
 }
 
-// Role options for the filter dropdown
 const ROLE_FILTER_OPTIONS = [
   { value: '', label: 'All Roles' },
-  { value: 'supervisor', label: 'Supervisor' },
-  { value: 'cashier', label: 'Cashier' },
-  { value: 'shelf_stocker', label: 'Stock' },
-  { value: 'security', label: 'Security' },
+  ...ROLES.map(r => ({ value: r, label: ROLE_LABEL[r] })),
 ]
 
 // ─── Icon button with tooltip ─────────────────────────────────────────────────
@@ -311,7 +307,7 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
   const [patterns, setPatterns] = useState([])
   const [loading, setLoading] = useState(true)
   const [adding, setAdding] = useState(false)
-  const [form, setForm] = useState({ section_id: '', day_of_week: 0, start_time: '09:00', end_time: '17:00', break_duration_min: 0 })
+  const [form, setForm] = useState({ section_id: '', selected_days: [0], start_time: '09:00', end_time: '17:00', break_duration_min: 0 })
   const [error, setError] = useState('')
 
   const fetchPatterns = useCallback(async () => {
@@ -325,25 +321,62 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
 
   useEffect(() => { fetchPatterns() }, [fetchPatterns])
 
+  function toggleDay(i) {
+    setForm(f => {
+      const has = f.selected_days.includes(i)
+      return { ...f, selected_days: has ? f.selected_days.filter(d => d !== i) : [...f.selected_days, i] }
+    })
+  }
+
   async function handleCreate() {
     if (!form.section_id) { setError('Select a section'); return }
+    if (form.selected_days.length === 0) { setError('Select at least one day'); return }
     setError('')
-    try {
-      await createShiftPattern(slug, {
-        employee_id: employee.id,
-        section_id: form.section_id,
-        day_of_week: Number(form.day_of_week),
-        start_time: form.start_time,
-        end_time: form.end_time,
-        break_duration_min: Number(form.break_duration_min),
-      })
-      setAdding(false)
-      setForm({ section_id: '', day_of_week: 0, start_time: '09:00', end_time: '17:00', break_duration_min: 0 })
-      fetchPatterns()
-    } catch (err) {
-      const detail = err.response?.data?.detail
-      setError(typeof detail === 'object' ? detail.error : (detail || 'Failed'))
+    const start_time = form.start_time.length === 5 ? form.start_time + ':00' : form.start_time
+    const end_time   = form.end_time.length === 5   ? form.end_time   + ':00' : form.end_time
+
+    for (const day of form.selected_days) {
+      try {
+        await createShiftPattern(slug, {
+          employee_id: employee.id,
+          section_id: form.section_id,
+          day_of_week: day,
+          start_time,
+          end_time,
+          break_duration_min: Number(form.break_duration_min),
+        })
+      } catch (err) {
+        const detail = err.response?.data?.detail
+        if (detail?.code === 'SHIFT_CONFLICT') {
+          const dayName = DAYS[day]
+          const conflictTime = `${detail.conflicting_start.slice(0, 5)}–${detail.conflicting_end.slice(0, 5)}`
+          const ok = confirm(
+            `${dayName} already has a shift from ${conflictTime}.\nDo you want to replace it with the new times (${start_time.slice(0,5)}–${end_time.slice(0,5)})?`
+          )
+          if (ok) {
+            try {
+              await patchShiftPattern(slug, detail.conflicting_id, {
+                section_id: form.section_id,
+                start_time,
+                end_time,
+                break_duration_min: Number(form.break_duration_min),
+              })
+            } catch (patchErr) {
+              const pd = patchErr.response?.data?.detail
+              setError(typeof pd === 'object' ? pd.error : (pd || 'Failed to update'))
+              return
+            }
+          }
+        } else {
+          setError(typeof detail === 'object' ? detail.error : (detail || 'Failed'))
+          return
+        }
+      }
     }
+
+    setAdding(false)
+    setForm({ section_id: '', selected_days: [0], start_time: '09:00', end_time: '17:00', break_duration_min: 0 })
+    fetchPatterns()
   }
 
   async function handleToggle(pattern) {
@@ -414,22 +447,30 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
 
           {adding ? (
             <div className="border border-gray-200 rounded-lg p-3 space-y-2">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Section</label>
+                <select value={form.section_id} onChange={e => setForm(f => ({ ...f, section_id: e.target.value }))}
+                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="">Select…</option>
+                  {sections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Days</label>
+                <div className="flex gap-1 flex-wrap">
+                  {DAYS.map((d, i) => (
+                    <button key={i} type="button" onClick={() => toggleDay(i)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                        form.selected_days.includes(i)
+                          ? 'bg-blue-500 border-blue-500 text-white'
+                          : 'bg-white border-gray-300 text-gray-600 hover:border-gray-400'
+                      }`}>
+                      {d}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Section</label>
-                  <select value={form.section_id} onChange={e => setForm(f => ({ ...f, section_id: e.target.value }))}
-                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    <option value="">Select…</option>
-                    {sections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Day</label>
-                  <select value={form.day_of_week} onChange={e => setForm(f => ({ ...f, day_of_week: e.target.value }))}
-                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    {DAYS.map((d, i) => <option key={i} value={i}>{d}</option>)}
-                  </select>
-                </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Start</label>
                   <input type="time" value={form.start_time} onChange={e => setForm(f => ({ ...f, start_time: e.target.value }))}
@@ -473,14 +514,14 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
 // ─── Badge cell with lazy count fetch ────────────────────────────────────────
 // Fetches count once on mount, shows pill, opens modal on click.
 
-function SectionsBadge({ slug, employee, onClick }) {
+function SectionsBadge({ slug, employee, onClick, refreshKey }) {
   const [count, setCount] = useState(null)
 
   useEffect(() => {
     listEmployeeSections(slug, employee.id)
       .then(data => setCount(data.length))
       .catch(() => setCount(0))
-  }, [slug, employee.id])
+  }, [slug, employee.id, refreshKey])
 
   return (
     <CountBadge
@@ -492,14 +533,14 @@ function SectionsBadge({ slug, employee, onClick }) {
   )
 }
 
-function ShiftsBadge({ slug, employee, onClick }) {
+function ShiftsBadge({ slug, employee, onClick, refreshKey }) {
   const [count, setCount] = useState(null)
 
   useEffect(() => {
     listShiftPatterns(slug, { employee_id: employee.id })
       .then(data => setCount(data.length))
       .catch(() => setCount(0))
-  }, [slug, employee.id])
+  }, [slug, employee.id, refreshKey])
 
   return (
     <CountBadge
@@ -524,6 +565,8 @@ export default function Employees() {
   const [loading, setLoading] = useState(true)
   const [showAll, setShowAll] = useState(false)
   const [modal, setModal] = useState(null)
+  const [shiftRefreshKey, setShiftRefreshKey] = useState(0)
+  const [sectionRefreshKey, setSectionRefreshKey] = useState(0)
   const [search, setSearch] = useState('')
   const [roleFilter, setRoleFilter] = useState('')
 
@@ -697,11 +740,13 @@ export default function Employees() {
                           slug={slug}
                           employee={emp}
                           onClick={() => setModal({ type: 'sections', employee: emp })}
+                          refreshKey={sectionRefreshKey}
                         />
                         <ShiftsBadge
                           slug={slug}
                           employee={emp}
                           onClick={() => setModal({ type: 'patterns', employee: emp })}
+                          refreshKey={shiftRefreshKey}
                         />
                       </div>
                     </td>
@@ -753,10 +798,10 @@ export default function Employees() {
         <EmployeeModal slug={slug} employee={modal.employee} onClose={() => setModal(null)} onDone={fetchData} />
       )}
       {modal?.type === 'sections' && (
-        <SectionsPanel slug={slug} employee={modal.employee} sections={sections} onClose={() => setModal(null)} />
+        <SectionsPanel slug={slug} employee={modal.employee} sections={sections} onClose={() => { setSectionRefreshKey(k => k + 1); setModal(null) }} />
       )}
       {modal?.type === 'patterns' && (
-        <ShiftPatternsPanel slug={slug} employee={modal.employee} sections={sections} onClose={() => setModal(null)} />
+        <ShiftPatternsPanel slug={slug} employee={modal.employee} sections={sections} onClose={() => { setShiftRefreshKey(k => k + 1); setModal(null) }} />
       )}
     </div>
   )
