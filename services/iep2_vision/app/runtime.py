@@ -20,7 +20,7 @@ from services.iep2_vision.app.identity.manager import LocalIdentityManager
 from services.iep2_vision.app.ingest.batcher import Batcher
 from services.iep2_vision.app.ingest.video_source import VideoFrameSource
 from services.iep2_vision.app.persistence.postgres import PostgresPersistence
-from services.iep2_vision.app.recovery import reconstruct_lost_pool
+from services.iep2_vision.app.recovery import latest_batch_number, reconstruct_lost_pool
 from services.iep2_vision.app.vision.detector import create_detector
 from services.iep2_vision.app.vision.pipeline import VisionPipeline
 from services.iep2_vision.app.vision.projection import FloorProjector
@@ -41,11 +41,18 @@ class Iep2Runtime:
             confidence=self._s.detector_confidence, nms_iou=self._s.detector_nms_iou,
             device=self._s.device,
         )
-        tracker = tracker or create_tracker(
-            self._s.tracker_backend, min_hits=self._s.bytetrack_min_hits,
-            max_age=self._s.bytetrack_max_age, track_thresh=self._s.bytetrack_track_thresh,
-            match_thresh=self._s.bytetrack_match_thresh,
-        )
+        # Build a tracker factory from config so the pipeline can rebuild a fresh
+        # tracker after a long outage (run_from_iep1). When a tracker is injected
+        # (tests), no factory is set and reset_tracker() no-ops.
+        tracker_factory = None
+        if tracker is None:
+            def tracker_factory():
+                return create_tracker(
+                    self._s.tracker_backend, min_hits=self._s.bytetrack_min_hits,
+                    max_age=self._s.bytetrack_max_age, track_thresh=self._s.bytetrack_track_thresh,
+                    match_thresh=self._s.bytetrack_match_thresh,
+                )
+            tracker = tracker_factory()
         self._embedder = embedder or create_reid_model(
             self._s.reid_backend, model_name=self._s.reid_model, weights=None, device=self._s.device,
         )
@@ -56,13 +63,23 @@ class Iep2Runtime:
         self.embedding_dim = self._embedder.embedding_dim
 
         projector = FloorProjector(H, zones, bounds)
-        self._pipeline = VisionPipeline(detector, tracker, projector, self._s)
+        self._pipeline = VisionPipeline(detector, tracker, projector, self._s,
+                                        tracker_factory=tracker_factory)
         self._db = persistence or PostgresPersistence(self._s)
         self._manager = LocalIdentityManager(self._cam, self._embedder, self._db, self._s)
         self._events = events or BatchEventEmitter()
 
         if warm_restart:
-            self._manager.pools.lost = await reconstruct_lost_pool(self._cam, 0, self._s)
+            # On the IEP1-integrated path, seed current_batch from the latest
+            # batch_number on the camera's stream so the reconstructed LostPool's
+            # expiry_batch math aligns with IEP1's numbering (amendment §5). The
+            # standalone video path resets to 0.
+            current_batch = 0
+            if self._s.iep2_source == "redis":
+                seen = await latest_batch_number(self._cam, self._s)
+                if seen is not None:
+                    current_batch = seen + 1
+            self._manager.pools.lost = await reconstruct_lost_pool(self._cam, current_batch, self._s)
 
     async def run(self, video_path: str, start_epoch_ms: int) -> None:
         source = VideoFrameSource(video_path, self._s.sample_rate_fps, start_epoch_ms)
@@ -84,3 +101,40 @@ class Iep2Runtime:
             metrics.active_tracks.labels(self._cam).set(len(self._manager.pools.active))
             metrics.lost_pool_size.labels(self._cam).set(len(self._manager.pools.lost))
             await self._events.emit(self._store, self._cam, batch_number, window_start, window_end)
+
+    async def run_from_iep1(self, source) -> None:
+        """IEP1-integrated loop: consume window manifests from ``source`` (a
+        ``RedisStreamFrameSource``), fetch each window's frames from S3, and drive
+        the same identity pipeline. Capture timestamps come from the S3 key (not
+        recomputed). An offline/empty window still advances the batch clock and
+        emits ``batch_complete`` so IEP3 never stalls; after a configurable run of
+        consecutive offline windows the tracker is reset to clear stale state.
+        Ack is sent only after the window is fully processed (at-least-once)."""
+        consecutive_offline = 0
+        async for batch, msg_id in source.windows():
+            if batch.is_empty:
+                self._manager.on_empty_window(batch)
+                consecutive_offline += 1
+                if consecutive_offline >= self._s.offline_reset_windows:
+                    self._pipeline.reset_tracker()
+            else:
+                consecutive_offline = 0
+                async for capture_ts, frame in source.fetch_frames(batch):
+                    t0 = perf_counter()
+                    frame_dets, tracker_out, _ = self._pipeline.process_frame(frame)
+                    await self._manager.process_frame(frame, frame_dets, tracker_out, capture_ts)
+                    await self._db.maybe_flush()
+                    metrics.frame_latency.labels(self._cam).observe(perf_counter() - t0)
+                    metrics.detections_per_frame.labels(self._cam).observe(len(frame_dets))
+                    for d in frame_dets:
+                        metrics.detection_confidence.labels(self._cam).observe(d.confidence)
+                await self._db.maybe_flush(force=True)
+
+            self._manager.on_batch_boundary(batch.batch_number)
+            metrics.active_tracks.labels(self._cam).set(len(self._manager.pools.active))
+            metrics.lost_pool_size.labels(self._cam).set(len(self._manager.pools.lost))
+            await self._events.emit(
+                self._store, self._cam, batch.batch_number,
+                batch.window_start_ms, batch.window_end_ms,
+            )
+            await source.ack(msg_id)  # at-least-once: ack after successful processing

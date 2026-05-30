@@ -36,6 +36,10 @@ class FakePersistence:
     async def upsert_centroid(self, local_id, camera_id, centroid, batch_number) -> None:
         self.centroids.append(dict(local_id=local_id, camera_id=camera_id, batch_number=batch_number))
 
+    async def maybe_flush(self, force: bool = False) -> None:
+        # No buffering in the fake; positions are recorded eagerly in append_position.
+        self.flush_calls = getattr(self, "flush_calls", 0) + 1
+
 
 class LabelEmbedder:
     """Deterministic embedder keyed by a crop's mean pixel value: identical crop

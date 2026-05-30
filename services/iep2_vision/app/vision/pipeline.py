@@ -28,11 +28,23 @@ class FrameDetection:
 
 
 class VisionPipeline:
-    def __init__(self, detector, tracker, projector, settings):
+    def __init__(self, detector, tracker, projector, settings, tracker_factory=None):
         self._detector = detector
         self._tracker = tracker
         self._projector = projector
         self._s = settings
+        # Optional zero-arg callable that builds a fresh tracker. Supplied by the
+        # runtime (config-built path) so a long camera outage can reset stale
+        # Kalman state; absent when a tracker is injected (tests) -> reset no-ops.
+        self._tracker_factory = tracker_factory
+
+    def reset_tracker(self) -> bool:
+        """Rebuild the tracker from its factory (fresh state after a long outage).
+        Returns True if a reset happened, False when no factory is available."""
+        if self._tracker_factory is None:
+            return False
+        self._tracker = self._tracker_factory()
+        return True
 
     def process_frame(self, frame) -> tuple[list[FrameDetection], TrackerOutput, dict]:
         detections = self._detector.detect(frame)

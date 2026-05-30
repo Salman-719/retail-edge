@@ -62,3 +62,30 @@ async def reconstruct_lost_pool(camera_id: str, current_batch: int, settings) ->
                 gallery=gallery,
             )
     return lost
+
+
+async def latest_batch_number(camera_id: str, settings=None, redis_client=None) -> int | None:
+    """Read the most recent IEP1 ``batch_number`` from ``stream:iep1:{camera_id}``.
+
+    On warm restart, seed ``current_batch`` from this so the LostPool's
+    ``expiry_batch`` math aligns with IEP1's batch numbering rather than a locally
+    reset counter (IEP2 amendment §5). Returns None if the stream is empty/absent.
+    """
+    from common.config import get_settings
+
+    s = settings or get_settings()
+    client = redis_client
+    if client is None:
+        import redis.asyncio as redis
+
+        client = redis.from_url(s.REDIS_URL)
+    try:
+        entries = await client.xrevrange(f"stream:iep1:{camera_id}", count=1)
+    except Exception:  # noqa: BLE001 - stream missing / redis down -> no seed
+        return None
+    if not entries:
+        return None
+    import json
+
+    _id, fields = entries[0]
+    return json.loads(fields[b"manifest"])["batch_number"]

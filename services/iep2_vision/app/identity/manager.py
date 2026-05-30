@@ -213,6 +213,20 @@ class LocalIdentityManager:
             and det.bbox.area >= self._s.min_bbox_area_px
         )
 
+    # ---- empty / offline window (IEP1 integration) ----
+
+    def on_empty_window(self, batch=None) -> dict:
+        """No frames were delivered this window (camera offline/down). Move every
+        active track to the Lost pool so it becomes a ReID candidate when the feed
+        returns, and let the normal batch-boundary TTL prune it if the outage is
+        long. Pending tracks (incomplete init embeddings) are dropped — their
+        tracker tracks are gone and they will reappear as new detections."""
+        moved = list(self.pools.active.keys())
+        for track_id in moved:
+            self._on_lost(track_id)
+        self.pools.pending.clear()
+        return {"moved_to_lost": len(moved), "lost": len(self.pools.lost)}
+
     # ---- batch boundary ----
 
     def on_batch_boundary(self, batch_number: int) -> dict:
