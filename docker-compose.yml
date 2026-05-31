@@ -107,40 +107,47 @@ services:
       redis:
         condition: service_healthy
 
-  iep1-ingestion:
+  iep1_ingestion:
     build:
-      context: ./services/iep1-ingestion
+      context: ./services/iep1_ingestion
       dockerfile: Dockerfile
     ports:
       - "8001:8001"
 
-  iep2-vision:
+  iep2_vision:
     build:
-      context: ./services/iep2-vision
+      context: ./services/iep2_vision
       dockerfile: Dockerfile
     ports:
       - "8002:8002"
 
-  iep3-alerts:
+  iep3_reconciliation:
     build:
-      context: ./services/iep3-alerts
+      context: ./services/iep3_reconciliation
       dockerfile: Dockerfile
     ports:
       - "8003:8003"
 
-  iep4-analytics:
+  iep4_alerts:
     build:
-      context: ./services/iep4-analytics
+      context: ./services/iep4_alerts
       dockerfile: Dockerfile
     ports:
       - "8004:8004"
 
-  iep5-agent:
+  iep5_analytics:
     build:
-      context: ./services/iep5-agent
+      context: ./services/iep5_analytics
       dockerfile: Dockerfile
     ports:
       - "8005:8005"
+
+  iep6_agent:
+    build:
+      context: ./services/iep6_agent
+      dockerfile: Dockerfile
+    ports:
+      - "8006:8006"
 
 volumes:
   postgres_data:

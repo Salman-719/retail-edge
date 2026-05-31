@@ -40,11 +40,12 @@ The platform is structured as a microservices architecture deployed via Docker C
 └─────────────┘  └──────────┘  └─────────────────────────┘
 
 IEP Services (Milestone 3 — placeholders in Milestone 1/2):
-  IEP1 — Data Ingestion        port 8001
-  IEP2 — Vision (YOLO)         port 8002
-  IEP3 — Alerts & Rules        port 8003
-  IEP4 — Analytics             port 8004
-  IEP5 — AI Agent (LLM)        port 8005
+  IEP1 — Data Ingestion        port 8001 (`iep1_ingestion`)
+  IEP2 — Vision (YOLO)         port 8002 (`iep2_vision`)
+  IEP3 — Reconciliation        port 8003 (`iep3_reconciliation`)
+  IEP4 — Alerts & Rules        port 8004 (`iep4_alerts`)
+  IEP5 — Analytics             port 8005 (`iep5_analytics`)
+  IEP6 — AI Agent (LLM)        port 8006 (`iep6_agent`)
 ```
 
 ---
@@ -86,11 +87,12 @@ retail-edge/
 │   │   │   ├── models/         # SQLAlchemy ORM + Pydantic schemas
 │   │   │   └── utils/          # homography, heatmap, tracker, pdf_utils
 │   │   └── migrations/         # Alembic migrations
-│   ├── iep1-ingestion/         # Placeholder — Milestone 3
-│   ├── iep2-vision/            # Placeholder — Milestone 3
-│   ├── iep3-alerts/            # Placeholder — Milestone 3
-│   ├── iep4-analytics/         # Placeholder — Milestone 3
-│   └── iep5-agent/             # Placeholder — Milestone 3
+│   ├── iep1_ingestion/         # Placeholder — Milestone 3
+│   ├── iep2_vision/            # Placeholder — Milestone 3
+│   ├── iep3_reconciliation/    # Placeholder — Milestone 3
+│   ├── iep4_alerts/            # Placeholder — Milestone 3
+│   ├── iep5_analytics/         # Placeholder — Milestone 3
+│   └── iep6_agent/             # Placeholder — Milestone 3
 ├── tests/
 │   └── unit/                   # Pydantic schema & homography unit tests
 ├── infra/                      # Reserved for Terraform / k8s (Milestone 3)
