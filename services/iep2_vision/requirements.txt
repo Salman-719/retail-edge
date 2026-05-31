@@ -6,3 +6,4 @@ python-multipart
 Pillow
 numpy
 supervision==0.22.0
+boxmot>=10.0.0
