@@ -7,7 +7,11 @@ Lifecycle:
   disappeared active track     → LostEntry (with gallery, TTL)
   disappeared pending track    → dropped silently (no local_id ever minted)
 """
+import logging
+
 import numpy as np
+
+log = logging.getLogger("iep2.identity")
 
 try:
     from ..reid.reid import extract_embedding
@@ -38,6 +42,11 @@ class LocalIdentityManager:
         self._active:  dict[int, ActiveTrack]  = {}  # track_id  → ActiveTrack
         self._pending: dict[int, PendingTrack] = {}  # track_id  → PendingTrack
         self._lost:    dict[int, LostEntry]    = {}  # local_id  → LostEntry
+        # Sticky mapping: once a track_id is assigned a local_id, the binding is permanent.
+        # When ByteTrack re-surfaces the same track_id, we restore the prior local_id
+        # immediately without going through pending/ReID, because ByteTrack already
+        # confirmed it is the same physical object.
+        self._track_to_local: dict[int, int] = {}    # track_id  → local_id (immutable)
         self._next_id: int = 1
         self._frame_index: int = 0
 
@@ -60,6 +69,7 @@ class LocalIdentityManager:
         ]
         for lid in expired:
             del self._lost[lid]
+            log.info("F%04d  TTL expired  local_id=%d  pruned from lost pool", self._frame_index, lid)
 
         # Stage 2 — handle disappeared tracks
         current_ids = {t["track_id"] for t in tracks}
@@ -73,9 +83,14 @@ class LocalIdentityManager:
                 lost_at_frame=self._frame_index,
                 gallery=entry.gallery,
             )
+            log.info(
+                "F%04d  track disappeared  track_id=%d  local_id=%d  → lost pool (TTL=%d frames)",
+                self._frame_index, tid, entry.local_id, TTL_FRAMES,
+            )
 
         for tid in disappeared_pending:
             del self._pending[tid]  # dropped silently — no local_id ever minted
+            log.info("F%04d  pending track dropped  track_id=%d  (never resolved)", self._frame_index, tid)
 
         # Stage 3 — process each current track
         enriched: list[dict] = []
@@ -120,11 +135,36 @@ class LocalIdentityManager:
                     del self._pending[tid]
                     enriched.append({**track, "local_id": local_id})
                 else:
+                    log.debug(
+                        "F%04d  collecting  track_id=%d  embeddings=%d/%d",
+                        self._frame_index, tid, len(pending.init_embeddings), INIT_EMBEDDINGS_COUNT,
+                    )
                     enriched.append({**track, "local_id": None})
 
             # ── Branch C: first appearance ─────────────────────────────────────
             else:
-                if not self._lost:
+                if tid in self._track_to_local:
+                    # ByteTrack re-surfaced a known track_id — this is the same physical
+                    # object, so restore the prior local_id immediately without pending/ReID.
+                    local_id = self._track_to_local[tid]
+                    if local_id in self._lost:
+                        lost_entry = self._lost.pop(local_id)
+                        gallery = lost_entry.gallery
+                        log.info(
+                            "F%04d  ByteTrack reuse  track_id=%d  → local_id=%d  (restored from lost pool)",
+                            self._frame_index, tid, local_id,
+                        )
+                    else:
+                        # TTL already expired but ByteTrack kept the id alive — start fresh gallery
+                        gallery = EmbeddingGallery()
+                        log.info(
+                            "F%04d  ByteTrack reuse (post-TTL)  track_id=%d  → local_id=%d  (fresh gallery)",
+                            self._frame_index, tid, local_id,
+                        )
+                    self._active[tid] = ActiveTrack(local_id=local_id, track_id=tid, gallery=gallery)
+                    enriched.append({**track, "local_id": local_id})
+
+                elif not self._lost:
                     # Fast path — no occlusion candidates, assign immediately
                     local_id = self._next_id
                     self._next_id += 1
@@ -132,10 +172,19 @@ class LocalIdentityManager:
                     self._active[tid] = ActiveTrack(
                         local_id=local_id, track_id=tid, gallery=gallery
                     )
+                    self._track_to_local[tid] = local_id
+                    log.info(
+                        "F%04d  new track (fast path)  track_id=%d  → local_id=%d",
+                        self._frame_index, tid, local_id,
+                    )
                     enriched.append({**track, "local_id": local_id})
                 else:
                     # Normal path — may be a re-entry; hold in pending
                     self._pending[tid] = PendingTrack(track_id=tid)
+                    log.info(
+                        "F%04d  new track (pending)  track_id=%d  lost_pool_size=%d",
+                        self._frame_index, tid, len(self._lost),
+                    )
                     enriched.append({**track, "local_id": None})
 
         return enriched
@@ -168,11 +217,22 @@ class LocalIdentityManager:
             lost_entry = self._lost.pop(best_lid)
             local_id = lost_entry.local_id
             gallery = lost_entry.gallery
+            self._track_to_local[pending.track_id] = local_id
+            log.info(
+                "F%04d  ReID MATCH  track_id=%d  → local_id=%d  sim=%.3f  (threshold=%.2f)",
+                self._frame_index, pending.track_id, local_id, best_sim, REID_THRESHOLD,
+            )
         else:
             # Stranger — mint new identity
             local_id = self._next_id
             self._next_id += 1
             gallery = EmbeddingGallery()
+            self._track_to_local[pending.track_id] = local_id
+            log.info(
+                "F%04d  ReID NO MATCH  track_id=%d  → new local_id=%d  best_sim=%.3f  (threshold=%.2f)",
+                self._frame_index, pending.track_id, local_id,
+                best_sim if best_lid is not None else 0.0, REID_THRESHOLD,
+            )
 
         # Seed gallery with the collected init embeddings (already L2-normalized)
         for emb in pending.init_embeddings:
@@ -271,7 +331,7 @@ if __name__ == "__main__":
     )
     print("[4] pending disappear → silently dropped, no lost entry ✓")
 
-    # ── Test 5: TTL expiry → lost entry pruned → reappear gets new local_id ───
+    # ── Test 5: TTL expiry → sticky mapping still restores the same local_id ──
     mgr3  = LocalIdentityManager(mock)
     mock.emb = emb_a
     mgr3.process_frame(frame, [_track(1)])         # local_id=1, fast path
@@ -282,10 +342,30 @@ if __name__ == "__main__":
 
     assert len(mgr3._lost) == 0, "TTL-expired entry must be pruned"
 
-    r = mgr3.process_frame(frame, [_track(1)])     # lost pool empty → fast path
-    assert r[0]["local_id"] is not None
-    # local_id=1 was already used; _next_id is now 2 → new assignment is 2
-    assert r[0]["local_id"] != 1, "after TTL, new local_id must be minted (no reuse)"
-    print(f"[5] TTL expiry → new local_id={r[0]['local_id']} minted ✓")
+    r = mgr3.process_frame(frame, [_track(1)])     # sticky mapping restores local_id=1
+    assert r[0]["local_id"] == 1, (
+        f"sticky mapping must restore local_id=1 even after TTL, got {r[0]['local_id']}"
+    )
+    print(f"[5] TTL expiry + sticky mapping → local_id={r[0]['local_id']} restored ✓")
+
+    # ── Test 6: ByteTrack reuse across 1-frame gap (the reported bug scenario) ──
+    # Person active as track_id=1/local_id=1 → disappears 1 frame →
+    # ByteTrack re-surfaces track_id=1 → must immediately get local_id=1 back,
+    # NOT go through pending/ReID.
+    mgr4  = LocalIdentityManager(mock)
+    mock.emb = emb_a
+    mgr4.process_frame(frame, [_track(1)])         # fast path → local_id=1
+    for _ in range(3):
+        mgr4.process_frame(frame, [_track(1)])     # keep active
+    mgr4.process_frame(frame, [])                  # disappears → lost pool
+    assert 1 in mgr4._lost, "local_id=1 should be in lost pool"
+
+    r = mgr4.process_frame(frame, [_track(1)])     # ByteTrack re-surfaces same track_id
+    assert r[0]["local_id"] == 1, (
+        f"ByteTrack reuse must restore local_id=1 immediately, got {r[0]['local_id']}"
+    )
+    assert 1 not in mgr4._pending, "must NOT go through pending on ByteTrack reuse"
+    assert 1 not in mgr4._lost,    "must be removed from lost pool on reuse"
+    print(f"[6] ByteTrack 1-frame gap → local_id={r[0]['local_id']} restored instantly ✓")
 
     print("\nsmoke test passed")

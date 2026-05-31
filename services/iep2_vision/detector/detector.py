@@ -10,31 +10,22 @@ import sys
 import cv2
 import numpy as np
 
-# The only place the model variant is configured. YOLOv8n (nano, fast).
 MODEL_VARIANT = "yolov8n.pt"
-
-# Lazily-loaded singleton so importing this module is cheap and the weights
-# download/load happens once on first detect().
-_model = None
+CONF_THRESHOLD = 0.5
 
 
-def _get_model():
-    global _model
-    if _model is None:
-        from ultralytics import YOLO
-
-        _model = YOLO(MODEL_VARIANT)
-    return _model
+def load_model():
+    """Load and return the YOLO model. Call once; pass to detect()."""
+    from ultralytics import YOLO
+    return YOLO(MODEL_VARIANT)
 
 
-def detect(frame: np.ndarray) -> list[dict]:
-    """Run detection on a BGR numpy frame.
+def detect(model, frame: np.ndarray) -> list[dict]:
+    """Run detection on a BGR numpy frame using the provided model.
 
     Returns a list of {label, confidence, bbox: [x1, y1, x2, y2]} dicts.
     """
-    model = _get_model()
     results = model(frame, verbose=False, classes=[0])
-    CONF_THRESHOLD = 0.5
 
     detections: list[dict] = []
     for result in results:
@@ -46,13 +37,12 @@ def detect(frame: np.ndarray) -> list[dict]:
             conf = float(box.conf[0])
             if conf < CONF_THRESHOLD:
                 continue
-
             cls_id = int(box.cls[0])
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             detections.append(
                 {
                     "label": names[cls_id],
-                    "confidence": float(box.conf[0]),
+                    "confidence": conf,
                     "bbox": [float(x1), float(y1), float(x2), float(y2)],
                 }
             )
@@ -69,4 +59,4 @@ if __name__ == "__main__":
         print(f"cannot read image: {sys.argv[1]}")
         sys.exit(1)
 
-    print(json.dumps(detect(image), indent=2))
+    print(json.dumps(detect(load_model(), image), indent=2))

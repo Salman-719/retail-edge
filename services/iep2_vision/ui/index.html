@@ -21,7 +21,11 @@
   button.danger:hover { background: #b71c1c; }
   #playbackSection { display: none; }
   input[type=range] { width: 100%; margin: 8px 0; }
+  input[type=text] { padding: 5px 8px; background: #222; color: #eee; border: 1px solid #555; border-radius: 4px; font-size: 14px; width: 120px; }
+  .upload-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .upload-row label { font-size: 13px; color: #aaa; display: flex; align-items: center; gap: 6px; }
   .meta { font-size: 12px; color: #9ad; margin-top: 6px; }
+  .error { color: #ff5252; }
 
   /* Sidebar */
   #personCount { font-size: 26px; font-weight: bold; color: #69f0ae; margin-bottom: 12px; }
@@ -32,7 +36,7 @@
 </head>
 <body>
 <header>
-  <h1>IEP2 — Vision Module (Phase 2: Tracking)</h1>
+  <h1>IEP2 — Vision Module (Phase 3: ReID + Persistence)</h1>
 </header>
 
 <div class="layout">
@@ -40,9 +44,12 @@
 
     <section>
       <h2>Upload</h2>
-      <input type="file" id="fileInput" accept="video/*" style="margin-right:8px" />
-      <button id="uploadBtn">Upload &amp; Process</button>
-      <button id="clearBtn" class="danger" style="display:none;margin-left:8px">Clear Saved Video</button>
+      <div class="upload-row">
+        <label>Camera ID: <input type="text" id="cameraId" placeholder="e.g. cam-01" /></label>
+        <input type="file" id="fileInput" accept="video/*" />
+        <button id="uploadBtn">Upload &amp; Process</button>
+        <button id="clearBtn" class="danger" style="display:none">Clear Saved Video</button>
+      </div>
       <div class="meta" id="uploadStatus"></div>
     </section>
 
@@ -69,7 +76,7 @@
 </div>
 
 <script>
-// All frames received over WebSocket — playback reads from here only (rule 5).
+// All frames received over WebSocket — playback reads from here only.
 const frames = [];
 
 const liveCanvas    = document.getElementById("liveCanvas");
@@ -84,17 +91,19 @@ const slider          = document.getElementById("slider");
 
 const personCountEl = document.getElementById("personCount");
 const personListEl  = document.getElementById("personList");
+const clearBtn      = document.getElementById("clearBtn");
+const uploadStatus  = document.getElementById("uploadStatus");
 
 const COLORS = ["#ff5252","#40c4ff","#69f0ae","#ffd740","#e040fb","#ffab40",
                 "#ff6d00","#00e5ff","#76ff03","#ff4081","#18ffff","#b2ff59"];
 
-function trackColor(trackId) {
-  return COLORS[trackId % COLORS.length];
+function trackColor(id) {
+  return COLORS[id % COLORS.length];
 }
 
-// Draw frame record (tracks array) onto a canvas.
-// Bboxes are in the encoded image's pixel space; we normalize to [0,1] then
-// scale to the canvas display size so boxes always line up (spec rule 6).
+// Draw frame record onto a canvas.
+// Bboxes are in the encoded image's pixel space; normalize to [0,1] then
+// scale to canvas display size so boxes always line up.
 function drawRecord(ctx, canvas, record) {
   const img = new Image();
   img.onload = () => {
@@ -109,46 +118,52 @@ function drawRecord(ctx, canvas, record) {
       const nw = ((x2 - x1) / img.naturalWidth)  * canvas.width;
       const nh = ((y2 - y1) / img.naturalHeight) * canvas.height;
 
-      const color = trackColor(t.track_id);
+      // Resolved: color by local_id, label "L:{local_id} T:{track_id}"
+      // Pending:  yellow, label "? T:{track_id}"
+      const isPending = t.local_id == null;
+      const color = isPending ? "#ffd740" : trackColor(t.local_id);
+      const label = isPending
+        ? `? T:${t.track_id}`
+        : `L:${t.local_id} T:${t.track_id}`;
 
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.strokeRect(nx, ny, nw, nh);
 
-      const label = `#${t.track_id} ${t.label} ${(t.confidence * 100).toFixed(0)}%`;
       ctx.font = "bold 12px sans-serif";
       const tw = ctx.measureText(label).width + 8;
       const th = 16;
-      ctx.fillStyle = color;
-      ctx.fillRect(nx, ny - th, tw, th);
       ctx.fillStyle = "#000";
+      ctx.fillRect(nx, ny - th, tw, th);
+      ctx.fillStyle = color;
       ctx.fillText(label, nx + 4, ny - 4);
     });
   };
   img.src = "data:image/jpeg;base64," + record.frame_b64;
 }
 
-// Sidebar state — cumulative across all frames.
-const seenIds = new Set();
+// Sidebar — keyed by local_id; only confirmed (non-null) tracks shown.
+const seenLocalIds = new Set();
 
 function updateSidebar(tracks, newEntries) {
-  const newSet = new Set(newEntries);
+  const newTrackIds = new Set(newEntries);
 
   tracks.forEach(t => {
-    if (!seenIds.has(t.track_id)) {
-      seenIds.add(t.track_id);
-      const li = document.createElement("li");
-      li.id = `track-${t.track_id}`;
-      li.textContent = `#${t.track_id} — ${t.label}`;
-      personListEl.appendChild(li);
-    }
+    if (t.local_id == null) return;  // pending — skip
+    if (seenLocalIds.has(t.local_id)) return;
+    seenLocalIds.add(t.local_id);
+    const li = document.createElement("li");
+    li.id = `local-${t.local_id}`;
+    li.textContent = `L:${t.local_id} — ${t.label}`;
+    personListEl.appendChild(li);
   });
 
-  personCountEl.textContent = seenIds.size;
+  personCountEl.textContent = seenLocalIds.size;
 
-  // Highlight new entries for 2 seconds then revert.
-  newEntries.forEach(id => {
-    const li = document.getElementById(`track-${id}`);
+  // Highlight when a new track_id resolves to a local_id.
+  tracks.forEach(t => {
+    if (!newTrackIds.has(t.track_id) || t.local_id == null) return;
+    const li = document.getElementById(`local-${t.local_id}`);
     if (!li) return;
     li.classList.add("new-entry");
     setTimeout(() => li.classList.remove("new-entry"), 2000);
@@ -165,14 +180,12 @@ function renderPlayback(index) {
 
 slider.addEventListener("input", () => renderPlayback(parseInt(slider.value, 10)));
 
-const clearBtn = document.getElementById("clearBtn");
-
+// Clear saved video on server.
 clearBtn.addEventListener("click", async () => {
   clearBtn.disabled = true;
-  const res = await fetch("/clear-tmp", { method: "POST" });
+  const res  = await fetch("/clear-tmp", { method: "POST" });
   const data = await res.json();
-  document.getElementById("uploadStatus").textContent =
-    `Cleared ${data.removed} file(s) from server storage.`;
+  uploadStatus.textContent = `Cleared ${data.removed} file(s) from server storage.`;
   clearBtn.style.display = "none";
   clearBtn.disabled = false;
 });
@@ -206,15 +219,23 @@ function openSocket() {
 }
 
 document.getElementById("uploadBtn").addEventListener("click", async () => {
+  const cameraId = document.getElementById("cameraId").value.trim();
+  if (!cameraId) {
+    uploadStatus.textContent = "Camera ID is required.";
+    uploadStatus.classList.add("error");
+    return;
+  }
+  uploadStatus.classList.remove("error");
+
   const input = document.getElementById("fileInput");
   if (!input.files.length) {
-    document.getElementById("uploadStatus").textContent = "Pick a video first.";
+    uploadStatus.textContent = "Pick a video first.";
     return;
   }
 
   // Reset all state for a fresh run.
   frames.length = 0;
-  seenIds.clear();
+  seenLocalIds.clear();
   personCountEl.textContent = "0";
   personListEl.innerHTML = "";
   playbackSection.style.display = "none";
@@ -224,11 +245,12 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
   openSocket();
 
   const form = new FormData();
-  form.append("file", input.files[0]);
+  form.append("file",      input.files[0]);
+  form.append("camera_id", cameraId);
+
   const res  = await fetch("/upload", { method: "POST", body: form });
   const data = await res.json();
-  document.getElementById("uploadStatus").textContent =
-    `Uploaded "${data.filename}" — processing…`;
+  uploadStatus.textContent = `Uploaded "${data.filename}" — processing…`;
   liveMeta.textContent = "Processing…";
 });
 </script>

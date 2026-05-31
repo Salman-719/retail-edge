@@ -9,8 +9,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-MODEL_NAME = "osnet_x1_0"
-DEVICE = "cpu"
+MODEL_NAME    = "osnet_x1_0"
+DEVICE        = "cpu"
 EMBEDDING_DIM = 512
 
 
@@ -20,15 +20,13 @@ def load_model(device: str = DEVICE):
     Call once; pass the returned object to extract_embedding — never call
     load_model() per frame. boxmot handles weight download and caching.
     """
-    import torch
-    from boxmot import ReidAutoBackend
+    from boxmot.reid.core.reid import ReID
 
-    model = ReidAutoBackend(
+    return ReID(
         weights=Path(f"{MODEL_NAME}.pt"),
-        device=torch.device(device),
+        device=device,
         half=False,
     )
-    return model
 
 
 def extract_embedding(model, frame: np.ndarray, bbox: list[int]):
@@ -37,6 +35,8 @@ def extract_embedding(model, frame: np.ndarray, bbox: list[int]):
     bbox: [x1, y1, x2, y2] in pixel coordinates (ints or floats).
     Returns a (EMBEDDING_DIM,) float32 numpy vector, or None if the
     clamped crop has zero area (fully out-of-bounds bbox).
+
+    Crop resizing to model input dimensions is handled by boxmot internally.
     """
     x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
     h, w = frame.shape[:2]
@@ -51,15 +51,15 @@ def extract_embedding(model, frame: np.ndarray, bbox: list[int]):
         return None
 
     crop = frame[y1:y2, x1:x2]
-    # Exactly 256H × 128W — non-negotiable OSNet input size.
-    # cv2.resize takes (width, height), so (128, 256).
-    crop = cv2.resize(crop, (128, 256))
 
-    # boxmot ReidAutoBackend.get_features expects (N, H, W, C) uint8 BGR.
-    crops = crop[np.newaxis]  # (1, 256, 128, 3)
-    emb = model.get_features(crops)  # (1, EMBEDDING_DIM)
+    # boxmot ReID handles crop preprocessing (resize, normalise) internally.
+    payload = model.preprocess([crop])
+    result  = model.process(payload)
 
-    emb = np.array(emb[0], dtype=np.float32)
+    if result is None:
+        return None
+
+    emb = result.cpu().numpy()[0].astype(np.float32)
     norm = np.linalg.norm(emb)
     if norm > 0:
         emb = emb / norm

@@ -10,7 +10,7 @@ import numpy as np
 import supervision as sv
 
 # ByteTrack config — the only place these values are allowed to live.
-LOST_TRACK_BUFFER = 60
+LOST_TRACK_BUFFER = 15
 MINIMUM_MATCHING_THRESHOLD = 0.7
 
 

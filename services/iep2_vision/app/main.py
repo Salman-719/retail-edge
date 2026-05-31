@@ -1,123 +1,92 @@
 """FastAPI app: HTTP upload + WebSocket stream.
 
-This module is the orchestrator only. It owns no detection logic, no
-frame-extraction logic, and no tracking logic — it imports those from their
-owning modules via relative paths (no package install, no __init__.py).
+Thin transport adapter only. All pipeline logic lives in runtime.py.
+This module owns: request parsing, tmp file handling, thread/queue bridge,
+WebSocket drain, and static UI serving. Nothing else.
 """
 import asyncio
-import base64
-import io
+import logging
 import os
 import queue
 import threading
 import uuid
+from contextlib import asynccontextmanager
+from dataclasses import asdict
 
-import cv2
-import numpy as np
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
-from PIL import Image
 
-from ..video_ingestor.ingestor import extract_frames
-from ..detector.detector import detect
-from ..tracker.tracker import create_tracker, update
+from ..runtime import IEP2Runtime
 
-# Wire-transfer cap: never encode frames wider than this (hard constraint).
-MAX_WIRE_WIDTH = 640
+log = logging.getLogger("iep2")
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE  = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(_HERE, "..", "tmp")
-UI_DIR = os.path.join(_HERE, "..", "ui")
+UI_DIR  = os.path.join(_HERE, "..", "ui")
 
-app = FastAPI()
-
-# All pipeline state lives in this module-level dict — no DB this phase.
+# All pipeline state lives here — no DB, no model references.
 STATE = {
-    "frames": [],          # list of {frame_index, frame_b64, tracks, new_entries}
-    "status": "idle",      # idle | processing | done
+    "frames":       [],
+    "status":       "idle",
     "total_frames": 0,
-    "events": queue.Queue(),  # per-frame messages for the WebSocket to drain
+    "events":       queue.Queue(),
 }
 
 
-@app.on_event("startup")
-def _ensure_tmp():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _setup_logging()
     os.makedirs(TMP_DIR, exist_ok=True)
+    log.info("Loading models…")
+    app.state.runtime = IEP2Runtime()
+    log.info("Models loaded — ready.")
+    yield
 
 
-def _encode_frame(frame: np.ndarray) -> tuple[str, float]:
-    """Resize to max 640px wide then base64-encode as JPEG for the wire.
-
-    Returns (base64_jpeg, scale) where scale is the factor applied to the
-    frame so callers can map detection bboxes into the encoded image's
-    coordinate space.
-    """
-    h, w = frame.shape[:2]
-    scale = 1.0
-    if w > MAX_WIRE_WIDTH:
-        scale = MAX_WIRE_WIDTH / w
-        frame = cv2.resize(frame, (MAX_WIRE_WIDTH, int(h * scale)))
-
-    # BGR (OpenCV) -> RGB (Pillow)
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    buf = io.BytesIO()
-    Image.fromarray(rgb).save(buf, format="JPEG")
-    return base64.b64encode(buf.getvalue()).decode("ascii"), scale
+def _setup_logging():
+    level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s  %(levelname)-8s  %(name)-30s  %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
 
 
-def _run_pipeline(video_path: str):
-    """Plain worker thread: extract -> detect -> track, frame by frame, in memory."""
-    STATE["frames"] = []
-    STATE["status"] = "processing"
-    STATE["total_frames"] = 0
-
-    # Tracker lifetime is scoped to this upload thread (hard constraint).
-    tracker = create_tracker()
-    # seen_ids lives here in main.py (spec rule 3 — not in tracker.py).
-    seen_ids: set[int] = set()
-
-    frame_index = 0
-    for frame in extract_frames(video_path):
-        detections = detect(frame)
-        frame_b64, scale = _encode_frame(frame)
-        # Scale bboxes into the encoded image's coordinate space before tracking.
-        if scale != 1.0:
-            for d in detections:
-                d["bbox"] = [c * scale for c in d["bbox"]]
-
-        tracks = update(tracker, detections)
-
-        new_entries = [t["track_id"] for t in tracks if t["track_id"] not in seen_ids]
-        seen_ids.update(new_entries)
-
-        record = {
-            "frame_index": frame_index,
-            "frame_b64": frame_b64,
-            "tracks": tracks,
-            "new_entries": new_entries,
-        }
-        STATE["frames"].append(record)
-        STATE["events"].put(record)
-        frame_index += 1
-
-    STATE["total_frames"] = frame_index
-    STATE["status"] = "done"
-    STATE["events"].put({"status": "done", "total_frames": frame_index})
+app = FastAPI(lifespan=lifespan)
 
 
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload(
+    file: UploadFile = File(...),
+    camera_id: str = Form(...),
+):
     os.makedirs(TMP_DIR, exist_ok=True)
     dest = os.path.join(TMP_DIR, f"{uuid.uuid4().hex}_{file.filename}")
     with open(dest, "wb") as f:
         f.write(await file.read())
 
-    # Reset the event queue for a fresh run.
+    # Fresh event queue for this upload.
     STATE["events"] = queue.Queue()
+    STATE["frames"] = []
+    STATE["status"] = "processing"
 
-    # Explicit thread — no BackgroundTasks, no executor (hard constraint).
-    thread = threading.Thread(target=_run_pipeline, args=(dest,), daemon=True)
-    thread.start()
+    runtime = app.state.runtime
+
+    def pipeline_thread():
+        log.info("Pipeline started  camera=%s  file=%s", camera_id, file.filename)
+        with runtime.run(dest, camera_id) as stream:
+            for result in stream:
+                record = asdict(result)
+                STATE["frames"].append(record)
+                STATE["events"].put(record)
+        total = len(STATE["frames"])
+        STATE["total_frames"] = total
+        STATE["status"] = "done"
+        STATE["events"].put({"status": "done", "total_frames": total})
+        log.info("Pipeline done  camera=%s  frames=%d", camera_id, total)
+
+    threading.Thread(target=pipeline_thread, daemon=True).start()
 
     return {"status": "processing", "filename": file.filename}
 
@@ -143,9 +112,9 @@ async def ws(websocket: WebSocket):
 @app.get("/frames")
 async def frames():
     return {
-        "status": STATE["status"],
+        "status":       STATE["status"],
         "total_frames": STATE["total_frames"],
-        "frames": STATE["frames"],
+        "frames":       STATE["frames"],
     }
 
 
