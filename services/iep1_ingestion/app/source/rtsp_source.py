@@ -63,7 +63,8 @@ class RtspSource:
                         attempt,
                         RECONNECT_ATTEMPTS,
                     )
-                    self._cap.release()
+                    if self._cap is not None:
+                        self._cap.release()
                     self._cap = None
                     self._available = False
                     time.sleep(RECONNECT_DELAY_SECONDS)
