@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>IEP2 Vision</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #111; color: #eee; display: flex; flex-direction: column; min-height: 100vh; }
+  header { padding: 16px 24px; border-bottom: 1px solid #333; }
+  header h1 { margin: 0; font-size: 18px; }
+  .layout { display: flex; flex: 1; gap: 0; }
+  .main-col { flex: 1; padding: 20px 24px; min-width: 0; }
+  .sidebar { width: 240px; min-width: 200px; background: #1a1a1a; border-left: 1px solid #333; padding: 16px; }
+  section { margin-bottom: 24px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: #888; margin: 0 0 10px; }
+  canvas { background: #000; border: 1px solid #333; max-width: 100%; display: block; }
+  button { padding: 7px 16px; cursor: pointer; background: #2a6ef5; color: #fff; border: none; border-radius: 4px; font-size: 14px; }
+  button:hover { background: #1a5ee0; }
+  #playbackSection { display: none; }
+  input[type=range] { width: 100%; margin: 8px 0; }
+  .meta { font-size: 12px; color: #9ad; margin-top: 6px; }
+
+  /* Sidebar */
+  #personCount { font-size: 26px; font-weight: bold; color: #69f0ae; margin-bottom: 12px; }
+  #personList { list-style: none; padding: 0; margin: 0; max-height: 60vh; overflow-y: auto; }
+  #personList li { font-size: 13px; padding: 4px 8px; margin-bottom: 3px; border-radius: 3px; background: #252525; transition: background .2s; }
+  #personList li.new-entry { background: #1a4a2a; color: #69f0ae; font-weight: bold; }
+</style>
+</head>
+<body>
+<header>
+  <h1>IEP2 — Vision Module (Phase 2: Tracking)</h1>
+</header>
+
+<div class="layout">
+  <div class="main-col">
+
+    <section>
+      <h2>Upload</h2>
+      <input type="file" id="fileInput" accept="video/*" style="margin-right:8px" />
+      <button id="uploadBtn">Upload &amp; Process</button>
+      <div class="meta" id="uploadStatus"></div>
+    </section>
+
+    <section id="liveSection">
+      <h2>Live View</h2>
+      <canvas id="liveCanvas" width="640" height="360"></canvas>
+      <div class="meta" id="liveMeta">Waiting for upload…</div>
+    </section>
+
+    <section id="playbackSection">
+      <h2>Playback</h2>
+      <input type="range" id="slider" min="0" max="0" value="0" />
+      <canvas id="playbackCanvas" width="640" height="360"></canvas>
+      <div class="meta" id="playbackMeta"></div>
+    </section>
+
+  </div>
+
+  <aside class="sidebar">
+    <h2>Persons</h2>
+    <div id="personCount">0</div>
+    <ul id="personList"></ul>
+  </aside>
+</div>
+
+<script>
+// All frames received over WebSocket — playback reads from here only (rule 5).
+const frames = [];
+
+const liveCanvas    = document.getElementById("liveCanvas");
+const liveCtx       = liveCanvas.getContext("2d");
+const liveMeta      = document.getElementById("liveMeta");
+
+const playbackSection = document.getElementById("playbackSection");
+const playbackCanvas  = document.getElementById("playbackCanvas");
+const playbackCtx     = playbackCanvas.getContext("2d");
+const playbackMeta    = document.getElementById("playbackMeta");
+const slider          = document.getElementById("slider");
+
+const personCountEl = document.getElementById("personCount");
+const personListEl  = document.getElementById("personList");
+
+const COLORS = ["#ff5252","#40c4ff","#69f0ae","#ffd740","#e040fb","#ffab40",
+                "#ff6d00","#00e5ff","#76ff03","#ff4081","#18ffff","#b2ff59"];
+
+function trackColor(trackId) {
+  return COLORS[trackId % COLORS.length];
+}
+
+// Draw frame record (tracks array) onto a canvas.
+// Bboxes are in the encoded image's pixel space; we normalize to [0,1] then
+// scale to the canvas display size so boxes always line up (spec rule 6).
+function drawRecord(ctx, canvas, record) {
+  const img = new Image();
+  img.onload = () => {
+    canvas.width  = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    ctx.drawImage(img, 0, 0);
+
+    (record.tracks || []).forEach(t => {
+      const [x1, y1, x2, y2] = t.bbox;
+      const nx = (x1 / img.naturalWidth)  * canvas.width;
+      const ny = (y1 / img.naturalHeight) * canvas.height;
+      const nw = ((x2 - x1) / img.naturalWidth)  * canvas.width;
+      const nh = ((y2 - y1) / img.naturalHeight) * canvas.height;
+
+      const color = trackColor(t.track_id);
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(nx, ny, nw, nh);
+
+      const label = `#${t.track_id} ${t.label} ${(t.confidence * 100).toFixed(0)}%`;
+      ctx.font = "bold 12px sans-serif";
+      const tw = ctx.measureText(label).width + 8;
+      const th = 16;
+      ctx.fillStyle = color;
+      ctx.fillRect(nx, ny - th, tw, th);
+      ctx.fillStyle = "#000";
+      ctx.fillText(label, nx + 4, ny - 4);
+    });
+  };
+  img.src = "data:image/jpeg;base64," + record.frame_b64;
+}
+
+// Sidebar state — cumulative across all frames.
+const seenIds = new Set();
+
+function updateSidebar(tracks, newEntries) {
+  const newSet = new Set(newEntries);
+
+  tracks.forEach(t => {
+    if (!seenIds.has(t.track_id)) {
+      seenIds.add(t.track_id);
+      const li = document.createElement("li");
+      li.id = `track-${t.track_id}`;
+      li.textContent = `#${t.track_id} — ${t.label}`;
+      personListEl.appendChild(li);
+    }
+  });
+
+  personCountEl.textContent = seenIds.size;
+
+  // Highlight new entries for 2 seconds then revert.
+  newEntries.forEach(id => {
+    const li = document.getElementById(`track-${id}`);
+    if (!li) return;
+    li.classList.add("new-entry");
+    setTimeout(() => li.classList.remove("new-entry"), 2000);
+  });
+}
+
+function renderPlayback(index) {
+  const record = frames[index];
+  if (!record) return;
+  drawRecord(playbackCtx, playbackCanvas, record);
+  playbackMeta.textContent =
+    `Frame ${record.frame_index} — ${(record.tracks || []).length} track(s)`;
+}
+
+slider.addEventListener("input", () => renderPlayback(parseInt(slider.value, 10)));
+
+let socket = null;
+
+function openSocket() {
+  if (socket) { try { socket.close(); } catch (_) {} }
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  socket = new WebSocket(`${proto}://${location.host}/ws`);
+
+  socket.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+
+    if (msg.status === "done") {
+      liveMeta.textContent = `Done — ${msg.total_frames} frames processed.`;
+      slider.max   = Math.max(0, frames.length - 1);
+      slider.value = 0;
+      playbackSection.style.display = "block";
+      renderPlayback(0);
+      return;
+    }
+
+    frames.push(msg);
+    drawRecord(liveCtx, liveCanvas, msg);
+    liveMeta.textContent =
+      `Frame ${msg.frame_index} — ${(msg.tracks || []).length} track(s)`;
+    updateSidebar(msg.tracks || [], msg.new_entries || []);
+  };
+}
+
+document.getElementById("uploadBtn").addEventListener("click", async () => {
+  const input = document.getElementById("fileInput");
+  if (!input.files.length) {
+    document.getElementById("uploadStatus").textContent = "Pick a video first.";
+    return;
+  }
+
+  // Reset all state for a fresh run.
+  frames.length = 0;
+  seenIds.clear();
+  personCountEl.textContent = "0";
+  personListEl.innerHTML = "";
+  playbackSection.style.display = "none";
+  liveMeta.textContent = "Uploading…";
+
+  openSocket();
+
+  const form = new FormData();
+  form.append("file", input.files[0]);
+  const res  = await fetch("/upload", { method: "POST", body: form });
+  const data = await res.json();
+  document.getElementById("uploadStatus").textContent =
+    `Uploaded "${data.filename}" — processing…`;
+  liveMeta.textContent = "Processing…";
+});
+</script>
+</body>
+</html>
