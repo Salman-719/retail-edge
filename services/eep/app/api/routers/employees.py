@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -125,12 +125,15 @@ async def get_employee(
 @router.patch("/store/{slug}/employees/{employee_id}", response_model=EmployeeResponse)
 async def patch_employee(
     employee_id: uuid.UUID,
+    request: Request,
     body: PatchEmployeeRequest,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):
     require_owner_or_manager(ctx)
     emp = await _get_employee_or_404(employee_id, ctx.store_id, db)
+    raw = await request.json()
+    print("DEBUG patch_employee raw body:", raw, flush=True)
 
     if body.employee_code is not None and body.employee_code != emp.employee_code:
         existing = await db.execute(
@@ -147,11 +150,12 @@ async def patch_employee(
             )
 
     for field in ("name", "role", "employee_code", "phone", "email", "is_active", "enrollment_status"):
+        if field not in raw:
+            continue
         val = getattr(body, field)
-        if val is not None:
-            if field == "email":
-                val = str(val)
-            setattr(emp, field, val)
+        if field == "email" and val is not None:
+            val = str(val)
+        setattr(emp, field, val)
 
     emp.updated_at = datetime.now(timezone.utc)
     await write_audit_log(

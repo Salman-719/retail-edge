@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
 import {
   activateDraft, computeHomography, createCamera, createDraft, createObstacle, createZone,
   deleteCameraConfig, deleteCamera, deleteDraft, deleteObstacle, deleteZone,
   getActiveVersion, getDraft, getDraftCameraConfigs, getDraftFloorPlan, getDraftObstacles,
   getDraftZones, getCalibrations, getSyncEvent, listSections, placeCameraConfig,
-  setFloorPlanScale, uploadCameraFrame, uploadFloorPlan, verifyCalibration,
+  setFloorPlanScale, updateCameraConfig, uploadCameraFrame, uploadFloorPlan, verifyCalibration,
 } from '../api'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -64,146 +64,243 @@ function FloorPlanStage({
   correspondencePoints = [],
   activeConfigId = null,
   onCanvasClick,
+  showGrid = false,
   width = 700,
   height = 480,
 }) {
   const bgImage = useKonvaImage(floorPlan?.display_url)
-  const scale = fitScale(floorPlan?.width_px, floorPlan?.height_px, width, height)
-  const stageH = Math.round((floorPlan?.height_px || height) * scale)
+  const baseScale = fitScale(floorPlan?.width_px, floorPlan?.height_px, width, height)
+  const stageH = Math.round((floorPlan?.height_px || height) * baseScale)
+
+  const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const isDragging = useRef(false)
+  const didMove = useRef(false)
+  const lastPos = useRef(null)
+
+  const scale = baseScale * zoom
+
+  const clampPan = (x, y, z) => {
+    const s = baseScale * z
+    const imgW = (floorPlan?.width_px || width) * s
+    const imgH = (floorPlan?.height_px || height) * s
+    return {
+      x: Math.min(0, Math.max(width - imgW, x)),
+      y: Math.min(0, Math.max(stageH - imgH, y)),
+    }
+  }
+
+  const handleWheel = (e) => {
+    e.evt.preventDefault()
+    const scaleBy = 1.12
+    const newZoom = Math.min(8, Math.max(1, e.evt.deltaY < 0 ? zoom * scaleBy : zoom / scaleBy))
+    const stage = e.target.getStage()
+    const ptr = stage.getPointerPosition()
+    const newX = ptr.x - (ptr.x - pan.x) * (newZoom / zoom)
+    const newY = ptr.y - (ptr.y - pan.y) * (newZoom / zoom)
+    setZoom(newZoom)
+    setPan(clampPan(newX, newY, newZoom))
+  }
+
+  const handleMouseDown = (e) => {
+    if (e.evt.button !== 0) return
+    isDragging.current = true
+    didMove.current = false
+    lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
+  }
+
+  const handleMouseMove = (e) => {
+    if (!isDragging.current) return
+    const dx = e.evt.clientX - lastPos.current.x
+    const dy = e.evt.clientY - lastPos.current.y
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) didMove.current = true
+    lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
+    setPan(prev => clampPan(prev.x + dx, prev.y + dy, zoom))
+  }
+
+  const handleMouseUp = () => { isDragging.current = false }
 
   const handleClick = (e) => {
-    if (!onCanvasClick) return
-    const pos = e.target.getStage().getPointerPosition()
-    onCanvasClick(pos.x / scale, pos.y / scale)
+    if (!onCanvasClick || didMove.current) return
+    const stage = e.target.getStage()
+    const ptr = stage.getPointerPosition()
+    onCanvasClick((ptr.x - pan.x) / scale, (ptr.y - pan.y) / scale)
+  }
+
+  const tx = (x) => x * scale + pan.x
+  const ty = (y) => y * scale + pan.y
+
+  // Grid lines (1m × 1m) — only when showGrid and scale is defined
+  const ppm = floorPlan?.pixels_per_meter
+  const gridLines = []
+  if (showGrid && ppm) {
+    const cellPx = ppm * scale
+    const imgW = (floorPlan?.width_px || width) * scale
+    const imgH = (floorPlan?.height_px || height) * scale
+    const ox = pan.x
+    const oy = pan.y
+    // vertical lines
+    for (let x = 0; x <= imgW + cellPx; x += cellPx) {
+      const cx = ox + x
+      if (cx < -cellPx || cx > width + cellPx) continue
+      gridLines.push(<Line key={`v${x}`} points={[cx, oy, cx, oy + imgH]} stroke="rgba(99,102,241,0.25)" strokeWidth={1 / zoom} />)
+    }
+    // horizontal lines
+    for (let y = 0; y <= imgH + cellPx; y += cellPx) {
+      const cy = oy + y
+      if (cy < -cellPx || cy > stageH + cellPx) continue
+      gridLines.push(<Line key={`h${y}`} points={[ox, cy, ox + imgW, cy]} stroke="rgba(99,102,241,0.25)" strokeWidth={1 / zoom} />)
+    }
+    // meter labels along top and left edges
+    const maxCols = Math.ceil(imgW / cellPx)
+    const maxRows = Math.ceil(imgH / cellPx)
+    for (let i = 1; i < maxCols; i++) {
+      const cx = ox + i * cellPx
+      if (cx >= 0 && cx <= width)
+        gridLines.push(<Text key={`vl${i}`} x={cx + 2} y={oy + 2} text={`${i}m`} fontSize={Math.max(8, 10 / zoom)} fill="rgba(99,102,241,0.6)" />)
+    }
+    for (let i = 1; i < maxRows; i++) {
+      const cy = oy + i * cellPx
+      if (cy >= 0 && cy <= stageH)
+        gridLines.push(<Text key={`hl${i}`} x={ox + 2} y={cy + 2} text={`${i}m`} fontSize={Math.max(8, 10 / zoom)} fill="rgba(99,102,241,0.6)" />)
+    }
   }
 
   return (
-    <Stage
-      width={width}
-      height={stageH}
-      onClick={handleClick}
-      style={{ cursor: onCanvasClick ? 'crosshair' : 'default', background: '#f3f4f6', borderRadius: 8 }}
-    >
-      <Layer>
-        {bgImage && (
-          <KonvaImage
-            image={bgImage}
-            width={(floorPlan?.width_px || width) * scale}
-            height={(floorPlan?.height_px || height) * scale}
-          />
-        )}
-
-        {obstacles.map(obs => (
-          <Line key={obs.id}
-            points={obs.points.flatMap(([x, y]) => [x * scale, y * scale])}
-            closed fill="#6b728022" stroke="#6b7280" strokeWidth={2} dash={[5, 3]} />
-        ))}
-
-        {zones.map(zone => (
-          <React.Fragment key={zone.id}>
-            <Line
-              points={zone.points.flatMap(([x, y]) => [x * scale, y * scale])}
-              closed
-              fill={(ZONE_COLORS[zone.type] || '#888') + '33'}
-              stroke={ZONE_COLORS[zone.type] || '#888'}
-              strokeWidth={2}
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      <Stage
+        width={width}
+        height={stageH}
+        onClick={handleClick}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        style={{ cursor: isDragging.current ? 'grabbing' : 'grab', background: '#f3f4f6', borderRadius: 8, display: 'block' }}
+      >
+        <Layer>
+          {bgImage && (
+            <KonvaImage
+              image={bgImage}
+              x={pan.x} y={pan.y}
+              width={(floorPlan?.width_px || width) * scale}
+              height={(floorPlan?.height_px || height) * scale}
             />
-            {zone.points[0] && (
-              <Text
-                x={zone.points[0][0] * scale + 4}
-                y={zone.points[0][1] * scale + 4}
-                text={zone.name}
-                fontSize={11}
-                fill={ZONE_COLORS[zone.type] || '#888'}
+          )}
+
+          {showGrid && gridLines}
+
+          {obstacles.map(obs => (
+            <Line key={obs.id}
+              points={obs.points.flatMap(([x, y]) => [tx(x), ty(y)])}
+              closed fill="#6b728022" stroke="#6b7280" strokeWidth={2 / zoom} dash={[5, 3]} />
+          ))}
+
+          {zones.map(zone => (
+            <React.Fragment key={zone.id}>
+              <Line
+                points={zone.points.flatMap(([x, y]) => [tx(x), ty(y)])}
+                closed
+                fill={(ZONE_COLORS[zone.type] || '#888') + '33'}
+                stroke={ZONE_COLORS[zone.type] || '#888'}
+                strokeWidth={2 / zoom}
               />
-            )}
-          </React.Fragment>
-        ))}
+              {zone.points[0] && (
+                <Text
+                  x={tx(zone.points[0][0]) + 4} y={ty(zone.points[0][1]) + 4}
+                  text={zone.name} fontSize={Math.max(9, 11 / zoom)}
+                  fill={ZONE_COLORS[zone.type] || '#888'}
+                />
+              )}
+            </React.Fragment>
+          ))}
 
-        {cameraConfigs.map(cc => (
-          <React.Fragment key={cc.id}>
-            <Circle
-              x={cc.position_x * scale} y={cc.position_y * scale} radius={9}
-              fill={
-                cc.id === activeConfigId ? '#2563eb' :
-                cc.status === 'verified' ? '#10b981' :
-                cc.status === 'calibrated' ? '#f59e0b' : '#6b7280'
-              }
-              stroke="#fff" strokeWidth={2}
-            />
-            <Text
-              x={cc.position_x * scale + 13} y={cc.position_y * scale - 6}
-              text={cc.physical_camera_name} fontSize={11} fill="#111"
-            />
-          </React.Fragment>
-        ))}
+          {cameraConfigs.map(cc => (
+            <React.Fragment key={cc.id}>
+              <Circle
+                x={tx(cc.position_x)} y={ty(cc.position_y)} radius={9 / zoom}
+                fill={
+                  cc.id === activeConfigId ? '#2563eb' :
+                  cc.status === 'verified' ? '#10b981' :
+                  cc.status === 'calibrated' ? '#f59e0b' : '#6b7280'
+                }
+                stroke="#fff" strokeWidth={2 / zoom}
+              />
+              <Text
+                x={tx(cc.position_x) + 13 / zoom} y={ty(cc.position_y) - 6 / zoom}
+                text={cc.physical_camera_name} fontSize={Math.max(9, 11 / zoom)} fill="#111"
+              />
+            </React.Fragment>
+          ))}
 
-        {/* Scale overlay: origin (orange), ref A (blue), ref line A→B only */}
-        {scalePoints.length > 0 && (
-          <>
-            <Circle x={scalePoints[0][0] * scale} y={scalePoints[0][1] * scale}
-              radius={6} fill="#f97316" stroke="#fff" strokeWidth={2} />
-            <Text x={scalePoints[0][0] * scale + 8} y={scalePoints[0][1] * scale - 8}
-              text="O" fontSize={11} fill="#f97316" />
-          </>
-        )}
-        {scalePoints.length > 1 && (
-          <>
-            <Circle x={scalePoints[1][0] * scale} y={scalePoints[1][1] * scale}
-              radius={6} fill="#2563eb" stroke="#fff" strokeWidth={2} />
-            <Text x={scalePoints[1][0] * scale + 8} y={scalePoints[1][1] * scale - 8}
-              text="A" fontSize={11} fill="#2563eb" />
-          </>
-        )}
-        {scalePoints.length > 2 && (
-          <>
-            <Line
-              points={[
-                scalePoints[1][0] * scale, scalePoints[1][1] * scale,
-                scalePoints[2][0] * scale, scalePoints[2][1] * scale,
-              ]}
-              stroke="#2563eb" strokeWidth={2} dash={[5, 3]}
-            />
-            <Circle x={scalePoints[2][0] * scale} y={scalePoints[2][1] * scale}
-              radius={6} fill="#2563eb" stroke="#fff" strokeWidth={2} />
-            <Text x={scalePoints[2][0] * scale + 8} y={scalePoints[2][1] * scale - 8}
-              text="B" fontSize={11} fill="#2563eb" />
-          </>
-        )}
+          {scalePoints.length > 0 && (
+            <>
+              <Circle x={tx(scalePoints[0][0])} y={ty(scalePoints[0][1])}
+                radius={6 / zoom} fill="#f97316" stroke="#fff" strokeWidth={2 / zoom} />
+              <Text x={tx(scalePoints[0][0]) + 8 / zoom} y={ty(scalePoints[0][1]) - 8 / zoom}
+                text="O" fontSize={Math.max(9, 11 / zoom)} fill="#f97316" />
+            </>
+          )}
+          {scalePoints.length > 1 && (
+            <>
+              <Circle x={tx(scalePoints[1][0])} y={ty(scalePoints[1][1])}
+                radius={6 / zoom} fill="#2563eb" stroke="#fff" strokeWidth={2 / zoom} />
+              <Text x={tx(scalePoints[1][0]) + 8 / zoom} y={ty(scalePoints[1][1]) - 8 / zoom}
+                text="A" fontSize={Math.max(9, 11 / zoom)} fill="#2563eb" />
+            </>
+          )}
+          {scalePoints.length > 2 && (
+            <>
+              <Line
+                points={[tx(scalePoints[1][0]), ty(scalePoints[1][1]), tx(scalePoints[2][0]), ty(scalePoints[2][1])]}
+                stroke="#2563eb" strokeWidth={2 / zoom} dash={[5, 3]}
+              />
+              <Circle x={tx(scalePoints[2][0])} y={ty(scalePoints[2][1])}
+                radius={6 / zoom} fill="#2563eb" stroke="#fff" strokeWidth={2 / zoom} />
+              <Text x={tx(scalePoints[2][0]) + 8 / zoom} y={ty(scalePoints[2][1]) - 8 / zoom}
+                text="B" fontSize={Math.max(9, 11 / zoom)} fill="#2563eb" />
+            </>
+          )}
 
-        {/* Zone/obstacle in-progress drawing */}
-        {overlayPoints.length > 0 && (
-          <>
-            <Line
-              points={overlayPoints.flatMap(([x, y]) => [x * scale, y * scale])}
-              stroke={overlayMode === 'obstacle' ? '#6b7280' : '#2563eb'}
-              strokeWidth={2}
-              dash={overlayMode === 'obstacle' ? [5, 3] : undefined}
-            />
-            {overlayPoints.map(([x, y], i) => (
-              <Circle key={i} x={x * scale} y={y * scale} radius={4}
-                fill={overlayMode === 'obstacle' ? '#6b7280' : '#2563eb'} />
-            ))}
-          </>
-        )}
+          {overlayPoints.length > 0 && (
+            <>
+              <Line
+                points={overlayPoints.flatMap(([x, y]) => [tx(x), ty(y)])}
+                closed={overlayPoints.length >= 3}
+                stroke={overlayMode === 'obstacle' ? '#6b7280' : '#2563eb'}
+                fill={overlayPoints.length >= 3 ? (overlayMode === 'obstacle' ? '#6b728022' : '#2563eb22') : undefined}
+                strokeWidth={2 / zoom}
+                dash={overlayMode === 'obstacle' ? [5, 3] : undefined}
+              />
+              {overlayPoints.map(([x, y], i) => (
+                <Circle key={i} x={tx(x)} y={ty(y)} radius={4 / zoom}
+                  fill={overlayMode === 'obstacle' ? '#6b7280' : '#2563eb'} />
+              ))}
+            </>
+          )}
 
-        {/* Pending camera placement ghost marker */}
-        {pendingMarker && (
-          <Circle
-            x={pendingMarker.x * scale} y={pendingMarker.y * scale}
-            radius={9} fill="#94a3b8" stroke="#fff" strokeWidth={2}
-          />
-        )}
+          {pendingMarker && (
+            <Circle x={tx(pendingMarker.x)} y={ty(pendingMarker.y)}
+              radius={9 / zoom} fill="#94a3b8" stroke="#fff" strokeWidth={2 / zoom} />
+          )}
 
-        {/* Correspondence / verify world points */}
-        {correspondencePoints.map((pt, i) => (
-          <React.Fragment key={i}>
-            <Circle x={pt[0] * scale} y={pt[1] * scale} radius={6} fill="#f97316" stroke="#fff" strokeWidth={2} />
-            <Text x={pt[0] * scale + 8} y={pt[1] * scale - 8} text={`${i + 1}`} fontSize={11} fill="#f97316" />
-          </React.Fragment>
-        ))}
-      </Layer>
-    </Stage>
+          {correspondencePoints.map((pt, i) => (
+            <React.Fragment key={i}>
+              <Circle x={tx(pt[0])} y={ty(pt[1])} radius={6 / zoom} fill="#f97316" stroke="#fff" strokeWidth={2 / zoom} />
+              <Text x={tx(pt[0]) + 8 / zoom} y={ty(pt[1]) - 8 / zoom} text={`${i + 1}`} fontSize={Math.max(9, 11 / zoom)} fill="#f97316" />
+            </React.Fragment>
+          ))}
+        </Layer>
+      </Stage>
+      {zoom > 1 && (
+        <button
+          onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }) }}
+          style={{ position: 'absolute', bottom: 6, right: 6, fontSize: 11, padding: '2px 8px', background: 'rgba(255,255,255,0.85)', border: '1px solid #d1d5db', borderRadius: 4, cursor: 'pointer' }}
+        >
+          Reset zoom
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -212,36 +309,99 @@ function FloorPlanStage({
 function FrameStage({ frameUrl, width = 360, height = 260, points = [], onCanvasClick }) {
   const image = useKonvaImage(frameUrl)
   const [imgSize, setImgSize] = useState({ w: width, h: height })
+  const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const isDragging = useRef(false)
+  const didMove = useRef(false)
+  const lastPos = useRef(null)
 
   useEffect(() => {
     if (image) setImgSize({ w: image.width, h: image.height })
   }, [image])
 
-  const scale = fitScale(imgSize.w, imgSize.h, width, height)
+  const baseScale = fitScale(imgSize.w, imgSize.h, width, height)
+  const scale = baseScale * zoom
+  const stageH = Math.round(imgSize.h * baseScale)
 
-  const handleClick = (e) => {
-    if (!onCanvasClick) return
-    const pos = e.target.getStage().getPointerPosition()
-    onCanvasClick(pos.x / scale, pos.y / scale)
+  const clampPan = (x, y, z) => {
+    const s = baseScale * z
+    return {
+      x: Math.min(0, Math.max(width - imgSize.w * s, x)),
+      y: Math.min(0, Math.max(stageH - imgSize.h * s, y)),
+    }
   }
 
+  const handleWheel = (e) => {
+    e.evt.preventDefault()
+    const scaleBy = 1.12
+    const newZoom = Math.min(8, Math.max(1, e.evt.deltaY < 0 ? zoom * scaleBy : zoom / scaleBy))
+    const stage = e.target.getStage()
+    const ptr = stage.getPointerPosition()
+    const newX = ptr.x - (ptr.x - pan.x) * (newZoom / zoom)
+    const newY = ptr.y - (ptr.y - pan.y) * (newZoom / zoom)
+    setZoom(newZoom)
+    setPan(clampPan(newX, newY, newZoom))
+  }
+
+  const handleMouseDown = (e) => {
+    if (e.evt.button !== 0) return
+    isDragging.current = true
+    didMove.current = false
+    lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
+  }
+
+  const handleMouseMove = (e) => {
+    if (!isDragging.current) return
+    const dx = e.evt.clientX - lastPos.current.x
+    const dy = e.evt.clientY - lastPos.current.y
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) didMove.current = true
+    lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
+    setPan(prev => clampPan(prev.x + dx, prev.y + dy, zoom))
+  }
+
+  const handleMouseUp = () => { isDragging.current = false }
+
+  const handleClick = (e) => {
+    if (!onCanvasClick || didMove.current) return
+    const stage = e.target.getStage()
+    const ptr = stage.getPointerPosition()
+    onCanvasClick((ptr.x - pan.x) / scale, (ptr.y - pan.y) / scale)
+  }
+
+  const tx = (x) => x * scale + pan.x
+  const ty = (y) => y * scale + pan.y
+
   return (
-    <Stage
-      width={width}
-      height={Math.round(imgSize.h * scale)}
-      onClick={handleClick}
-      style={{ cursor: onCanvasClick ? 'crosshair' : 'default', background: '#111', borderRadius: 8 }}
-    >
-      <Layer>
-        {image && <KonvaImage image={image} width={imgSize.w * scale} height={imgSize.h * scale} />}
-        {points.map((pt, i) => (
-          <React.Fragment key={i}>
-            <Circle x={pt[0] * scale} y={pt[1] * scale} radius={6} fill="#22c55e" stroke="#fff" strokeWidth={2} />
-            <Text x={pt[0] * scale + 8} y={pt[1] * scale - 8} text={`${i + 1}`} fontSize={11} fill="#22c55e" />
-          </React.Fragment>
-        ))}
-      </Layer>
-    </Stage>
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      <Stage
+        width={width}
+        height={stageH}
+        onClick={handleClick}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        style={{ cursor: isDragging.current ? 'grabbing' : 'grab', background: '#111', borderRadius: 8, display: 'block' }}
+      >
+        <Layer>
+          {image && <KonvaImage image={image} x={pan.x} y={pan.y} width={imgSize.w * scale} height={imgSize.h * scale} />}
+          {points.map((pt, i) => (
+            <React.Fragment key={i}>
+              <Circle x={tx(pt[0])} y={ty(pt[1])} radius={6 / zoom} fill="#22c55e" stroke="#fff" strokeWidth={2 / zoom} />
+              <Text x={tx(pt[0]) + 8 / zoom} y={ty(pt[1]) - 8 / zoom} text={`${i + 1}`} fontSize={Math.max(9, 11 / zoom)} fill="#22c55e" />
+            </React.Fragment>
+          ))}
+        </Layer>
+      </Stage>
+      {zoom > 1 && (
+        <button
+          onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }) }}
+          style={{ position: 'absolute', bottom: 6, right: 6, fontSize: 11, padding: '2px 8px', background: 'rgba(0,0,0,0.6)', color: '#fff', border: '1px solid #444', borderRadius: 4, cursor: 'pointer' }}
+        >
+          Reset zoom
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -250,6 +410,7 @@ function FrameStage({ frameUrl, width = 360, height = 260, points = [], onCanvas
 export default function StoreConfigEdit() {
   const { slug } = useParams()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
 
   const [step, setStep] = useState(1)
   const [mode, setMode] = useState(null) // 'onboarding' | 'editing'
@@ -280,13 +441,19 @@ export default function StoreConfigEdit() {
   const [selectedConfigId, setSelectedConfigId] = useState(null)
   const selectedConfig = cameraConfigs.find(cc => cc.id === selectedConfigId) ?? null
 
+  // Step 3 — inline camera config editing
+  const [editingConfigId, setEditingConfigId] = useState(null)
+  const [editCameraForm, setEditCameraForm] = useState({ height_meters: '' })
+
   // Steps 5-6 — per-camera correspondences and computed calibration results
   const [correspondencesMap, setCorrespondencesMap] = useState({})
   const [calibResultsMap, setCalibResultsMap] = useState({})
   const [pendingPixelPt, setPendingPixelPt] = useState(null)
 
-  // Step 7 — per-camera verification preview
+  // Step 7 — per-camera verification preview + correction mode
   const [verifyPreviewMap, setVerifyPreviewMap] = useState({})
+  const [correctionMode, setCorrectionMode] = useState(false)
+  const [correctionPixel, setCorrectionPixel] = useState(null)
 
   // Step 8 — polygon drawing
   const [step8Skipped, setStep8Skipped] = useState(false)
@@ -313,7 +480,7 @@ export default function StoreConfigEdit() {
         cameraConfigs.every(cc => cc.status !== 'pending')
       case 5: return cameraConfigs.length > 0 &&
         cameraConfigs.every(cc =>
-          (correspondencesMap[cc.id]?.length >= 4) ||
+          (correspondencesMap[cc.id]?.length >= 8) ||
           ['calibrated', 'verified'].includes(cc.status)
         )
       case 6: return cameraConfigs.length > 0 &&
@@ -321,6 +488,7 @@ export default function StoreConfigEdit() {
       case 7: return cameraConfigs.length > 0 &&
         cameraConfigs.every(cc => cc.status === 'verified')
       case 8: return zones.length > 0 || obstacles.length > 0 || step8Skipped
+      case 9: return syncEvent?.status === 'executed'
       default: return false
     }
   }
@@ -333,6 +501,7 @@ export default function StoreConfigEdit() {
     }
     return true
   }
+
 
   // ─── Bootstrap ───────────────────────────────────────────────────────────
 
@@ -349,7 +518,10 @@ export default function StoreConfigEdit() {
         getActiveVersion(slug).catch(() => null),
       ])
       setSections(sects)
-      const defaultSection = sects.find(s => s.is_default) || sects[0]
+      const targetSectionId = searchParams.get('section')
+      const defaultSection = (targetSectionId && sects.find(s => s.id === targetSectionId))
+        || sects.find(s => s.is_default)
+        || sects[0]
       setSelectedSection(defaultSection)
 
       const isEditing = !!activeVersion
@@ -407,18 +579,23 @@ export default function StoreConfigEdit() {
       setScalePoints([])
     }
 
-    // Initialise per-camera correspondence map
+    // Load stored calibration data and pre-populate correspondences for calibrated cameras
     const corrMap = {}
-    for (const cc of ccs) corrMap[cc.id] = []
-    setCorrespondencesMap(corrMap)
-
-    // Load stored calibration data for cameras that were previously calibrated
     const calibMap = {}
-    for (const cc of ccs.filter(c => ['calibrated', 'verified'].includes(c.status))) {
-      const calibs = await getCalibrations(s, cc.id).catch(() => [])
-      const current = calibs.find(c => c.is_current)
-      if (current) calibMap[cc.id] = current
+    for (const cc of ccs) {
+      corrMap[cc.id] = []
+      if (['calibrated', 'verified'].includes(cc.status)) {
+        const calibs = await getCalibrations(s, cc.id).catch(() => [])
+        const current = calibs.find(c => c.is_current)
+        if (current) {
+          calibMap[cc.id] = current
+          if (current.correspondences?.length) {
+            corrMap[cc.id] = current.correspondences
+          }
+        }
+      }
     }
+    setCorrespondencesMap(corrMap)
     setCalibResultsMap(calibMap)
 
     setSelectedConfigId(ccs[0]?.id ?? null)
@@ -552,6 +729,23 @@ export default function StoreConfigEdit() {
     }
   }
 
+  async function handleUpdateCameraConfig(e) {
+    e.preventDefault()
+    if (!editingConfigId) return
+    setSaving(true)
+    try {
+      const body = {}
+      if (editCameraForm.height_meters !== '') body.height_meters = parseFloat(editCameraForm.height_meters)
+      const updated = await updateCameraConfig(slug, editingConfigId, body)
+      setCameraConfigs(prev => prev.map(c => c.id === editingConfigId ? { ...c, ...updated } : c))
+      setEditingConfigId(null)
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   // ─── Steps 5-6: Correspondences and homography ───────────────────────────
 
   function handleFrameClickForCorrespondence(x, y) {
@@ -576,7 +770,7 @@ export default function StoreConfigEdit() {
 
   async function handleComputeHomographyFor(configId) {
     const corr = correspondencesMap[configId] || []
-    if (corr.length < 4) return
+    if (corr.length < 8) return
     setSaving(true)
     try {
       const result = await computeHomography(slug, configId, corr)
@@ -616,6 +810,29 @@ export default function StoreConfigEdit() {
       setCameraConfigs(prev => prev.map(c =>
         c.id === selectedConfigId ? { ...c, status: 'verified' } : c
       ))
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function handleFrameClickForCorrection(x, y) {
+    setCorrectionPixel([x, y])
+  }
+
+  async function handleMapClickForCorrection(x, y) {
+    if (!correctionPixel || !selectedConfigId) return
+    const newCorr = [...(correspondencesMap[selectedConfigId] || []), { pixel: correctionPixel, world: [x, y] }]
+    setCorrespondencesMap(prev => ({ ...prev, [selectedConfigId]: newCorr }))
+    setCorrectionPixel(null)
+    setCorrectionMode(false)
+    setSaving(true)
+    try {
+      const result = await computeHomography(slug, selectedConfigId, newCorr)
+      setCalibResultsMap(prev => ({ ...prev, [selectedConfigId]: result }))
+      setCameraConfigs(prev => prev.map(c => c.id === selectedConfigId ? { ...c, status: 'calibrated' } : c))
+      setVerifyPreviewMap(prev => ({ ...prev, [selectedConfigId]: null }))
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
     } finally {
@@ -668,7 +885,13 @@ export default function StoreConfigEdit() {
       setPendingPolygon(null)
       setPendingName('')
     } catch (err) {
-      setError(err?.response?.data?.error || err.message)
+      const detail = err?.response?.data?.detail
+      const msg = (typeof detail === 'object' ? detail?.error : detail) || err?.response?.data?.error || err.message
+      if (err?.response?.status === 409 || detail?.code === 'ZONE_OVERLAP') {
+        setError(msg || 'This polygon overlaps with an existing zone. Zones cannot overlap each other.')
+      } else {
+        setError(msg || 'Failed to save polygon. Please try again.')
+      }
     } finally {
       setSaving(false)
     }
@@ -702,19 +925,27 @@ export default function StoreConfigEdit() {
         label: activationLabel || null,
       })
       setSyncEvent(event)
+      navigate(`/store/${slug}/config`)
       pollRef.current = setInterval(async () => {
         const updated = await getSyncEvent(slug, event.id)
         setSyncEvent(updated)
-        if (updated.status === 'executed') {
+        if (updated.status !== 'pending') {
           clearInterval(pollRef.current)
-          navigate(`/store/${slug}/config`)
-        } else if (updated.status === 'failed') {
-          clearInterval(pollRef.current)
-          setError('Activation failed: ' + (updated.error || 'unknown error'))
         }
       }, 2000)
     } catch (err) {
-      setError(err?.response?.data?.error || err.message)
+      const detail = err?.response?.data?.detail
+      const msg = (typeof detail === 'object' ? detail?.error : detail) || err?.response?.data?.error || err.message
+      const status = err?.response?.status
+      if (status === 500) {
+        setError('Activation failed: the server encountered an error processing this configuration. Check that all cameras are calibrated and all required fields are complete, then try again.')
+      } else if (status === 409) {
+        setError(msg || 'A configuration is already being activated. Please wait and try again.')
+      } else if (status === 422) {
+        setError(msg || 'Configuration is incomplete. Please review all steps before activating.')
+      } else {
+        setError(msg || 'Activation failed. Please try again.')
+      }
     } finally {
       setSaving(false)
     }
@@ -745,7 +976,14 @@ export default function StoreConfigEdit() {
             return (
               <button
                 key={s.n}
-                onClick={() => navigable && setStep(s.n)}
+                onClick={() => {
+                  if (!navigable) return
+                  if ((s.n === 5 || s.n === 7) && cameraConfigs.length > 0) {
+                    setSelectedConfigId(cameraConfigs[0].id)
+                  }
+                  setError(null)
+                  setStep(s.n)
+                }}
                 disabled={!navigable}
                 className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left ${
                   current
@@ -982,20 +1220,58 @@ export default function StoreConfigEdit() {
               <div className="space-y-1 max-w-lg">
                 <p className="text-xs font-medium text-gray-500 uppercase mb-2">Placed Cameras</p>
                 {cameraConfigs.map(cc => (
-                  <div key={cc.id}
-                    className="flex items-center justify-between bg-gray-50 border border-gray-100 rounded px-3 py-2 text-sm"
-                  >
-                    <span className="font-medium">{cc.physical_camera_name}</span>
-                    <span className="text-xs text-gray-400 mx-2">
-                      ({Math.round(cc.position_x)}, {Math.round(cc.position_y)})
-                      {cc.height_meters != null ? ` · ${cc.height_meters}m` : ''}
-                    </span>
-                    <button
-                      onClick={() => handleDeleteCamera(cc)}
-                      className="text-xs text-red-400 hover:text-red-600 flex-shrink-0"
-                    >
-                      Delete
-                    </button>
+                  <div key={cc.id} className="bg-gray-50 border border-gray-100 rounded text-sm">
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <span className="font-medium">{cc.physical_camera_name}</span>
+                      <span className="text-xs text-gray-400 mx-2">
+                        ({Math.round(cc.position_x)}, {Math.round(cc.position_y)})
+                        {cc.height_meters != null ? ` · ${cc.height_meters}m` : ''}
+                      </span>
+                      <div className="flex gap-2 flex-shrink-0">
+                        <button
+                          onClick={() => {
+                            if (editingConfigId === cc.id) { setEditingConfigId(null); return }
+                            setEditingConfigId(cc.id)
+                            setEditCameraForm({
+                              height_meters: cc.height_meters ?? '',
+                            })
+                          }}
+                          className="text-xs text-blue-500 hover:text-blue-700"
+                        >
+                          {editingConfigId === cc.id ? 'Cancel' : 'Edit'}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteCamera(cc)}
+                          className="text-xs text-red-400 hover:text-red-600"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                    {editingConfigId === cc.id && (
+                      <form
+                        onSubmit={handleUpdateCameraConfig}
+                        className="border-t border-gray-200 px-3 py-2 flex items-center gap-3 flex-wrap"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <label className="text-xs text-gray-500">Height (m):</label>
+                          <input
+                            type="number" step="0.1" min="0.1"
+                            value={editCameraForm.height_meters}
+                            onChange={e => setEditCameraForm(f => ({ ...f, height_meters: e.target.value }))}
+                            className="w-20 border border-gray-300 rounded px-2 py-1 text-xs"
+                            placeholder="e.g. 3.5"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={saving}
+                          className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium disabled:opacity-50"
+                        >
+                          {saving ? 'Saving…' : 'Save'}
+                        </button>
+                      </form>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1076,7 +1352,7 @@ export default function StoreConfigEdit() {
             <div>
               <h2 className="text-xl font-semibold mb-1">Point Correspondences</h2>
               <p className="text-sm text-gray-500">
-                For each camera: click a point on its frame, then click the matching spot on the floor plan. Repeat ≥ 4 times.
+                For each camera: click a point on its frame, then click the matching spot on the floor plan. Repeat ≥ 8 times, spread across the full frame.
                 {pendingPixelPt && (
                   <span className="ml-2 text-blue-600 font-medium">→ Now click the matching location on the floor plan</span>
                 )}
@@ -1139,6 +1415,7 @@ export default function StoreConfigEdit() {
                     activeConfigId={selectedConfigId}
                     correspondencePoints={activeCorrespondences.map(c => c.world)}
                     onCanvasClick={pendingPixelPt ? handleMapClickForCorrespondence : null}
+                    showGrid={true}
                     width={380} height={280}
                   />
                 </div>
@@ -1199,7 +1476,7 @@ export default function StoreConfigEdit() {
                   {!alreadyDone && (
                     <button
                       onClick={() => handleComputeHomographyFor(cc.id)}
-                      disabled={corr.length < 4 || saving}
+                      disabled={corr.length < 8 || saving}
                       className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm disabled:opacity-50"
                     >
                       {saving ? 'Computing…' : `Compute (${corr.length} pairs)`}
@@ -1259,29 +1536,48 @@ export default function StoreConfigEdit() {
 
             {selectedConfig && (
               <>
+                {correctionMode ? (
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+                    {!correctionPixel
+                      ? '1. Click the inaccurate point on the camera frame.'
+                      : '2. Now click its correct location on the floor plan.'}
+                    <button onClick={() => { setCorrectionMode(false); setCorrectionPixel(null) }}
+                      className="ml-3 text-xs text-amber-600 underline">Cancel</button>
+                  </div>
+                ) : null}
+
                 <div className="flex gap-4 items-start flex-wrap">
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs text-gray-500 mb-1 font-medium">Camera Frame — click a point to project</p>
+                    <p className="text-xs text-gray-500 mb-1 font-medium">
+                      {correctionMode && !correctionPixel ? '→ Click inaccurate point on frame' : 'Camera Frame — click a point to project'}
+                    </p>
                     <FrameStage
                       frameUrl={selectedConfig.frame_url}
                       width={380} height={280}
-                      points={verifyPreview?.pixel ? [verifyPreview.pixel] : []}
-                      onCanvasClick={handleFrameClickForVerify}
+                      points={correctionMode && correctionPixel
+                        ? [correctionPixel]
+                        : verifyPreview?.pixel ? [verifyPreview.pixel] : []}
+                      onCanvasClick={correctionMode && !correctionPixel
+                        ? handleFrameClickForCorrection
+                        : (!correctionMode ? handleFrameClickForVerify : null)}
                     />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs text-gray-500 mb-1 font-medium">Floor Plan — projected location</p>
+                    <p className="text-xs text-gray-500 mb-1 font-medium">
+                      {correctionMode && correctionPixel ? '→ Click correct location on floor plan' : 'Floor Plan — projected location'}
+                    </p>
                     <FloorPlanStage
                       floorPlan={floorPlan}
                       cameraConfigs={cameraConfigs}
                       activeConfigId={selectedConfigId}
-                      correspondencePoints={verifyPreview?.world ? [verifyPreview.world] : []}
+                      correspondencePoints={verifyPreview?.world && !correctionMode ? [verifyPreview.world] : []}
+                      onCanvasClick={correctionMode && correctionPixel ? handleMapClickForCorrection : null}
                       width={380} height={280}
                     />
                   </div>
                 </div>
 
-                {verifyPreview?.world && (
+                {verifyPreview?.world && !correctionMode && (
                   <p className="text-sm text-gray-600">
                     Projected: ({verifyPreview.world[0].toFixed(2)}, {verifyPreview.world[1].toFixed(2)}) m
                   </p>
@@ -1293,14 +1589,23 @@ export default function StoreConfigEdit() {
                   </p>
                 )}
 
-                <div className="flex gap-3 items-center">
+                <div className="flex gap-3 items-center flex-wrap">
                   <button
                     onClick={handleVerifyCalibration}
-                    disabled={saving || selectedConfig.status === 'verified'}
+                    disabled={saving || selectedConfig.status === 'verified' || correctionMode}
                     className="px-5 py-2 bg-green-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
                   >
                     {saving ? 'Saving…' : selectedConfig.status === 'verified' ? '✓ Verified' : 'Looks Good'}
                   </button>
+                  {!correctionMode && calibResultsMap[selectedConfigId] && (
+                    <button
+                      onClick={() => { setCorrectionMode(true); setCorrectionPixel(null) }}
+                      disabled={saving}
+                      className="px-5 py-2 bg-amber-500 text-white rounded-lg text-sm font-medium hover:bg-amber-600 disabled:opacity-50"
+                    >
+                      Correct Point
+                    </button>
+                  )}
                   {selectedConfig.status === 'verified' && cameraConfigs.some(cc => cc.status !== 'verified') && (
                     <p className="text-sm text-gray-500">Switch to the next camera above to verify it.</p>
                   )}
@@ -1316,7 +1621,7 @@ export default function StoreConfigEdit() {
             <div>
               <h2 className="text-xl font-semibold mb-1">Draw Zones & Obstacles</h2>
               <p className="text-sm text-gray-500">
-                Click to place vertices. Click near the first vertex to close the polygon, then name it.
+                Click to place vertices (minimum 3). Use "Close &amp; Save" to finish the polygon, or click near the first vertex to close it.
               </p>
             </div>
 
@@ -1333,6 +1638,19 @@ export default function StoreConfigEdit() {
                   Draw {dm}
                 </button>
               ))}
+              {inProgressPoints.length >= 3 && (
+                <button
+                  onClick={() => {
+                    setPendingPolygon({ points: [...inProgressPoints], mode: drawMode })
+                    setPendingName('')
+                    setPendingZoneType('general')
+                    setInProgressPoints([])
+                  }}
+                  className="px-3 py-1.5 rounded border text-sm bg-green-600 text-white border-green-600 hover:bg-green-700"
+                >
+                  Close & Save ({inProgressPoints.length} pts)
+                </button>
+              )}
               {inProgressPoints.length > 0 && (
                 <button onClick={() => setInProgressPoints([])}
                   className="text-sm text-gray-500 hover:text-gray-700">
@@ -1357,8 +1675,8 @@ export default function StoreConfigEdit() {
               zones={zones}
               obstacles={obstacles}
               cameraConfigs={cameraConfigs}
-              overlayPoints={inProgressPoints}
-              overlayMode={drawMode}
+              overlayPoints={pendingPolygon ? pendingPolygon.points : inProgressPoints}
+              overlayMode={pendingPolygon ? pendingPolygon.mode : drawMode}
               onCanvasClick={!pendingPolygon ? handleMapClickForDrawing : null}
             />
 
@@ -1515,14 +1833,12 @@ export default function StoreConfigEdit() {
                   />
                 </div>
                 <div className="flex gap-3 flex-wrap">
-                  {mode === 'editing' && (
-                    <button
-                      onClick={() => navigate(`/store/${slug}/config`)}
-                      className="px-6 py-2.5 bg-gray-200 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-300"
-                    >
-                      Save Draft &amp; Exit
-                    </button>
-                  )}
+                  <button
+                    onClick={() => navigate(`/store/${slug}/config`)}
+                    className="px-6 py-2.5 bg-gray-200 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-300"
+                  >
+                    Save Draft &amp; Exit
+                  </button>
                   <button
                     onClick={handleActivate}
                     disabled={saving}
@@ -1535,12 +1851,9 @@ export default function StoreConfigEdit() {
             ) : (
               <div>
                 {syncEvent.status === 'pending' && (
-                  <div className="text-center py-6">
-                    <p className="text-5xl font-bold text-blue-600 tabular-nums">
-                      {Math.max(0, Math.round(syncEvent.remaining_seconds ?? 0))}s
-                    </p>
-                    <p className="text-sm text-gray-500 mt-2">Configuration activating…</p>
-                    <div className="mt-4 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                  <div className="py-4 space-y-2">
+                    <p className="text-sm text-gray-500">Configuration activating…</p>
+                    <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
                       <div
                         className="h-full bg-blue-500 rounded-full transition-all"
                         style={{
@@ -1566,21 +1879,29 @@ export default function StoreConfigEdit() {
         {/* ── Navigation ────────────────────────────────────────────────── */}
         <div className="flex items-center justify-between mt-8 pt-4 border-t border-gray-100">
           <button
-            onClick={() => setStep(s => Math.max(1, s - 1))}
+            onClick={() => { setError(null); setStep(s => Math.max(1, s - 1)) }}
             disabled={step === 1}
             className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 disabled:opacity-40"
           >
             ← Back
           </button>
-          {step < 9 && (
+          <div className="flex items-center gap-3">
             <button
-              onClick={() => setStep(s => s + 1)}
-              disabled={mode === 'onboarding' && !isStepComplete(step)}
-              className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+              onClick={() => navigate(`/store/${slug}/config`)}
+              className="px-4 py-2 text-sm border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50"
             >
-              Continue →
+              Save &amp; Exit
             </button>
-          )}
+            {step < 9 && (
+              <button
+                onClick={() => { setError(null); setStep(s => s + 1) }}
+                disabled={mode === 'onboarding' && !isStepComplete(step)}
+                className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+              >
+                Continue →
+              </button>
+            )}
+          </div>
         </div>
       </main>
     </div>

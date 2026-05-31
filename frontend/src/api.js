@@ -81,6 +81,12 @@ export const refreshTokens = (refresh_token) =>
 export const logout = (refresh_token) =>
   api.post('/auth/logout', { refresh_token }).then(r => r.data)
 
+export const forgotPassword = (email) =>
+  api.post('/auth/forgot-password', { email }).then(r => r.data)
+
+export const resetPassword = (token, new_password) =>
+  api.post('/auth/reset-password', { token, new_password }).then(r => r.data)
+
 export const acceptInvite = (slug, token, name, password) =>
   api.post(`/store/${slug}/accept-invite`, { token, name, password }).then(r => r.data)
 
@@ -97,6 +103,9 @@ export const getStore = (slug) =>
 
 export const patchStore = (slug, body) =>
   api.patch(`/store/${slug}`, body).then(r => r.data)
+
+export const deleteStore = (slug) =>
+  api.delete(`/store/${slug}`).then(r => r.data)
 
 export const getMe = (slug) =>
   api.get(`/store/${slug}/me`).then(r => r.data)

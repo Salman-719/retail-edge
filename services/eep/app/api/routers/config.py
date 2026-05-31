@@ -16,6 +16,7 @@ from app.models.obstacle import Obstacle
 from app.models.physical_camera import PhysicalCamera
 from app.models.section import Section
 from app.models.version import StoreConfigVersion
+from app.models.version_sync_event import VersionSyncEvent
 from app.models.zone import Zone
 from app.schemas.config import (
     ActiveVersionResponse,
@@ -55,7 +56,35 @@ async def list_versions(
         .where(StoreConfigVersion.store_id == ctx.store_id)
         .order_by(StoreConfigVersion.created_at.desc())
     )
-    return result.scalars().all()
+    versions = result.scalars().all()
+
+    # Attach the pending sync event id to draft versions
+    items = []
+    for v in versions:
+        pending_event_id = None
+        if v.status == "draft":
+            ev_result = await db.execute(
+                select(VersionSyncEvent.id)
+                .where(
+                    VersionSyncEvent.version_id == v.id,
+                    VersionSyncEvent.status == "pending",
+                )
+                .order_by(VersionSyncEvent.scheduled_at.desc())
+                .limit(1)
+            )
+            row = ev_result.scalar_one_or_none()
+            if row:
+                pending_event_id = row
+        items.append(VersionListItem(
+            id=v.id,
+            label=v.label,
+            status=v.status,
+            active_from=v.active_from,
+            active_until=v.active_until,
+            created_at=v.created_at,
+            pending_sync_event_id=pending_event_id,
+        ))
+    return items
 
 
 @router.get("/store/{slug}/versions/active", response_model=ActiveVersionResponse)
@@ -225,7 +254,7 @@ async def reactivate_version(
     version.active_until = None
 
     await write_audit_log(
-        db, "version_reactivated",
+        db, "version_activated",
         store_id=ctx.store_id, user_id=ctx.user_id,
         entity_type="store_config_version", entity_id=version_id,
     )
