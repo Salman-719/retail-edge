@@ -17,6 +17,8 @@
   canvas { background: #000; border: 1px solid #333; max-width: 100%; display: block; }
   button { padding: 7px 16px; cursor: pointer; background: #2a6ef5; color: #fff; border: none; border-radius: 4px; font-size: 14px; }
   button:hover { background: #1a5ee0; }
+  button.danger { background: #c62828; }
+  button.danger:hover { background: #b71c1c; }
   #playbackSection { display: none; }
   input[type=range] { width: 100%; margin: 8px 0; }
   .meta { font-size: 12px; color: #9ad; margin-top: 6px; }
@@ -40,6 +42,7 @@
       <h2>Upload</h2>
       <input type="file" id="fileInput" accept="video/*" style="margin-right:8px" />
       <button id="uploadBtn">Upload &amp; Process</button>
+      <button id="clearBtn" class="danger" style="display:none;margin-left:8px">Clear Saved Video</button>
       <div class="meta" id="uploadStatus"></div>
     </section>
 
@@ -162,6 +165,18 @@ function renderPlayback(index) {
 
 slider.addEventListener("input", () => renderPlayback(parseInt(slider.value, 10)));
 
+const clearBtn = document.getElementById("clearBtn");
+
+clearBtn.addEventListener("click", async () => {
+  clearBtn.disabled = true;
+  const res = await fetch("/clear-tmp", { method: "POST" });
+  const data = await res.json();
+  document.getElementById("uploadStatus").textContent =
+    `Cleared ${data.removed} file(s) from server storage.`;
+  clearBtn.style.display = "none";
+  clearBtn.disabled = false;
+});
+
 let socket = null;
 
 function openSocket() {
@@ -178,6 +193,7 @@ function openSocket() {
       slider.value = 0;
       playbackSection.style.display = "block";
       renderPlayback(0);
+      clearBtn.style.display = "inline-block";
       return;
     }
 
@@ -202,6 +218,7 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
   personCountEl.textContent = "0";
   personListEl.innerHTML = "";
   playbackSection.style.display = "none";
+  clearBtn.style.display = "none";
   liveMeta.textContent = "Uploading…";
 
   openSocket();

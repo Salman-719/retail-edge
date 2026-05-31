@@ -149,6 +149,19 @@ async def frames():
     }
 
 
+@app.post("/clear-tmp")
+async def clear_tmp():
+    """Delete all uploaded video files from the tmp directory."""
+    removed = 0
+    if os.path.isdir(TMP_DIR):
+        for name in os.listdir(TMP_DIR):
+            path = os.path.join(TMP_DIR, name)
+            if os.path.isfile(path):
+                os.remove(path)
+                removed += 1
+    return {"removed": removed}
+
+
 @app.get("/")
 async def index():
     return FileResponse(os.path.join(UI_DIR, "index.html"))
