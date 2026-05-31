@@ -5,11 +5,19 @@ Steps 4 and 5 extend these without modifying this file.
 """
 from dataclasses import dataclass, field
 
+try:
+    from .gallery import EmbeddingGallery
+except ImportError:
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    from gallery import EmbeddingGallery
+
 
 @dataclass
 class ActiveTrack:
     local_id: int
     track_id: int
+    gallery: EmbeddingGallery
 
 
 @dataclass
@@ -22,3 +30,4 @@ class PendingTrack:
 class LostEntry:
     local_id: int
     lost_at_frame: int  # TTL anchor used in Step 4
+    gallery: EmbeddingGallery

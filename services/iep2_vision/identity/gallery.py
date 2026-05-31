@@ -66,6 +66,10 @@ class EmbeddingGallery:
             self._recompute_centroid()
         # Otherwise discard silently.
 
+    @property
+    def is_init_phase(self) -> bool:
+        return self._is_init_phase
+
     def snapshot_centroid(self) -> np.ndarray | None:
         """Return the current L2-normalized centroid, or None if gallery is empty."""
         return self._centroid
