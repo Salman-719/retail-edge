@@ -102,6 +102,7 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
+      DEBUG_MODE: ${DEBUG_MODE:-true}
     depends_on:
       postgres:
         condition: service_healthy

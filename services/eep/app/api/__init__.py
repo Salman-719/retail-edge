@@ -25,3 +25,8 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(audit_router, prefix="/api")
     app.include_router(settings_router, prefix="/api")
     app.include_router(schedules_router, prefix="/api")
+
+    import os
+    if os.environ.get("DEBUG_MODE", "").lower() == "true":
+        from app.api.routers.debug import router as debug_router
+        app.include_router(debug_router)
