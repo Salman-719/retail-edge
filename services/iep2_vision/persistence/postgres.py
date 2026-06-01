@@ -11,21 +11,6 @@ from dotenv import load_dotenv
 
 log = logging.getLogger("iep2.persistence")
 
-_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS tracking_history (
-    id          SERIAL PRIMARY KEY,
-    local_id    INTEGER NOT NULL,
-    track_id    INTEGER NOT NULL,
-    camera_id   TEXT NOT NULL,
-    frame_index INTEGER NOT NULL,
-    x1          INTEGER NOT NULL,
-    y1          INTEGER NOT NULL,
-    x2          INTEGER NOT NULL,
-    y2          INTEGER NOT NULL,
-    confidence  REAL NOT NULL
-);
-"""
-
 _INSERT_SQL = """
 INSERT INTO tracking_history
     (local_id, track_id, camera_id, frame_index, x1, y1, x2, y2, confidence)
@@ -47,13 +32,6 @@ class TrackingPersistence:
         log.info("Connecting to DB  camera=%s  dsn=%s", camera_id, _redact(connection_string))
         self._conn = psycopg2.connect(connection_string)
         log.info("DB connected.")
-
-    def create_table(self) -> None:
-        """Create tracking_history if it does not exist. Idempotent."""
-        with self._conn.cursor() as cur:
-            cur.execute(_CREATE_TABLE_SQL)
-        self._conn.commit()
-        log.info("Table tracking_history ready.")
 
     def write_detection(
         self,
@@ -94,7 +72,6 @@ if __name__ == "__main__":
     url = os.environ["DATABASE_URL"]
 
     db = TrackingPersistence(url, camera_id="cam-smoke-test")
-    db.create_table()
 
     # Clean up any leftover rows from previous runs so count is always 3.
     with db._conn.cursor() as cur:

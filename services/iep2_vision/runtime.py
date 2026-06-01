@@ -106,7 +106,6 @@ class IEP2Runtime:
         camera_id = self.settings.camera_id
         log.info("Opening DB connection  camera=%s", camera_id)
         db = TrackingPersistence(self.settings.database_url, camera_id)
-        db.create_table()
         self._start_ms = start_ms
         try:
             yield self._stream_from_source(self._video_source(video_path), db)
@@ -136,7 +135,6 @@ class IEP2Runtime:
         )
         log.info("Opening DB connection  camera=%s", camera_id)
         db = TrackingPersistence(self.settings.database_url, camera_id)
-        db.create_table()
         try:
             yield self._stream_from_source(source.frames(), db, live_pub=live_pub)
         finally:

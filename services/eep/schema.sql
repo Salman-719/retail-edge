@@ -684,3 +684,53 @@ CREATE INDEX idx_test_runs_status          ON test_runs(store_id, status);
 CREATE INDEX idx_test_runs_expires         ON test_runs(expires_at) WHERE status = 'complete';
 CREATE INDEX idx_test_run_cameras_run      ON test_run_cameras(test_run_id);
 CREATE INDEX idx_test_run_cameras_physical ON test_run_cameras(physical_camera_id);
+
+-- ============================================================================
+-- DOMAIN 9 — Vision Pipeline
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS tracking_history (
+    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    camera_id        TEXT        NOT NULL,
+    local_id         UUID        NOT NULL,
+    timestamp_ms     BIGINT      NOT NULL,
+    floor_x          DOUBLE PRECISION,
+    floor_y          DOUBLE PRECISION,
+    zone_id          UUID        REFERENCES zones(id) ON DELETE SET NULL,
+    bbox_confidence  REAL        NOT NULL,
+    bbox_area        INTEGER     NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracking_history_camera_ts
+    ON tracking_history(camera_id, timestamp_ms);
+
+CREATE INDEX IF NOT EXISTS idx_tracking_history_store_ts
+    ON tracking_history(store_id, timestamp_ms);
+
+
+CREATE TABLE IF NOT EXISTS camera_schedules (
+    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    camera_config_id UUID        NOT NULL REFERENCES camera_configs(id) ON DELETE CASCADE,
+    days_of_week     INTEGER[]   NOT NULL,
+    start_time       TIME        NOT NULL,
+    end_time         TIME        NOT NULL,
+    is_active        BOOLEAN     NOT NULL DEFAULT true,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+
+CREATE TABLE IF NOT EXISTS edge_agents (
+    id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id           UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE UNIQUE,
+    status             TEXT        NOT NULL
+                                   CHECK (status IN ('online', 'offline'))
+                                   DEFAULT 'offline',
+    last_heartbeat_at  TIMESTAMPTZ,
+    agent_version      TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
