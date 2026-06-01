@@ -20,10 +20,12 @@ class FakePersistence:
         self.centroids: list[dict] = []
 
     def append_position(self, local_id, camera_id, timestamp_ms, floor_x, floor_y,
-                        zone_id, bbox_confidence, bbox_area) -> None:
+                        zone_id, bbox_confidence, bbox_area,
+                        bbox_x1=0.0, bbox_y1=0.0, bbox_x2=0.0, bbox_y2=0.0) -> None:
         self.positions.append(dict(local_id=local_id, camera_id=camera_id, timestamp_ms=timestamp_ms,
                                    floor_x=floor_x, floor_y=floor_y, zone_id=zone_id,
-                                   bbox_confidence=bbox_confidence, bbox_area=bbox_area))
+                                   bbox_confidence=bbox_confidence, bbox_area=bbox_area,
+                                   bbox_x1=bbox_x1, bbox_y1=bbox_y1, bbox_x2=bbox_x2, bbox_y2=bbox_y2))
 
     def flush_temp_positions(self, local_id, camera_id, positions) -> None:
         self.flushed.append(dict(local_id=local_id, camera_id=camera_id, count=len(positions)))

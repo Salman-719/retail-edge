@@ -30,3 +30,13 @@ class BatchEventEmitter:
 
     async def close(self) -> None:
         await self._r.aclose()
+
+
+class _NoOpEmitter:
+    """Used when EepHttpPersistence is active — EEP publishes batch_complete."""
+
+    async def emit(self, *args, **kwargs) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass

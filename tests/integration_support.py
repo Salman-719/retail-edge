@@ -14,7 +14,7 @@ RUN = os.getenv("RV_RUN_INTEGRATION") == "1"
 
 _TABLES = (
     "tracking_history, local_embeddings, local_centroids, "
-    "global_tracking_history, global_local_mapping, global_embeddings, "
+    "global_tracking_history, global_local_mapping, global_embeddings, global_gallery_embeddings, "
     "global_identities, camera_calibrations"
 )
 

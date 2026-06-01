@@ -42,24 +42,42 @@ class DescriptorEmbedder:
     def extract(self, crop: np.ndarray) -> np.ndarray:
         if crop is None or crop.size == 0:
             return np.zeros(self.embedding_dim, dtype=np.float32)
-        import cv2
+        try:
+            import cv2
 
-        resized = cv2.resize(crop, (64, 128), interpolation=cv2.INTER_AREA)
-        hsv = cv2.cvtColor(resized, cv2.COLOR_BGR2HSV)
-        cell_h, cell_w = resized.shape[0] // 4, resized.shape[1] // 4
-        feats: list[np.ndarray] = []
-        for gy in range(4):
-            for gx in range(4):
-                cell = hsv[gy * cell_h:(gy + 1) * cell_h, gx * cell_w:(gx + 1) * cell_w]
-                h = cv2.calcHist([cell], [0], None, [16], [0, 180]).flatten()
-                s = cv2.calcHist([cell], [1], None, [8], [0, 256]).flatten()
-                v = cv2.calcHist([cell], [2], None, [8], [0, 256]).flatten()
-                feats.append(np.concatenate([h, s, v]))
+            resized = cv2.resize(crop, (64, 128), interpolation=cv2.INTER_AREA)
+            hsv = cv2.cvtColor(resized, cv2.COLOR_BGR2HSV)
+            cell_h, cell_w = resized.shape[0] // 4, resized.shape[1] // 4
+            feats: list[np.ndarray] = []
+            for gy in range(4):
+                for gx in range(4):
+                    cell = hsv[gy * cell_h:(gy + 1) * cell_h, gx * cell_w:(gx + 1) * cell_w]
+                    h = cv2.calcHist([cell], [0], None, [16], [0, 180]).flatten()
+                    s = cv2.calcHist([cell], [1], None, [8], [0, 256]).flatten()
+                    v = cv2.calcHist([cell], [2], None, [8], [0, 256]).flatten()
+                    feats.append(np.concatenate([h, s, v]))
+        except ModuleNotFoundError:
+            resized = _resize_nearest(crop, height=128, width=64)
+            cell_h, cell_w = resized.shape[0] // 4, resized.shape[1] // 4
+            feats = []
+            for gy in range(4):
+                for gx in range(4):
+                    cell = resized[gy * cell_h:(gy + 1) * cell_h, gx * cell_w:(gx + 1) * cell_w]
+                    b = np.histogram(cell[:, :, 0], bins=16, range=(0, 256))[0]
+                    g = np.histogram(cell[:, :, 1], bins=8, range=(0, 256))[0]
+                    r = np.histogram(cell[:, :, 2], bins=8, range=(0, 256))[0]
+                    feats.append(np.concatenate([b, g, r]))
         descriptor = np.concatenate(feats).astype(np.float32)  # 16 cells * 32 = 512
         return l2_normalize(descriptor)
 
     def batch_extract(self, crops: list[np.ndarray]) -> list[np.ndarray]:
         return [self.extract(c) for c in crops]
+
+
+def _resize_nearest(crop: np.ndarray, *, height: int, width: int) -> np.ndarray:
+    y_idx = np.linspace(0, crop.shape[0] - 1, height).astype(int)
+    x_idx = np.linspace(0, crop.shape[1] - 1, width).astype(int)
+    return crop[np.ix_(y_idx, x_idx)]
 
 
 class OSNetEmbedder:

@@ -10,6 +10,7 @@ from common.models.base import Base
 from common.models.iep2_tables import LocalCentroid, LocalEmbedding, TrackingHistory
 from common.models.iep3_tables import (
     GlobalEmbedding,
+    GlobalGalleryEmbedding,
     GlobalIdentity,
     GlobalLocalMapping,
     GlobalTrackingHistory,
@@ -24,6 +25,7 @@ __all__ = [
     "GlobalIdentity",
     "GlobalLocalMapping",
     "GlobalEmbedding",
+    "GlobalGalleryEmbedding",
     "GlobalTrackingHistory",
     "CameraCalibration",
 ]

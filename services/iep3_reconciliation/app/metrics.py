@@ -6,7 +6,36 @@ similarity distribution.
 
 from __future__ import annotations
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, start_http_server
+try:
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, start_http_server
+except ModuleNotFoundError:  # pragma: no cover - only used on lightweight hosts
+    class _NoopMetric:
+        def labels(self, *args, **kwargs):
+            return self
+
+        def observe(self, *args, **kwargs):
+            return None
+
+        def inc(self, *args, **kwargs):
+            return None
+
+        def set(self, *args, **kwargs):
+            return None
+
+    class CollectorRegistry:
+        pass
+
+    def Counter(*args, **kwargs):
+        return _NoopMetric()
+
+    def Gauge(*args, **kwargs):
+        return _NoopMetric()
+
+    def Histogram(*args, **kwargs):
+        return _NoopMetric()
+
+    def start_http_server(*args, **kwargs):
+        return None
 
 REGISTRY = CollectorRegistry()
 

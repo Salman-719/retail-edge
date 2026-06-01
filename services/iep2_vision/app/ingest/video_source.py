@@ -12,8 +12,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
+
+try:
+    import cv2
+except ModuleNotFoundError:  # pragma: no cover - lightweight test hosts monkeypatch this object
+    class _MissingCv2:
+        CAP_PROP_FPS = 5
+
+        def VideoCapture(self, *_args, **_kwargs):
+            raise RuntimeError("opencv-python-headless is required to read video sources")
+
+    cv2 = _MissingCv2()
 
 
 @dataclass

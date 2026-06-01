@@ -28,11 +28,18 @@ class FrameDetection:
 
 
 class VisionPipeline:
-    def __init__(self, detector, tracker, projector, settings):
+    def __init__(self, detector, tracker, projector, settings, tracker_factory=None):
         self._detector = detector
         self._tracker = tracker
+        self._tracker_factory = tracker_factory
         self._projector = projector
         self._s = settings
+
+    def reset_tracker(self) -> None:
+        """Reset tracker state after an explicit offline gap/window boundary."""
+        if self._tracker_factory is None:
+            return
+        self._tracker = self._tracker_factory()
 
     def process_frame(self, frame) -> tuple[list[FrameDetection], TrackerOutput, dict]:
         detections = self._detector.detect(frame)

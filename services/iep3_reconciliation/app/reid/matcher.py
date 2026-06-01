@@ -36,12 +36,18 @@ class ReidMatcher:
 
         survivors = []
         for g, cam_centroids in candidates:
-            if obs.camera_id in cam_centroids:
-                continue  # cross-camera only (spec invariant)
+            if obs.camera_id in cam_centroids and await self._repo.active_camera_seen_in_batch(
+                session, g.global_id, obs.camera_id, batch
+            ):
+                continue  # same-camera track is still alive; do not steal it
             if not self._gate_ok(obs, g):
                 continue
-            rep = l2_normalize(np.mean(list(cam_centroids.values()), axis=0))
-            survivors.append((g, cosine_similarity(new_centroid, rep)))
+            gallery = await self._repo.global_gallery(session, g.global_id)
+            representatives = [vec for _camera, vec in gallery] or list(cam_centroids.values())
+            if not representatives:
+                continue
+            best_similarity = max(cosine_similarity(new_centroid, l2_normalize(rep)) for rep in representatives)
+            survivors.append((g, best_similarity))
 
         above = [(g, s) for g, s in survivors if s >= self._s.reid_match_threshold]
         if not above:
@@ -50,6 +56,7 @@ class ReidMatcher:
             )
             await self._repo.link(session, gid, obs.camera_id, obs.local_id, batch)
             await self._repo.upsert_global_centroid(session, gid, obs.camera_id, new_centroid, batch)
+            await self._repo.refresh_global_gallery(session, gid, obs.camera_id, obs.local_id, new_centroid, batch)
             metrics.global_links.labels(outcome="new_global").inc()
             return
 
@@ -57,6 +64,9 @@ class ReidMatcher:
         was_lost = best_g.state == "lost"
         await self._repo.link(session, best_g.global_id, obs.camera_id, obs.local_id, batch)
         await self._repo.upsert_global_centroid(session, best_g.global_id, obs.camera_id, new_centroid, batch)
+        await self._repo.refresh_global_gallery(
+            session, best_g.global_id, obs.camera_id, obs.local_id, new_centroid, batch
+        )
         await self._repo.reactivate_if_lost(session, best_g.global_id, obs.last_seen_ts)
         metrics.global_links.labels(outcome="reactivated" if was_lost else "cross_camera").inc()
         metrics.match_similarity.observe(best_score)  # ML signal

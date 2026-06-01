@@ -8,16 +8,20 @@ import numpy as np
 
 
 def serialize_embedding(vec: np.ndarray) -> bytes:
-    """float32, contiguous, raw bytes. Dimension is implied by the active model."""
+    """float32, contiguous, raw bytes."""
     arr = np.ascontiguousarray(vec, dtype=np.float32)
     return arr.tobytes()
 
 
-def deserialize_embedding(blob: bytes, dim: int) -> np.ndarray:
-    """Inverse of serialize_embedding. ``dim`` comes from the active model's
-    embedding_dim, never hardcoded."""
+def deserialize_embedding(blob: bytes, dim: int | None = None) -> np.ndarray:
+    """Inverse of serialize_embedding.
+
+    When ``dim`` is provided, validate the stored vector against the active model.
+    When omitted, trust the blob length so old persisted embeddings remain readable
+    after switching ReID backends.
+    """
     arr = np.frombuffer(blob, dtype=np.float32)
-    if arr.shape[0] != dim:
+    if dim is not None and arr.shape[0] != dim:
         raise ValueError(f"embedding length {arr.shape[0]} != expected dim {dim}")
     return arr.copy()  # frombuffer is read-only; copy so callers can mutate
 

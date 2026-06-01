@@ -27,6 +27,10 @@ class TrackingHistory(Base):
     zone_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     bbox_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     bbox_area: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bbox_x1: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bbox_y1: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bbox_x2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bbox_y2: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         Index("ix_tracking_history_local_id_ts", "local_id", "timestamp_ms"),

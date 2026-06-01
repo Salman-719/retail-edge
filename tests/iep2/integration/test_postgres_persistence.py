@@ -26,8 +26,8 @@ async def test_positions_buffered_until_flush(pg):
 
     db = PostgresPersistence(get_settings())
     lid = uuid.uuid4()
-    db.append_position(lid, "cam1", 1000, 1.0, 2.0, "A", 0.9, 5000.0)
-    db.append_position(lid, "cam1", 1200, 1.1, 2.1, "A", 0.9, 5000.0)
+    db.append_position(lid, "cam1", 1000, 1.0, 2.0, "A", 0.9, 5000.0, 10.0, 20.0, 80.0, 220.0)
+    db.append_position(lid, "cam1", 1200, 1.1, 2.1, "A", 0.9, 5000.0, 11.0, 21.0, 81.0, 221.0)
     assert await _count("tracking_history") == 0  # still buffered
 
     await db.maybe_flush(force=True)
@@ -39,7 +39,10 @@ async def test_flush_temp_positions_writes_with_camera(pg):
 
     db = PostgresPersistence(get_settings())
     lid = uuid.uuid4()
-    positions = [TempPosition(1000 + i, float(i), float(i), "A", 0.8, 4000.0) for i in range(3)]
+    positions = [
+        TempPosition(1000 + i, float(i), float(i), "A", 0.8, 4000.0, 10.0, 20.0, 70.0, 180.0)
+        for i in range(3)
+    ]
     db.flush_temp_positions(lid, "cam2", positions)
     await db.maybe_flush(force=True)
     async with session_scope() as s:

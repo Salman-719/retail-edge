@@ -29,6 +29,10 @@ class PersistencePort(Protocol):
         zone_id: str | None,
         bbox_confidence: float,
         bbox_area: float,
+        bbox_x1: float,
+        bbox_y1: float,
+        bbox_x2: float,
+        bbox_y2: float,
     ) -> None:
         """Buffered; flushed on the 2s timer by the implementation."""
         ...

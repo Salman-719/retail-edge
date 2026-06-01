@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iaip2-detector-workers
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iaip2-detector-worker
+  template:
+    metadata:
+      labels:
+        app: iaip2-detector-worker
+    spec:
+      nodeSelector:
+        accelerator: nvidia
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: detector
+          image: retail-edge/iep2-vision:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "services.iep2_vision.app.workers.detector"]
+          envFrom:
+            - configMapRef:
+                name: retail-edge-config
+            - secretRef:
+                name: retail-edge-secrets
+          volumeMounts:
+            - name: frame-cache
+              mountPath: /app/runtime/frame-cache
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              memory: 8Gi
+            requests:
+              memory: 4Gi
+      volumes:
+        - name: frame-cache
+          persistentVolumeClaim:
+            claimName: vision-frame-cache

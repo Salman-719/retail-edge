@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: retail-edge-config
+data:
+  # ── Local Kafka (IEP1 → IEP2, never leaves the Jetson) ────────────────────
+  VISION_EVENT_BOOTSTRAP_SERVERS: "redpanda.retail-edge.svc.cluster.local:9092"
+  VISION_FRAME_REF_TOPIC: "vision.frame_ref.v1"
+
+  # ── Frame storage — local PVC (no S3 round-trip) ──────────────────────────
+  IEP1_FRAME_STORAGE: "filesystem"
+  IEP1_FRAME_CACHE_DIR: "/app/runtime/frame-cache"
+  IEP1_STREAM_RETRY_SECONDS: "10"
+
+  # ── Auto-start on pod boot (set to store UUID) ────────────────────────────
+  IEP1_AUTO_START_STORE_ID: "REPLACE_WITH_STORE_UUID"
+
+  # ── EEP on AWS — from CDK output RetailEdgeCluster.MasterPublicIp ─────────
+  # IEP2 POSTs tracking batches here; no direct DB or Redis access needed
+  EEP_BASE_URL: "http://REPLACE_WITH_MASTER_PUBLIC_IP"
+
+  # ── Detection / ReID — Orin Nano profile ──────────────────────────────────
+  BATCH_WINDOW_SECONDS: "2"
+  DETECTOR_BACKEND: "yolox_mot"
+  DETECTOR_FALLBACK_MODEL: "yolo11s.pt"
+  DETECTOR_ALLOW_FALLBACK: "true"
+  TRACKER_BACKEND: "botsort"
+  REID_BACKEND: "osnet"
+  REID_MODEL: "osnet_x0_25"
+  REID_MATCH_THRESHOLD: "0.70"
+  GALLERY_MAX_SIZE: "6"

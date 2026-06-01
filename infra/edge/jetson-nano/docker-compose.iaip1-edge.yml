@@ -1,0 +1,24 @@
+name: retail-edge-iaip1-edge
+
+services:
+  iaip1_ingestion:
+    image: ${IEP1_IMAGE:-retail-edge/iep1-ingestion:edge}
+    build:
+      context: ../../..
+      dockerfile: services/iep1_ingestion/Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - ${IEP1_EDGE_ENV_FILE:-/etc/retail-edge/iaip1-edge.env}
+    environment:
+      IEP1_FRAME_CACHE_DIR: /app/runtime/frame-cache
+      YOLO_CONFIG_DIR: /tmp/ultralytics
+    volumes:
+      - /var/lib/retail-edge/frame-cache:/app/runtime/frame-cache
+      - /etc/retail-edge/ca:/etc/retail-edge/ca:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

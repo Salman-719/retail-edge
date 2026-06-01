@@ -144,10 +144,13 @@ class ByteTrackTracker:
     """Motion-only ByteTrack via boxmot. Continuous for the process lifetime."""
 
     def __init__(self, min_hits: int, max_age: int, track_thresh: float, match_thresh: float):
-        from boxmot import ByteTrack  # heavy dep; imported lazily
+        from boxmot.trackers.bytetrack.bytetrack import ByteTrack  # heavy dep; imported lazily
 
         self._tracker = ByteTrack(
-            track_thresh=track_thresh, match_thresh=match_thresh, track_buffer=max_age
+            min_hits=min_hits,
+            track_thresh=track_thresh,
+            match_thresh=match_thresh,
+            track_buffer=max_age,
         )
         self._min_hits = min_hits
         self._known_ids: set[int] = set()
@@ -180,11 +183,20 @@ class BotSortTracker(ByteTrackTracker):
     """Appearance-aided BoT-SORT via boxmot (upgrade path). Same protocol."""
 
     def __init__(self, min_hits: int, max_age: int, track_thresh: float, match_thresh: float):
-        from pathlib import Path
+        from boxmot.reid.core.reid import ReID
+        from boxmot.trackers.botsort.botsort import BotSort
 
-        from boxmot import BotSort
-
-        self._tracker = BotSort(reid_weights=Path("osnet_x0_25_msmt17.pt"), device="cpu", half=False)
+        reid_model = ReID(device="cpu", half=False).model
+        self._tracker = BotSort(
+            reid_model=reid_model,
+            min_hits=min_hits,
+            track_high_thresh=track_thresh,
+            track_low_thresh=min(0.1, track_thresh),
+            new_track_thresh=track_thresh,
+            match_thresh=match_thresh,
+            track_buffer=max_age,
+            with_reid=True,
+        )
         self._min_hits = min_hits
         self._known_ids = set()
 

@@ -1,0 +1,39 @@
+# Template — copy to stores/{store_id}/ and replace STORE_ID placeholder.
+# Apply with: kubectl apply -k infra/cloud/stores/{store_id}/
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iep3-STORE_ID
+  namespace: retail-edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iep3
+      store: STORE_ID
+  template:
+    metadata:
+      labels:
+        app: iep3
+        store: STORE_ID
+    spec:
+      containers:
+        - name: iep3
+          image: REPLACE_WITH_ECR_OR_REGISTRY/iep3-reconciliation:latest
+          command: ["python", "-m", "services.iep3_reconciliation.app.coordinator"]
+          env:
+            - name: STORE_ID
+              value: "STORE_ID"
+            - name: IEP3_REDIS_STREAM
+              value: "stream:store:STORE_ID:batch_complete"
+          envFrom:
+            - configMapRef:
+                name: retail-edge-config
+            - secretRef:
+                name: retail-edge-secrets
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi

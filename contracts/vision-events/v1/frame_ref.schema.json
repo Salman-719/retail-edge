@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://retailvision.local/contracts/vision-events/v1/frame_ref.schema.json",
+  "title": "FrameRefEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "schema_version",
+    "store_id",
+    "version_id",
+    "section_id",
+    "camera_id",
+    "camera_config_id",
+    "source_ts",
+    "sequence",
+    "frame_ref"
+  ],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": { "const": "vision.frame_ref.v1" },
+    "schema_version": { "const": "1.0" },
+    "store_id": { "type": "string", "format": "uuid" },
+    "version_id": { "type": "string", "format": "uuid" },
+    "section_id": { "type": "string", "format": "uuid" },
+    "camera_id": { "type": "string", "format": "uuid" },
+    "camera_config_id": { "type": "string", "format": "uuid" },
+    "source_ts": { "type": "string", "format": "date-time" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "frame_ref": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["uri"],
+      "properties": {
+        "uri": { "type": "string" },
+        "frame_index": { "type": "integer", "minimum": 0 },
+        "timestamp_sec": { "type": "number", "minimum": 0 },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "segment_ref": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "uri": { "type": "string" },
+        "start_ts": { "type": "string", "format": "date-time" },
+        "duration_sec": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

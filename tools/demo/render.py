@@ -1,70 +1,100 @@
 """Annotated-video rendering for the demo.
 
 A second pass over each camera's video that draws the reconciled **Global ID**
-(not the per-camera Local ID) onto frames, so the demo visually proves
-cross-camera identity consistency. Global IDs are resolved by joining
-``global_local_mapping``; floor positions come from ``tracking_history`` and are
-projected back to pixels via the inverse homography (no pixel bbox is stored and
-detection is not re-run -- a clean, schema-preserving demo path).
+and the per-camera **Local ID** onto the real IEP2 detection bounding boxes.
+Boxes come from ``tracking_history`` so rendering reads Marji's persisted
+production results instead of re-running detection.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import subprocess
 
-import numpy as np
 from sqlalchemy import text
 
 from common.db.engine import session_scope
 
 
-async def _load_homography(camera_id: str) -> np.ndarray:
-    async with session_scope() as session:
-        flat = (
-            await session.execute(
-                text("SELECT homography FROM camera_calibrations WHERE cam_id = :c"),
-                {"c": camera_id},
-            )
-        ).scalar_one()
-    return np.array(flat, dtype=np.float64).reshape(3, 3)
-
-
-async def _load_overlays(camera_id: str) -> list[tuple[int, float, float, str]]:
-    """Returns (timestamp_ms, floor_x, floor_y, global_id-or-'unmapped') sorted by time."""
+async def _load_overlays(camera_id: str) -> list[dict]:
+    """Return persisted detection boxes plus local/global IDs sorted by time."""
     async with session_scope() as session:
         rows = await session.execute(
             text(
                 """
-                SELECT th.timestamp_ms, th.floor_x, th.floor_y,
+                SELECT th.timestamp_ms, th.local_id::text AS local_id,
+                       th.bbox_x1, th.bbox_y1, th.bbox_x2, th.bbox_y2,
+                       th.bbox_confidence,
                        COALESCE(glm.global_id::text, 'unmapped') AS global_id
                 FROM tracking_history th
-                LEFT JOIN global_local_mapping glm
-                  ON th.local_id = glm.local_id AND glm.is_active = TRUE
+                LEFT JOIN LATERAL (
+                    SELECT global_id
+                    FROM global_local_mapping
+                    WHERE local_id = th.local_id
+                    ORDER BY linked_at_batch DESC
+                    LIMIT 1
+                ) glm ON TRUE
                 WHERE th.camera_id = :cam
                 ORDER BY th.timestamp_ms
                 """
             ),
             {"cam": camera_id},
         )
-        return [(r.timestamp_ms, r.floor_x, r.floor_y, r.global_id) for r in rows]
+        return [dict(r._mapping) for r in rows]
 
 
-def _floor_to_pixel(h_inv: np.ndarray, fx: float, fy: float) -> tuple[int, int] | None:
-    p = h_inv @ np.array([fx, fy, 1.0])
-    if abs(p[2]) < 1e-9:
-        return None
-    return int(p[0] / p[2]), int(p[1] / p[2])
+def _draw_label(cv2, frame, x: int, y: int, text_value: str, color: tuple[int, int, int]) -> None:
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.62
+    thickness = 2
+    (tw, th), baseline = cv2.getTextSize(text_value, font, scale, thickness)
+    y0 = max(0, y - th - baseline - 8)
+    cv2.rectangle(frame, (x, y0), (min(frame.shape[1] - 1, x + tw + 8), y0 + th + baseline + 8), color, -1)
+    cv2.putText(frame, text_value, (x + 4, y0 + th + 3), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+
+def _reencode_for_browser(path: Path) -> Path:
+    """Convert OpenCV's MP4 output to browser-safe H.264 when ffmpeg exists."""
+    if path.suffix.lower() != ".mp4" or shutil.which("ffmpeg") is None:
+        return path
+    tmp = path.with_name(f"{path.stem}.browser{path.suffix}")
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(path),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-an",
+            str(tmp),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        return path
+    tmp.replace(path)
+    return path
 
 
 async def render_camera(video_path: str, camera_id: str, output_path: str,
                         start_ms: int, sample_fps: float) -> str:
-    """Re-read the video, overlay each detection's GlobalID at its floor pixel,
+    """Re-read the video, overlay each persisted detection's IDs and bbox,
     write an annotated video. Returns the output path."""
     import cv2
 
     from tools.demo.colors import global_id_bgr
 
-    h_inv = np.linalg.inv(await _load_homography(camera_id))
     overlays = await _load_overlays(camera_id)
 
     cap = cv2.VideoCapture(video_path)
@@ -86,18 +116,30 @@ async def render_camera(video_path: str, camera_id: str, output_path: str,
         if not ok:
             break
         ts = start_ms + int((idx / src_fps) * 1000)
-        for o_ts, fx, fy, gid in overlays:
-            if abs(o_ts - ts) <= tol_ms:
-                px = _floor_to_pixel(h_inv, fx, fy)
-                if px is None:
-                    continue
-                color = global_id_bgr(gid)
-                cv2.circle(frame, px, 10, color, -1)
-                cv2.putText(frame, gid[:8], (px[0] + 12, px[1]), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6, color, 2, cv2.LINE_AA)
+        for item in overlays:
+            if abs(item["timestamp_ms"] - ts) > tol_ms:
+                continue
+            if None in (item["bbox_x1"], item["bbox_y1"], item["bbox_x2"], item["bbox_y2"]):
+                continue
+            gid = item["global_id"]
+            lid = item["local_id"]
+            color = global_id_bgr(gid)
+            x1 = max(0, min(w - 1, int(round(item["bbox_x1"]))))
+            y1 = max(0, min(h - 1, int(round(item["bbox_y1"]))))
+            x2 = max(0, min(w - 1, int(round(item["bbox_x2"]))))
+            y2 = max(0, min(h - 1, int(round(item["bbox_y2"]))))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+            conf = item["bbox_confidence"]
+            label = f"Global {gid[:8]} | Local {lid[:8]}"
+            if conf is not None:
+                label += f" | {float(conf):.2f}"
+            _draw_label(cv2, frame, x1, y1, label, color)
         writer.write(frame)
         idx += 1
 
     cap.release()
     writer.release()
+    out = _reencode_for_browser(out)
     return str(out)

@@ -1,0 +1,17 @@
+[Unit]
+Description=Retail Edge IAIP1 camera sampler
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/retail-edge
+EnvironmentFile=/etc/retail-edge/iaip1-edge.env
+ExecStart=/usr/bin/docker compose -f infra/edge/jetson-nano/docker-compose.iaip1-edge.yml --env-file /etc/retail-edge/iaip1-edge.env up --build
+ExecStop=/usr/bin/docker compose -f infra/edge/jetson-nano/docker-compose.iaip1-edge.yml --env-file /etc/retail-edge/iaip1-edge.env down
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

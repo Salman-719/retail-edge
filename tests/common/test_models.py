@@ -1,6 +1,6 @@
 """Foundation tests for the ORM model definitions.
 
-These assert at the metadata level (no DB required) that all eight subsystem
+These assert at the metadata level (no DB required) that the subsystem
 tables exist with the constraints the specs mandate -- in particular the partial
 unique index on global_local_mapping and the state check constraint. A real
 create_all against Postgres is exercised separately in the verification step.
@@ -20,6 +20,7 @@ EXPECTED_TABLES = {
     "global_identities",
     "global_local_mapping",
     "global_embeddings",
+    "global_gallery_embeddings",
     "global_tracking_history",
     "camera_calibrations",
 }

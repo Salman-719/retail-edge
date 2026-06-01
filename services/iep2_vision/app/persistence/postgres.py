@@ -31,13 +31,26 @@ class PostgresPersistence:
     # ---- positions (buffered, sync) ----
 
     def append_position(
-        self, local_id, camera_id, timestamp_ms, floor_x, floor_y, zone_id, bbox_confidence, bbox_area
+        self,
+        local_id,
+        camera_id,
+        timestamp_ms,
+        floor_x,
+        floor_y,
+        zone_id,
+        bbox_confidence,
+        bbox_area,
+        bbox_x1,
+        bbox_y1,
+        bbox_x2,
+        bbox_y2,
     ) -> None:
         self._pos_buffer.append(
             dict(
                 local_id=local_id, camera_id=camera_id, timestamp_ms=timestamp_ms,
                 floor_x=floor_x, floor_y=floor_y, zone_id=zone_id,
                 bbox_confidence=bbox_confidence, bbox_area=bbox_area,
+                bbox_x1=bbox_x1, bbox_y1=bbox_y1, bbox_x2=bbox_x2, bbox_y2=bbox_y2,
             )
         )
 
@@ -47,6 +60,7 @@ class PostgresPersistence:
                 local_id=local_id, camera_id=camera_id, timestamp_ms=p.timestamp_ms,
                 floor_x=p.floor_x, floor_y=p.floor_y, zone_id=p.zone_id,
                 bbox_confidence=p.bbox_confidence, bbox_area=p.bbox_area,
+                bbox_x1=p.bbox_x1, bbox_y1=p.bbox_y1, bbox_x2=p.bbox_x2, bbox_y2=p.bbox_y2,
             )
             for p in positions
         )

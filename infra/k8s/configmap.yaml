@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: retail-edge-config
+data:
+  VISION_EVENT_BOOTSTRAP_SERVERS: "redpanda.retail-edge.svc.cluster.local:9092"
+  VISION_KAFKA_SECURITY_PROTOCOL: "PLAINTEXT"
+  VISION_FRAME_REF_TOPIC: "vision.frame_ref.v1"
+  VISION_LOCAL_TRACK_TOPIC: "vision.local_track_observed.v1"
+  VISION_GLOBAL_IDENTITY_TOPIC: "vision.global_identity_observed.v1"
+  EVENT_BUS_BACKEND: "kafka"
+  IEP1_FRAME_CACHE_DIR: "/app/runtime/frame-cache"
+  IEP1_FRAME_STORAGE: "filesystem"
+  BATCH_WINDOW_SECONDS: "2"
+  DETECTOR_BACKEND: "yolox_mot"
+  DETECTOR_MODEL: "bytetrack_x_mot17"
+  DETECTOR_FALLBACK_MODEL: "yolo11x.pt"
+  DETECTOR_ALLOW_FALLBACK: "true"
+  TRACKER_BACKEND: "botsort"
+  REID_BACKEND: "osnet"
+  REID_MODEL: "osnet_x1_0"
+  REID_MATCH_THRESHOLD: "0.70"
+  GALLERY_MAX_SIZE: "6"
+  GLOBAL_GALLERY_MAX_SIZE: "6"
+  EEP_BASE_URL: "http://eep:8000"
+  STORE_ID: "00000000-0000-0000-0000-000000000001"
+  IEP3_CAMERA_IDS: "camera-1,camera-2"

@@ -90,6 +90,31 @@ class GlobalEmbedding(Base):
     __table_args__ = (Index("ix_global_embeddings_global_id", "global_id"),)
 
 
+class GlobalGalleryEmbedding(Base):
+    """Diverse gallery samples per GlobalID.
+
+    IEP3 keeps at most a small number of representative embeddings per global
+    identity. Matching uses max cosine similarity against this gallery, which is
+    more robust than comparing only one averaged centroid.
+    """
+
+    __tablename__ = "global_gallery_embeddings"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    global_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("global_identities.global_id"), nullable=False
+    )
+    camera_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_local_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    updated_at_batch: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        Index("ix_global_gallery_embeddings_global_id", "global_id"),
+        Index("ix_global_gallery_embeddings_camera_id", "camera_id"),
+    )
+
+
 class GlobalTrackingHistory(Base):
     """Canonical store-wide position log. One row per GlobalID per batch.
     Consumed by alerts, analytics, dashboards."""

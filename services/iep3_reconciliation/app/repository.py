@@ -7,12 +7,13 @@ from __future__ import annotations
 import uuid
 
 import numpy as np
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from common.models.iep2_tables import LocalCentroid
 from common.models.iep3_tables import (
     GlobalEmbedding,
+    GlobalGalleryEmbedding,
     GlobalIdentity,
     GlobalLocalMapping,
     GlobalTrackingHistory,
@@ -30,7 +31,7 @@ class Iep3Repository:
         blob = (
             await session.execute(select(LocalCentroid.centroid).where(LocalCentroid.local_id == local_id))
         ).scalar_one_or_none()
-        return deserialize_embedding(blob, self._s.embedding_dim) if blob is not None else None
+        return deserialize_embedding(blob) if blob is not None else None
 
     async def active_mapping_for(self, session, local_id) -> GlobalLocalMapping | None:
         return (
@@ -59,11 +60,32 @@ class Iep3Repository:
                     select(GlobalEmbedding).where(GlobalEmbedding.global_id == g.global_id)
                 )
             ).scalars().all()
-            centroids = {
-                c.camera_id: deserialize_embedding(c.centroid, self._s.embedding_dim) for c in cams
-            }
+            centroids = {c.camera_id: deserialize_embedding(c.centroid) for c in cams}
             result.append((g, centroids))
         return result
+
+    async def global_gallery(self, session, global_id) -> list[tuple[str, np.ndarray]]:
+        rows = (
+            await session.execute(
+                select(GlobalGalleryEmbedding).where(GlobalGalleryEmbedding.global_id == global_id)
+            )
+        ).scalars().all()
+        return [
+            (row.camera_id, deserialize_embedding(row.embedding))
+            for row in rows
+        ]
+
+    async def active_camera_seen_in_batch(self, session, global_id, camera_id, batch) -> bool:
+        return (
+            await session.execute(
+                select(GlobalLocalMapping.id).where(
+                    GlobalLocalMapping.global_id == global_id,
+                    GlobalLocalMapping.camera_id == camera_id,
+                    GlobalLocalMapping.is_active == True,  # noqa: E712
+                    GlobalLocalMapping.last_seen_batch >= batch,
+                )
+            )
+        ).first() is not None
 
     # ---- writes ----
 
@@ -132,6 +154,51 @@ class Iep3Repository:
         )
         await session.execute(stmt)
 
+    async def refresh_global_gallery(
+        self, session, global_id, camera_id, source_local_id, centroid: np.ndarray, batch
+    ) -> None:
+        rows = (
+            await session.execute(
+                select(GlobalGalleryEmbedding).where(GlobalGalleryEmbedding.global_id == global_id)
+            )
+        ).scalars().all()
+        entries = [
+            dict(
+                camera_id=row.camera_id,
+                source_local_id=row.source_local_id,
+                embedding=deserialize_embedding(row.embedding),
+                updated_at_batch=row.updated_at_batch,
+            )
+            for row in rows
+        ]
+        entries.append(
+            dict(
+                camera_id=camera_id,
+                source_local_id=source_local_id,
+                embedding=centroid,
+                updated_at_batch=batch,
+            )
+        )
+        latest_by_source = {}
+        for entry in entries:
+            key = (entry["camera_id"], entry["source_local_id"])
+            current = latest_by_source.get(key)
+            if current is None or entry["updated_at_batch"] >= current["updated_at_batch"]:
+                latest_by_source[key] = entry
+        entries = list(latest_by_source.values())
+        selected = _select_diverse_gallery(entries, max_size=self._s.global_gallery_max_size)
+        await session.execute(delete(GlobalGalleryEmbedding).where(GlobalGalleryEmbedding.global_id == global_id))
+        for entry in selected:
+            session.add(
+                GlobalGalleryEmbedding(
+                    global_id=global_id,
+                    camera_id=entry["camera_id"],
+                    source_local_id=entry["source_local_id"],
+                    embedding=serialize_embedding(entry["embedding"]),
+                    updated_at_batch=entry["updated_at_batch"],
+                )
+            )
+
     async def reactivate_if_lost(self, session, global_id, last_ts) -> None:
         await session.execute(
             update(GlobalIdentity)
@@ -148,3 +215,30 @@ class Iep3Repository:
 
     async def write_global_position(self, session, **row) -> None:
         session.add(GlobalTrackingHistory(**row))
+
+
+def _select_diverse_gallery(entries: list[dict], max_size: int) -> list[dict]:
+    """Farthest-first gallery selection with a small camera coverage bonus."""
+    if len(entries) <= max_size:
+        return entries
+
+    selected = [max(entries, key=lambda e: e["updated_at_batch"])]
+    remaining = [e for e in entries if e is not selected[0]]
+    while remaining and len(selected) < max_size:
+        selected_cameras = {e["camera_id"] for e in selected}
+
+        def score(entry: dict) -> float:
+            distances = [
+                1.0 - float(np.dot(
+                    entry["embedding"] / max(np.linalg.norm(entry["embedding"]), 1e-12),
+                    chosen["embedding"] / max(np.linalg.norm(chosen["embedding"]), 1e-12),
+                ))
+                for chosen in selected
+            ]
+            camera_bonus = 0.05 if entry["camera_id"] not in selected_cameras else 0.0
+            return min(distances) + camera_bonus
+
+        winner = max(remaining, key=score)
+        selected.append(winner)
+        remaining.remove(winner)
+    return selected

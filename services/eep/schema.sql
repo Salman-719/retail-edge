@@ -704,7 +704,11 @@ CREATE TABLE tracking_history (
     floor_y         FLOAT   NOT NULL,
     zone_id         VARCHAR(64),
     bbox_confidence FLOAT,
-    bbox_area       FLOAT
+    bbox_area       FLOAT,
+    bbox_x1         FLOAT,
+    bbox_y1         FLOAT,
+    bbox_x2         FLOAT,
+    bbox_y2         FLOAT
 );
 
 -- IEP2: persistent per-LocalID embedding store (crash recovery + audit)
@@ -760,6 +764,16 @@ CREATE TABLE global_embeddings (
     PRIMARY KEY (global_id, camera_id)
 );
 
+-- IEP3: diverse gallery samples per GlobalID for max-similarity ReID
+CREATE TABLE global_gallery_embeddings (
+    id               BIGSERIAL PRIMARY KEY,
+    global_id        UUID    NOT NULL REFERENCES global_identities(global_id),
+    camera_id        VARCHAR(64) NOT NULL,
+    source_local_id  UUID    NOT NULL,
+    embedding        BYTEA   NOT NULL,
+    updated_at_batch INTEGER NOT NULL
+);
+
 -- IEP3: canonical store-wide position log (one row per GlobalID per batch)
 CREATE TABLE global_tracking_history (
     id              BIGSERIAL PRIMARY KEY,
@@ -798,6 +812,8 @@ CREATE UNIQUE INDEX uq_glm_global_camera_active ON global_local_mapping(global_i
 CREATE INDEX ix_global_local_mapping_local_id     ON global_local_mapping(local_id);
 CREATE INDEX ix_global_local_mapping_global_active ON global_local_mapping(global_id, is_active);
 CREATE INDEX ix_global_embeddings_global_id  ON global_embeddings(global_id);
+CREATE INDEX ix_global_gallery_embeddings_global_id ON global_gallery_embeddings(global_id);
+CREATE INDEX ix_global_gallery_embeddings_camera_id ON global_gallery_embeddings(camera_id);
 CREATE INDEX ix_gth_global_ts ON global_tracking_history(global_id, timestamp_ms);
 CREATE INDEX ix_gth_store_ts  ON global_tracking_history(store_id, timestamp_ms);
 CREATE INDEX ix_gth_batch     ON global_tracking_history(batch_number);

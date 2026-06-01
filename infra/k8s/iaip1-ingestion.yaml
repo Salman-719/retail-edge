@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: iaip1-ingestion
+spec:
+  selector:
+    app: iaip1-ingestion
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iaip1-ingestion
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iaip1-ingestion
+  template:
+    metadata:
+      labels:
+        app: iaip1-ingestion
+    spec:
+      containers:
+        - name: iaip1-ingestion
+          image: retail-edge/iep1-ingestion:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - configMapRef:
+                name: retail-edge-config
+            - secretRef:
+                name: retail-edge-secrets
+          volumeMounts:
+            - name: frame-cache
+              mountPath: /app/runtime/frame-cache
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            periodSeconds: 30
+      volumes:
+        - name: frame-cache
+          persistentVolumeClaim:
+            claimName: vision-frame-cache

@@ -107,6 +107,10 @@ class LocalIdentityManager:
                 zone_id=det.zone_id,
                 bbox_confidence=det.confidence,
                 bbox_area=det.bbox.area,
+                bbox_x1=det.bbox.x1,
+                bbox_y1=det.bbox.y1,
+                bbox_x2=det.bbox.x2,
+                bbox_y2=det.bbox.y2,
             )
         )
         if len(pending.embeddings) < self._s.init_embeddings_count:
@@ -128,6 +132,7 @@ class LocalIdentityManager:
             self._db.append_position(
                 at.local_id, self._cam, timestamp_ms, at.floor_x, at.floor_y,
                 at.zone_id, det.confidence, det.bbox.area,
+                det.bbox.x1, det.bbox.y1, det.bbox.x2, det.bbox.y2,
             )
         if at.sample_counter >= self._s.sample_interval_frames:
             at.sample_counter = 0
@@ -192,6 +197,7 @@ class LocalIdentityManager:
         self._db.append_position(
             local_id, self._cam, timestamp_ms, det.floor_pos.x, det.floor_pos.y,
             det.zone_id, det.confidence, det.bbox.area,
+            det.bbox.x1, det.bbox.y1, det.bbox.x2, det.bbox.y2,
         )
         await self._db.write_embedding(local_id, self._cam, timestamp_ms, vec, det.confidence, is_init=True)
         await self._db.upsert_centroid(local_id, self._cam, gallery.snapshot_centroid(), self._batch_number)

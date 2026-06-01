@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eep
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: eep
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: eep
+    spec:
+      containers:
+        - name: eep
+          image: REPLACE_WITH_ECR_OR_REGISTRY/eep:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: retail-edge-config
+            - secretRef:
+                name: retail-edge-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 200m
+            limits:
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eep
+spec:
+  selector:
+    app: eep
+  ports:
+    - port: 8000
+      targetPort: 8000

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: retail-edge-config
+data:
+  REDIS_URL: "redis://redis.retail-edge.svc.cluster.local:6379/0"
+  S3_REGION: "me-south-1"
+  BATCH_WINDOW_SECONDS: "2"
+  REID_MATCH_THRESHOLD: "0.70"
+  GALLERY_MAX_SIZE: "6"

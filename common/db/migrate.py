@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from sqlalchemy import text
+
 from common.db.engine import dispose_engine, get_engine
 from common.models import Base
 
@@ -26,6 +28,8 @@ async def apply_schema() -> None:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        for column in ("bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"):
+            await conn.execute(text(f"ALTER TABLE tracking_history ADD COLUMN IF NOT EXISTS {column} FLOAT"))
     await dispose_engine()
 
 

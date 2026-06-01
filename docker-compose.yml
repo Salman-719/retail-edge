@@ -127,8 +127,8 @@ services:
 
   iep1_ingestion:
     build:
-      context: ./services/iep1_ingestion
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/iep1_ingestion/Dockerfile
     ports:
       - "8001:8001"
 
@@ -142,6 +142,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
       REDIS_URL: redis://redis:6379/0
+      TRACKER_BACKEND: botsort
       YOLO_CONFIG_DIR: /tmp/ultralytics
       MPLCONFIGDIR: /tmp/matplotlib
     volumes:
@@ -188,10 +189,37 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
       REDIS_URL: redis://redis:6379/0
+      TRACKER_BACKEND: botsort
       YOLO_CONFIG_DIR: /tmp/ultralytics
       MPLCONFIGDIR: /tmp/matplotlib
     volumes:
       - ./testing-data:/app/testing-data:ro
+      - iep2_model_cache:/root/.cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles: ["pipeline"]
+
+  vision_demo:
+    build:
+      context: .
+      dockerfile: tools/Dockerfile
+    command: ["uvicorn", "tools.demo.server:app", "--host", "0.0.0.0", "--port", "8002"]
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
+      REDIS_URL: redis://redis:6379/0
+      TRACKER_BACKEND: botsort
+      YOLO_CONFIG_DIR: /tmp/ultralytics
+      MPLCONFIGDIR: /tmp/matplotlib
+    volumes:
+      - ./testing-data:/app/testing-data:ro
+      - iep2_runtime:/app/runtime
       - iep2_model_cache:/root/.cache
     depends_on:
       postgres:
