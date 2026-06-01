@@ -212,6 +212,7 @@ CREATE TABLE floor_plans (
     world_x_max         FLOAT,
     world_y_min         FLOAT,
     world_y_max         FLOAT,
+    boundary_polygon        JSONB,
     image_uploaded      BOOLEAN NOT NULL DEFAULT FALSE,
     scale_defined       BOOLEAN NOT NULL DEFAULT FALSE,
     coordinate_frame_id UUID REFERENCES coordinate_frames(id) ON DELETE SET NULL,

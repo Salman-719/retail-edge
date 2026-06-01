@@ -53,7 +53,7 @@ from app.schemas.draft import (
 )
 from app.utils.homography import compute_homography
 from app.utils.calibration_xml import parse_intrinsic_xml, parse_extrinsic_xml
-from app.utils.shapely_utils import polygons_overlap
+from app.utils.shapely_utils import clamp_to_polygon, polygons_overlap
 
 router = APIRouter(tags=["draft"])
 
@@ -97,6 +97,7 @@ async def _camera_config_response(cc: CameraConfig, db: AsyncSession) -> CameraC
         position_y=cc.position_y,
         height_meters=cc.height_meters,
         fov_deg=cc.fov_deg,
+        stream_url=pc.cloud_stream_url,
         frame_url=frame_url,
         frame_captured_at=cc.frame_captured_at,
         status=cc.status,
@@ -543,6 +544,7 @@ async def get_draft_floor_plan(
         world_x_max=fp.world_x_max,
         world_y_min=fp.world_y_min,
         world_y_max=fp.world_y_max,
+        boundary_polygon=fp.boundary_polygon,
         image_uploaded=fp.image_uploaded,
         scale_defined=fp.scale_defined,
     )
@@ -584,6 +586,8 @@ async def set_floor_plan_scale(
     fp.origin_y = body.origin_y
     fp.pixels_per_meter = pixels_per_meter
     fp.scale_defined = True
+    if body.boundary_polygon is not None:
+        fp.boundary_polygon = body.boundary_polygon if len(body.boundary_polygon) >= 3 else None
     fp.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
@@ -598,6 +602,7 @@ async def set_floor_plan_scale(
         pixels_per_meter=fp.pixels_per_meter,
         world_x_min=fp.world_x_min, world_x_max=fp.world_x_max,
         world_y_min=fp.world_y_min, world_y_max=fp.world_y_max,
+        boundary_polygon=fp.boundary_polygon,
         image_uploaded=fp.image_uploaded, scale_defined=fp.scale_defined,
     )
 
@@ -606,7 +611,7 @@ async def set_floor_plan_scale(
     "/store/{slug}/draft/sections/{section_id}/floor-plan/world-bounds",
     response_model=FloorPlanDetailResponse,
 )
-async def set_floor_plan_world_bounds(
+async def set_floor_plan_boundary_polygon(
     slug: str,
     section_id: uuid.UUID,
     body: WorldBoundsRequest,
@@ -644,6 +649,7 @@ async def set_floor_plan_world_bounds(
         pixels_per_meter=fp.pixels_per_meter,
         world_x_min=fp.world_x_min, world_x_max=fp.world_x_max,
         world_y_min=fp.world_y_min, world_y_max=fp.world_y_max,
+        boundary_polygon=fp.boundary_polygon,
         image_uploaded=fp.image_uploaded, scale_defined=fp.scale_defined,
     )
 
