@@ -5,6 +5,7 @@ import { Plus, Pencil, Trash2, Check, X, Warehouse } from 'lucide-react'
 import {
   getDraft, getActiveVersion, listSections, listVersions, reactivateVersion,
   createSection, patchSection, deleteSection, getSyncEvent,
+  patchCamera, updateCameraConfig,
 } from '../api'
 import { usePageTitle } from '../components/PageMeta'
 import SectionTabs from '../components/SectionTabs'
@@ -355,6 +356,9 @@ export default function StoreConfig() {
   const [pendingSyncEvent, setPendingSyncEvent] = useState(null)
   const syncPollRef = useRef(null)
   const startAddingSectionRef = useRef(null)
+  const [editingCameraId, setEditingCameraId] = useState(null)
+  const [editCameraForm, setEditCameraForm] = useState({ height_meters: '', stream_url: '' })
+  const [savingCamera, setSavingCamera] = useState(false)
 
   function reload() {
     setLoading(true)
@@ -610,18 +614,94 @@ export default function StoreConfig() {
                 <h3 className="text-sm font-semibold text-gray-700 mb-3">
                   Cameras <span className="text-gray-400 font-normal">({selectedSection.camera_configs.length})</span>
                 </h3>
-                <div className="space-y-2">
+                <div className="space-y-1">
                   {selectedSection.camera_configs.map(cc => (
-                    <div key={cc.id} className="flex items-center gap-2 text-sm">
-                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                        cc.status === 'verified' ? 'bg-green-500' :
-                        cc.status === 'calibrated' ? 'bg-yellow-500' : 'bg-gray-400'
-                      }`} />
-                      <span className="text-gray-700 truncate">{cc.physical_camera_name}</span>
-                      {(!cc.position_x || cc.position_x === 0) && (!cc.position_y || cc.position_y === 0) && (
-                        <span className="text-[10px] bg-amber-50 text-amber-600 border border-amber-200 rounded px-1.5 py-0.5 ml-2 shrink-0">No position</span>
+                    <div key={cc.id} className="rounded border border-gray-100 text-sm">
+                      <div className="flex items-center gap-2 px-3 py-2">
+                        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                          cc.status === 'verified' ? 'bg-green-500' :
+                          cc.status === 'calibrated' ? 'bg-yellow-500' : 'bg-gray-400'
+                        }`} />
+                        <span className="text-gray-700 font-medium truncate">{cc.physical_camera_name}</span>
+                        {cc.height_meters != null && (
+                          <span className="text-xs text-gray-400">{cc.height_meters}m</span>
+                        )}
+                        {cc.stream_url && (
+                          <span className="text-xs text-gray-400 font-mono truncate max-w-[200px]">{cc.stream_url}</span>
+                        )}
+                        {(!cc.position_x || cc.position_x === 0) && (!cc.position_y || cc.position_y === 0) && (
+                          <span className="text-[10px] bg-amber-50 text-amber-600 border border-amber-200 rounded px-1.5 py-0.5 shrink-0">No position</span>
+                        )}
+                        <span className="text-gray-400 text-xs capitalize ml-auto">{cc.status}</span>
+                        <button
+                          onClick={() => {
+                            if (editingCameraId === cc.id) { setEditingCameraId(null); return }
+                            setEditingCameraId(cc.id)
+                            setEditCameraForm({ height_meters: cc.height_meters ?? '', stream_url: cc.stream_url ?? '' })
+                          }}
+                          className="text-xs text-blue-500 hover:text-blue-700 flex-shrink-0"
+                        >
+                          {editingCameraId === cc.id ? 'Cancel' : 'Edit'}
+                        </button>
+                      </div>
+                      {editingCameraId === cc.id && (
+                        <form
+                          onSubmit={async e => {
+                            e.preventDefault()
+                            setSavingCamera(true)
+                            try {
+                              const configBody = {}
+                              if (editCameraForm.height_meters !== '') configBody.height_meters = parseFloat(editCameraForm.height_meters)
+                              await Promise.all([
+                                Object.keys(configBody).length ? updateCameraConfig(slug, cc.id, configBody) : Promise.resolve(),
+                                patchCamera(slug, cc.physical_camera_id, { cloud_stream_url: editCameraForm.stream_url.trim() || null }),
+                              ])
+                              const patchCc = c => c.id === cc.id
+                                ? { ...c, height_meters: editCameraForm.height_meters ? parseFloat(editCameraForm.height_meters) : c.height_meters, stream_url: editCameraForm.stream_url.trim() || null }
+                                : c
+                              const patchSections = ss => ss?.map(s => ({ ...s, camera_configs: s.camera_configs?.map(patchCc) }))
+                              setVersion(v => ({ ...v, sections: patchSections(v?.sections) }))
+                              setSections(prev => patchSections(prev))
+                              setEditingCameraId(null)
+                            } catch (err) {
+                              setError(err?.response?.data?.detail?.error || err?.response?.data?.error || err.message)
+                            } finally {
+                              setSavingCamera(false)
+                            }
+                          }}
+                          className="border-t border-gray-100 px-3 py-2 space-y-2"
+                        >
+                          <div className="flex items-center gap-3 flex-wrap">
+                            <div className="flex items-center gap-1.5">
+                              <label className="text-xs text-gray-500">Height (m):</label>
+                              <input
+                                type="number" step="0.1" min="0.1"
+                                value={editCameraForm.height_meters}
+                                onChange={e => setEditCameraForm(f => ({ ...f, height_meters: e.target.value }))}
+                                className="w-20 border border-gray-300 rounded px-2 py-1 text-xs"
+                                placeholder="e.g. 3.5"
+                              />
+                            </div>
+                            <button
+                              type="submit"
+                              disabled={savingCamera}
+                              className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium disabled:opacity-50"
+                            >
+                              {savingCamera ? 'Saving…' : 'Save'}
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <label className="text-xs text-gray-500 flex-shrink-0">Stream URL:</label>
+                            <input
+                              type="text"
+                              value={editCameraForm.stream_url}
+                              onChange={e => setEditCameraForm(f => ({ ...f, stream_url: e.target.value }))}
+                              className="flex-1 border border-gray-300 rounded px-2 py-1 text-xs font-mono"
+                              placeholder="rtsp://host.docker.internal:8554/cam1"
+                            />
+                          </div>
+                        </form>
                       )}
-                      <span className="text-gray-400 text-xs capitalize ml-auto">{cc.status}</span>
                     </div>
                   ))}
                 </div>

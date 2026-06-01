@@ -48,6 +48,7 @@ class FloorPlanDetailResponse(FloorPlanUploadResponse):
     world_x_max: float | None = None
     world_y_min: float | None = None
     world_y_max: float | None = None
+    boundary_polygon: list[list[float]] | None = None
 
     model_config = {"from_attributes": True}
 
@@ -58,6 +59,7 @@ class ScaleRequest(BaseModel):
     ref_point_1: list[float]
     ref_point_2: list[float]
     real_distance_meters: float
+    boundary_polygon: list[list[float]] | None = None
 
     @field_validator("ref_point_1", "ref_point_2")
     @classmethod
@@ -228,6 +230,7 @@ class CameraConfigResponse(BaseModel):
     position_y: float
     height_meters: float | None = None
     fov_deg: float | None = None
+    stream_url: str | None = None
     frame_url: str | None = None
     frame_captured_at: datetime | None = None
     status: str

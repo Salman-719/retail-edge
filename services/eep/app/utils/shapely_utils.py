@@ -1,5 +1,15 @@
 """Polygon geometry helpers using Shapely."""
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
+
+
+def clamp_to_polygon(point: list[float], polygon: list[list[float]]) -> list[float]:
+    """Return point unchanged if inside polygon, else nearest point on boundary."""
+    poly = Polygon(polygon)
+    pt = Point(point)
+    if poly.contains(pt):
+        return point
+    nearest = poly.exterior.interpolate(poly.exterior.project(pt))
+    return [nearest.x, nearest.y]
 
 
 def polygons_overlap(points_a: list[list[float]], points_b: list[list[float]]) -> bool:
