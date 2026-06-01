@@ -16,7 +16,7 @@ from dataclasses import asdict
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from ..runtime import IEP2Runtime
+from ..runtime import IEP2Runtime, Iep2Settings
 
 log = logging.getLogger("iep2")
 
@@ -37,9 +37,6 @@ STATE = {
 async def lifespan(app: FastAPI):
     _setup_logging()
     os.makedirs(TMP_DIR, exist_ok=True)
-    log.info("Loading models…")
-    app.state.runtime = IEP2Runtime()
-    log.info("Models loaded — ready.")
     yield
 
 
@@ -71,11 +68,14 @@ async def upload(
     STATE["frames"] = []
     STATE["status"] = "processing"
 
-    runtime = app.state.runtime
-
     def pipeline_thread():
         log.info("Pipeline started  camera=%s  file=%s", camera_id, file.filename)
-        with runtime.run(dest, camera_id) as stream:
+        runtime = IEP2Runtime(Iep2Settings(
+            store_id="default",
+            camera_id=camera_id,
+            database_url=os.getenv("DATABASE_URL", ""),
+        ))
+        with runtime.run(dest) as stream:
             for result in stream:
                 record = asdict(result)
                 STATE["frames"].append(record)

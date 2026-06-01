@@ -3,10 +3,13 @@
 FastAPI is a thin transport adapter. This module is the only place the
 full pipeline runs. It has zero FastAPI imports.
 
-Usage (symmetric across all callers):
-    with runtime.run(video_path, camera_id) as stream:
-        for result in stream:
-            ...          # result is a FrameResult
+Usage (video file):
+    with runtime.run(video_path) as stream:
+        for result in stream: ...
+
+Usage (live from IEP1):
+    with runtime.run_from_iep1() as stream:
+        for result in stream: ...
 """
 import base64
 import io
@@ -15,6 +18,7 @@ import os
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Iterator, Tuple
 
 log = logging.getLogger("iep2.runtime")
 
@@ -29,6 +33,7 @@ try:
     from .video_ingestor.ingestor import extract_frames
     from .identity.manager import LocalIdentityManager
     from .persistence.postgres import TrackingPersistence
+    from .ingest.redis_source import RedisStreamFrameSource, make_s3_client
 except ImportError:
     _root = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, _root)
@@ -38,8 +43,22 @@ except ImportError:
     from video_ingestor.ingestor import extract_frames
     from identity.manager import LocalIdentityManager
     from persistence.postgres import TrackingPersistence
+    from ingest.redis_source import RedisStreamFrameSource, make_s3_client
 
 _MAX_WIRE_WIDTH = 640
+
+
+@dataclass
+class Iep2Settings:
+    store_id:        str
+    camera_id:       str
+    database_url:    str
+    redis_url:       str   = "redis://localhost:6379/0"
+    s3_endpoint_url: str   = ""
+    s3_access_key:   str   = ""
+    s3_secret_key:   str   = ""
+    s3_bucket:       str   = "retailvision"
+    target_fps:      float = 5.0
 
 
 @dataclass
@@ -50,7 +69,7 @@ class FrameResult:
     new_entries: list   # list[int]: track_ids seen for the first time this frame
 
 
-def _encode_frame(frame: np.ndarray) -> tuple[str, float]:
+def _encode_frame(frame: np.ndarray) -> Tuple[str, float]:
     """Resize to max 640px wide, base64-encode as JPEG.
 
     Returns (base64_jpeg, scale) — scale maps original bbox coords to
@@ -68,8 +87,9 @@ def _encode_frame(frame: np.ndarray) -> tuple[str, float]:
 
 
 class IEP2Runtime:
-    def __init__(self):
-        """Load all models once. Reused across every run() call."""
+    def __init__(self, settings: Iep2Settings):
+        """Load all models once. All config fixed at construction via settings."""
+        self.settings = settings
         log.info("Loading YOLO model (%s)…", "yolov8n.pt")
         self.yolo_model = _load_yolo()
         log.info("YOLO loaded.")
@@ -78,30 +98,65 @@ class IEP2Runtime:
         log.info("ReID loaded.")
 
     @contextmanager
-    def run(self, video_path: str, camera_id: str):
-        """Context manager that yields the frame stream.
-
-        DB lifetime is owned here — close() is guaranteed in finally.
-        """
+    def run(self, video_path: str, start_ms: int = 0):
+        """Context manager that yields the frame stream from a video file."""
+        camera_id = self.settings.camera_id
         log.info("Opening DB connection  camera=%s", camera_id)
-        db = TrackingPersistence(os.getenv("DATABASE_URL", ""), camera_id)
+        db = TrackingPersistence(self.settings.database_url, camera_id)
         db.create_table()
+        self._start_ms = start_ms
         try:
-            yield self._stream(video_path, camera_id, db)
+            yield self._stream_from_source(self._video_source(video_path), db)
         finally:
             db.close()
             log.info("DB connection closed  camera=%s", camera_id)
 
-    def _stream(self, video_path: str, camera_id: str, db: TrackingPersistence):
-        """Private generator — all per-upload state lives here."""
-        log.info("Stream started  video=%s  camera=%s", video_path, camera_id)
+    @contextmanager
+    def run_from_iep1(self):
+        """Context manager that yields the frame stream from IEP1 via Redis + S3."""
+        camera_id = self.settings.camera_id
+        s3 = make_s3_client(
+            self.settings.s3_endpoint_url,
+            self.settings.s3_access_key,
+            self.settings.s3_secret_key,
+        )
+        source = RedisStreamFrameSource(
+            camera_id,
+            self.settings.redis_url,
+            s3,
+            self.settings.s3_bucket,
+        )
+        log.info("Opening DB connection  camera=%s", camera_id)
+        db = TrackingPersistence(self.settings.database_url, camera_id)
+        db.create_table()
+        try:
+            yield self._stream_from_source(source.frames(), db)
+        finally:
+            source.release()
+            db.close()
+            log.info("DB connection closed  camera=%s", camera_id)
+
+    @staticmethod
+    def _video_source(video_path: str) -> Iterator[Tuple[int, np.ndarray]]:
+        """Wrap video file frames as (capture_ts_ms, frame) — ts is 0 placeholder."""
+        for frame in extract_frames(video_path):
+            yield 0, frame
+
+    def _stream_from_source(
+        self,
+        source: Iterator[Tuple[int, np.ndarray]],
+        db: TrackingPersistence,
+    ):
+        """Single pipeline implementation — both run() and run_from_iep1() use this."""
+        camera_id = self.settings.camera_id
+        log.info("Stream started  camera=%s", camera_id)
         tracker     = create_tracker()
         manager     = LocalIdentityManager(reid_model=self.reid_model)
-        seen_ids: set[int] = set()
+        seen_ids: set = set()
         frame_index = 0
         db_rows_written = 0
 
-        for frame in extract_frames(video_path):
+        for _capture_ts_ms, frame in source:
             detections = detect(self.yolo_model, frame)
             tracks     = update(tracker, detections)
             enriched   = manager.process_frame(frame, tracks)
@@ -113,7 +168,6 @@ class IEP2Runtime:
                 frame_index, len(detections), len(tracks), n_confirmed, n_pending,
             )
 
-            # DB writes use original (pre-scale) coordinates.
             for track in enriched:
                 if track["local_id"] is not None:
                     x1, y1, x2, y2 = [int(c) for c in track["bbox"]]
@@ -126,7 +180,6 @@ class IEP2Runtime:
                     )
                     db_rows_written += 1
 
-            # Scale bboxes to encoded image space for the wire.
             frame_b64, scale = _encode_frame(frame)
             if scale != 1.0:
                 display_tracks = [
@@ -156,10 +209,11 @@ class IEP2Runtime:
 
 
 # ---------------------------------------------------------------------------
-# Standalone: python runtime.py <video_path> <camera_id>
+# Standalone: python runtime.py <video_path>
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     from dotenv import load_dotenv
+    load_dotenv()
 
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -167,22 +221,16 @@ if __name__ == "__main__":
         datefmt="%H:%M:%S",
     )
 
-    if len(sys.argv) != 3:
-        print("usage: python runtime.py <video_path> <camera_id>")
+    if len(sys.argv) < 2:
+        print("usage: python runtime.py <video_path>")
         sys.exit(1)
 
-    load_dotenv()
-    video_path = sys.argv[1]
-    camera_id  = sys.argv[2]
-
-    runtime = IEP2Runtime()
-    with runtime.run(video_path, camera_id) as stream:
+    settings = Iep2Settings(
+        store_id="test",
+        camera_id="cam0",
+        database_url=os.environ.get("DATABASE_URL", ""),
+    )
+    runtime = IEP2Runtime(settings)
+    with runtime.run(sys.argv[1]) as stream:
         for result in stream:
-            n_confirmed = sum(1 for t in result.tracks if t["local_id"] is not None)
-            n_pending   = sum(1 for t in result.tracks if t["local_id"] is None)
-            print(
-                f"frame={result.frame_index:4d}  "
-                f"confirmed={n_confirmed}  pending={n_pending}  "
-                f"new_track_ids={result.new_entries}"
-            )
-    print("done")
+            print(f"frame={result.frame_index} tracks={len(result.tracks)}")

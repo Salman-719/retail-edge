@@ -1,12 +1,14 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+WORKDIR /workspace
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ ./app/
+# Mirror module path: services.iep1_ingestion.app.*
+RUN mkdir -p services/iep1_ingestion
+COPY app/ services/iep1_ingestion/app/
+RUN touch services/__init__.py services/iep1_ingestion/__init__.py
 
-EXPOSE 8001
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+# Default to --help; docker-compose overrides with real args via env vars.
+CMD ["python", "-m", "services.iep1_ingestion.app.main", "--help"]
