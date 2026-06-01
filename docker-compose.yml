@@ -87,6 +87,7 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+      - "50051:50051"
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
       REDIS_URL: redis://redis:6379/0

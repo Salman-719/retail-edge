@@ -11,6 +11,7 @@ from sqlalchemy import delete, text
 from app.api import register_routers
 from app.core.database import AsyncSessionLocal, engine
 from app.core.scheduler import start_scheduler, stop_scheduler
+from app.grpc_server.server import start_grpc_server, stop_grpc_server
 import app.models  # noqa: F401 — registers all SQLAlchemy mappers at startup
 from app.models.user import User
 
@@ -51,11 +52,13 @@ async def lifespan(app: FastAPI):
         pass
 
     asyncio.create_task(_cleanup_deactivated_users())
+    await start_grpc_server()
     start_scheduler()
     try:
         yield
     finally:
         stop_scheduler()
+        await stop_grpc_server()
 
 
 app = FastAPI(title="RetailVision EEP", lifespan=lifespan)

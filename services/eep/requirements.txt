@@ -16,3 +16,5 @@ shapely==2.0.4
 opencv-python-headless==4.9.0.80
 numpy==1.26.4
 apscheduler==3.10.4
+grpcio==1.64.0
+grpcio-tools==1.64.0
