@@ -19,7 +19,11 @@ log = logging.getLogger(__name__)
 
 
 class BatchCoordinator:
-    STREAM = "stream:iep2:batch_complete"
+    # Per-store stream key set by IEP3_REDIS_STREAM env var in the k8s pod.
+    # Falls back to the legacy global key for local docker-compose use.
+    STREAM = __import__("os").getenv(
+        "IEP3_REDIS_STREAM", "stream:iep2:batch_complete"
+    )
     GROUP = "iep3-coordinator"
 
     def __init__(self, expected_cameras: set[str], on_ready, timeout_seconds: float | None = None,
