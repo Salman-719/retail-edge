@@ -236,6 +236,73 @@ cd frontend && npm run dev
 
 ---
 
+## Testing the IEP1 → IEP2 Live Pipeline (Docker)
+
+End-to-end test: IEP1 ingests an RTSP stream → uploads frames to MinIO → publishes manifests to Redis → IEP2 reads them → runs YOLO+ReID → writes detections to PostgreSQL.
+
+### Step 1 — Configure `.env`
+
+```powershell
+cd retail-edge
+copy .env.example .env
+```
+
+Edit `.env` and set your RTSP URL — the only required change:
+
+```
+RTSP_URL=rtsp://host.docker.internal:8554/test
+```
+
+`host.docker.internal` lets containers reach mediamtx running on your Windows host.
+
+### Step 2 — Start mediamtx and serve a video as RTSP (Terminal 1)
+
+```powershell
+docker run -d --name mediamtx -p 8554:8554 bluenviron/mediamtx:latest
+ffmpeg -re -stream_loop -1 -i "path\to\your\video.mp4" -c copy -f rtsp rtsp://localhost:8554/test
+```
+
+Leave ffmpeg running.
+
+### Step 3 — Build and start infrastructure
+
+```powershell
+docker compose up --build postgres redis minio
+```
+
+Wait until all three are `healthy` (`docker compose ps`), then create the S3 bucket:
+
+```powershell
+aws --endpoint-url http://localhost:9000 s3 mb s3://retailvision --region us-east-1
+```
+
+Then start the pipeline workers:
+
+```powershell
+docker compose up --build iep1_ingestion iep2_vision
+```
+
+> **Stale volume warning:** if you previously ran IEP2 with an older schema, drop all volumes first with `docker compose down -v` before this step.
+
+### Step 4 — Verify
+
+```powershell
+# IEP1: watch frames being ingested and manifests published
+docker compose logs -f iep1_ingestion
+
+# IEP2: watch vision pipeline consuming from Redis
+docker compose logs -f iep2_vision
+
+# Frames in MinIO
+aws --endpoint-url http://localhost:9000 s3 ls s3://retailvision/frames/cam-01/
+
+# Tracking rows in PostgreSQL
+docker exec -it $(docker compose ps -q postgres) psql -U retailvision -d retailvision \
+  -c "SELECT local_id, COUNT(*) FROM tracking_history WHERE camera_id='cam-01' GROUP BY local_id;"
+```
+
+---
+
 ## Running Tests
 
 ```bash
