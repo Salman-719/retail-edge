@@ -1,6 +1,5 @@
 import uuid
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, field_validator
 
@@ -8,9 +7,7 @@ from pydantic import BaseModel, field_validator
 class CreateStoreRequest(BaseModel):
     name: str
     slug: str
-    timezone: str = "Asia/Beirut"
-    address: str | None = None
-    currency: str = "USD"
+    address: str
 
     @field_validator("slug")
     @classmethod
@@ -20,12 +17,12 @@ class CreateStoreRequest(BaseModel):
             raise ValueError("Slug must contain only lowercase letters, digits, and hyphens")
         return v
 
-    @field_validator("currency")
+    @field_validator("address")
     @classmethod
-    def valid_currency(cls, v: str) -> str:
-        if v not in ("USD", "LBP"):
-            raise ValueError("Currency must be USD or LBP")
-        return v
+    def address_required(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Address is required")
+        return v.strip()
 
 
 class StoreListItem(BaseModel):
@@ -42,9 +39,7 @@ class StoreDetail(BaseModel):
     id: uuid.UUID
     name: str
     slug: str
-    timezone: str
     address: str | None
-    currency: str
     status: str
     logo_url: str | None = None
     operating_hours: dict | None = None
@@ -55,7 +50,12 @@ class StoreDetail(BaseModel):
 class PatchStoreRequest(BaseModel):
     name: str | None = None
     address: str | None = None
-    timezone: str | None = None
-    currency: str | None = None
     operating_hours: dict | None = None
     logo_s3_key: str | None = None
+
+    @field_validator("address")
+    @classmethod
+    def address_not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("Address cannot be blank")
+        return v.strip() if v else v

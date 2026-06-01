@@ -132,9 +132,6 @@ services:
     ports:
       - "8001:8001"
 
-  # IEP2 vision (rebuilt): per-camera CLI worker. Build context is the repo root
-  # so the image includes the shared common/ package. Launched per camera by the
-  # M6 orchestrator (no long-running HTTP server / port).
   iep2_vision:
     build:
       context: .
@@ -145,6 +142,7 @@ services:
       TRACKER_BACKEND: botsort
       YOLO_CONFIG_DIR: /tmp/ultralytics
       MPLCONFIGDIR: /tmp/matplotlib
+      LIVE_STREAM_ENABLED: ${LIVE_STREAM_ENABLED:-false}
     volumes:
       - ./testing-data:/app/testing-data:ro
       - iep2_model_cache:/root/.cache
@@ -158,7 +156,6 @@ services:
     profiles: ["pipeline"]
     command: ["python", "-c", "import services.iep2_vision.app.main; print('iep2 ready')"]
 
-  # IEP3 cross-camera reconciliation: single-instance coordinator/worker.
   iep3_reconciliation:
     build:
       context: .
@@ -176,12 +173,6 @@ services:
     profiles: ["pipeline"]
     command: ["python", "-c", "import services.iep3_reconciliation.app.main; print('iep3 ready')"]
 
-  # EEP stand-in: runs the full IEP2->IEP3 chain in one process against demo
-  # videos. Invoke as a one-off job (not a long-running server):
-  #   docker compose run --rm orchestrator python -m tools.orchestrator \
-  #     --store-id 00000000-0000-0000-0000-000000000001 \
-  #     --camera cam1=/app/testing-data/Test1/Camera1.mp4 \
-  #     --camera cam2=/app/testing-data/Test1/Camera2.mp4
   orchestrator:
     build:
       context: .
@@ -250,6 +241,25 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8006:8006"
+
+  live_bridge:
+    build:
+      context: ./services/live_bridge
+    ports:
+      - "8010:8010"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_URL: ${S3_PUBLIC_URL:-http://localhost:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
+      S3_BUCKET: ${S3_BUCKET:-retailvision}
+      PRESIGNED_URL_EXPIRY: 30
+    depends_on:
+      - redis
+      - minio
+    restart: unless-stopped
+
 
 volumes:
   postgres_data:

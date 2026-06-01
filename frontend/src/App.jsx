@@ -7,6 +7,8 @@ import StoreLayout from './components/StoreLayout'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import AcceptInvite from './pages/AcceptInvite'
+import ForgotPassword from './pages/ForgotPassword'
+import ResetPassword from './pages/ResetPassword'
 import OwnerDashboard from './pages/OwnerDashboard'
 
 import StoreConfig from './pages/StoreConfig'
@@ -17,7 +19,9 @@ import Employees from './pages/Employees'
 import Shifts from './pages/Shifts'
 import Members from './pages/Members'
 import Audit from './pages/Audit'
+import AIAgent from './pages/AIAgent'
 import Settings from './pages/Settings'
+import LiveView from './pages/LiveView'
 
 export default function App() {
   return (
@@ -27,6 +31,8 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/accept-invite" element={<AcceptInvite />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
 
         {/* Owner dashboard */}
         <Route path="/dashboard" element={<PrivateRoute><OwnerDashboard /></PrivateRoute>} />
@@ -38,7 +44,9 @@ export default function App() {
           <Route path="config" element={<StoreConfig />} />
           <Route path="config/edit" element={<StoreConfigEdit />} />
           <Route path="live" element={<LiveMonitoring />} />
+          <Route path="live-view" element={<LiveView />} />
           <Route path="analytics" element={<Analytics />} />
+          <Route path="agent" element={<AIAgent />} />
           <Route path="employees" element={<Employees />} />
           <Route path="shifts" element={<Shifts />} />
           <Route path="members" element={<Members />} />

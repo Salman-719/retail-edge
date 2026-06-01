@@ -5,4 +5,4 @@ app = FastAPI(title="IEP5 — Analytics")
 
 @app.get("/health")
 async def health():
-    return {"service": "iep5-analytics", "status": "ok"}
+    return {"service": "iep5_analytics", "status": "ok"}

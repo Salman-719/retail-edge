@@ -111,6 +111,7 @@ class VersionListItem(BaseModel):
     active_from: datetime | None = None
     active_until: datetime | None = None
     created_at: datetime
+    pending_sync_event_id: uuid.UUID | None = None
 
     model_config = {"from_attributes": True}
 

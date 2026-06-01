@@ -39,13 +39,13 @@ The platform is structured as a microservices architecture deployed via Docker C
 │  port 5432  │  │ port 6379│  │  port 9000 · UI: 9001    │
 └─────────────┘  └──────────┘  └─────────────────────────┘
 
-IEP Services:
-  IEP1 — Data Ingestion              port 8001  (placeholder)
-  IEP2 — Vision (detect/track/ReID)  per-camera CLI worker (writes to Postgres)
-  IEP3 — Cross-Camera Reconciliation single-instance worker (batch-triggered)
-  IEP4 — Alerts & Rules              port 8004  (placeholder)
-  IEP5 — Analytics                   port 8005  (placeholder)
-  IEP6 — AI Agent (LLM)              port 8006  (placeholder)
+IEP Services (Milestone 3 — placeholders in Milestone 1/2):
+  IEP1 — Data Ingestion        port 8001 (`iep1_ingestion`)
+  IEP2 — Vision (YOLO)         port 8002 (`iep2_vision`)
+  IEP3 — Reconciliation        port 8003 (`iep3_reconciliation`)
+  IEP4 — Alerts & Rules        port 8004 (`iep4_alerts`)
+  IEP5 — Analytics             port 8005 (`iep5_analytics`)
+  IEP6 — AI Agent (LLM)        port 8006 (`iep6_agent`)
 ```
 
 ---
@@ -87,14 +87,12 @@ retail-edge/
 │   │   │   ├── models/         # SQLAlchemy ORM + Pydantic schemas
 │   │   │   └── utils/          # homography, heatmap, tracker, pdf_utils
 │   │   └── migrations/         # Alembic migrations
-│   ├── iep1_ingestion/         # Placeholder
-│   ├── iep2_vision/            # IEP2 vision: detect/track/local-identity + Postgres persistence
-│   ├── iep3_reconciliation/    # IEP3 cross-camera reconciliation (Local ID -> Global ID)
-│   ├── iep4_alerts/            # Placeholder (was iep3-alerts)
-│   ├── iep5_analytics/         # Placeholder (was iep4-analytics)
-│   └── iep6_agent/             # Placeholder (was iep5-agent)
-├── common/                     # Shared package: config, db engine, ORM models, contracts, utils
-├── tools/                      # Orchestrator (EEP stand-in) + demo render/review/seed
+│   ├── iep1_ingestion/         # Placeholder — Milestone 3
+│   ├── iep2_vision/            # Placeholder — Milestone 3
+│   ├── iep3_reconciliation/    # Placeholder — Milestone 3
+│   ├── iep4_alerts/            # Placeholder — Milestone 3
+│   ├── iep5_analytics/         # Placeholder — Milestone 3
+│   └── iep6_agent/             # Placeholder — Milestone 3
 ├── tests/
 │   └── unit/                   # Pydantic schema & homography unit tests
 ├── infra/                      # Reserved for Terraform / k8s (Milestone 3)
@@ -235,6 +233,264 @@ cd frontend && npm run dev
 ```
 
 > Note: The first build will take several minutes as it downloads the YOLOv8 dependencies.
+
+---
+
+## Testing the IEP1 → IEP2 Live Pipeline (Docker)
+
+End-to-end test: IEP1 ingests an RTSP stream → uploads frames to MinIO → publishes manifests to Redis → IEP2 reads them → runs YOLO+ReID → writes detections to PostgreSQL.
+
+### Step 1 — Configure `.env`
+
+```powershell
+cd retail-edge
+copy .env.example .env
+```
+
+Edit `.env` and set your RTSP URL — the only required change:
+
+```
+RTSP_URL=rtsp://host.docker.internal:8554/test
+```
+
+`host.docker.internal` lets containers reach mediamtx running on your Windows host.
+
+### Step 2 — Start mediamtx and serve a video as RTSP (Terminal 1)
+
+```powershell
+docker run -d --name mediamtx -p 8554:8554 bluenviron/mediamtx:latest
+ffmpeg -re -stream_loop -1 -i "path\to\your\video.mp4" -c copy -f rtsp rtsp://localhost:8554/test
+```
+
+Leave ffmpeg running.
+
+### Step 3 — Build and start infrastructure
+
+```powershell
+docker compose up --build postgres redis minio
+```
+
+Wait until all three are `healthy` (`docker compose ps`), then create the S3 bucket:
+
+```powershell
+aws --endpoint-url http://localhost:9000 s3 mb s3://retailvision --region us-east-1
+```
+
+Then start the pipeline workers:
+
+```powershell
+docker compose up --build iep1_ingestion iep2_vision
+```
+
+> **Stale volume warning:** if you previously ran IEP2 with an older schema, drop all volumes first with `docker compose down -v` before this step.
+
+### Step 4 — Verify
+
+```powershell
+# IEP1: watch frames being ingested and manifests published
+docker compose logs -f iep1_ingestion
+
+# IEP2: watch vision pipeline consuming from Redis
+docker compose logs -f iep2_vision
+
+# Frames in MinIO
+aws --endpoint-url http://localhost:9000 s3 ls s3://retailvision/frames/cam-01/
+
+# Tracking rows in PostgreSQL
+docker exec -it $(docker compose ps -q postgres) psql -U retailvision -d retailvision \
+  -c "SELECT local_id, COUNT(*) FROM tracking_history WHERE camera_id='cam-01' GROUP BY local_id;"
+```
+
+---
+
+## Live View Pipeline — How Testing Works
+
+The live view feature spans three layers that can each be tested independently, then verified end-to-end.
+
+### Architecture recap
+
+```
+RTSP camera
+  → IEP1        (frames → MinIO S3 + manifest → stream:iep1:{camera_id})
+    → IEP2       (YOLO+ReID → detections → stream:iep2:live:{camera_id})   ← LIVE_STREAM_ENABLED=true
+      → live_bridge  (presign S3 URL → WebSocket broadcast on /ws/live/{camera_id})
+        → Browser     (canvas frame + bbox overlay + detections table)
+```
+
+---
+
+### Layer 1 — IEP2 Live Publisher
+
+`services/iep2_vision/live_publisher.py` — publishes per-frame detections to Redis after each vision frame is processed. Off by default (`LIVE_STREAM_ENABLED=false` = zero overhead, identical behaviour to before).
+
+**Test: disabled mode is a strict no-op**
+
+```python
+from services.iep2_vision.live_publisher import LivePublisher
+
+lp = LivePublisher('cam-01', 'redis://localhost:6379/0', enabled=False)
+lp.publish('', 0, [])   # must return immediately, no Redis call
+```
+
+**Test: failures never crash the pipeline**
+
+```python
+lp = LivePublisher('cam-01', 'redis://localhost:9999/0', enabled=True)
+lp.publish('frames/cam-01/123.jpg', 1700000000000, [
+    {'track_id': 1, 'local_id': None, 'bbox': [10, 20, 100, 200], 'confidence': 0.9}
+])
+# logs a warning, returns — does not raise
+```
+
+**Test: payload shape (intercept xadd)**
+
+```python
+import redis, json
+from services.iep2_vision.live_publisher import LivePublisher
+
+captured = {}
+orig = redis.Redis.xadd
+def intercept(self, name, fields, **kw):
+    captured['stream'] = name
+    captured['data']   = json.loads(fields['data'])
+    captured['kwargs'] = kw
+redis.Redis.xadd = intercept
+
+lp = LivePublisher('cam-01', 'redis://localhost:6379/0', enabled=True)
+lp.publish('frames/cam-01/123.jpg', 1700000000000, [
+    {'track_id': 3, 'local_id': None, 'bbox': [120, 45, 280, 390], 'confidence': 0.87}
+])
+
+assert captured['stream'] == 'stream:iep2:live:cam-01'
+assert captured['kwargs']['maxlen'] == 500
+assert captured['data']['detections'][0]['local_id'] is None   # JSON null
+redis.Redis.xadd = orig
+```
+
+**Test: check stream with Redis running**
+
+```bash
+# With LIVE_STREAM_ENABLED=true and IEP2 running against a video or Redis source:
+redis-cli XREAD COUNT 5 STREAMS stream:iep2:live:cam-01 0
+# Expect JSON payloads with camera_id, timestamp_ms, s3_key, detections[]
+```
+
+---
+
+### Layer 2 — Live Bridge
+
+`services/live_bridge/` — standalone FastAPI service (port 8010) that reads the IEP2 live stream, generates presigned S3 URLs, and pushes to all connected WebSocket clients.
+
+**Test 1 — Health endpoint**
+
+```bash
+curl http://localhost:8010/health
+# {"status": "ok"}
+```
+
+**Test 2 — WebSocket connects cleanly**
+
+```bash
+# pip install websockets
+python - <<'EOF'
+import asyncio, websockets
+async def t():
+    async with websockets.connect('ws://localhost:8010/ws/live/cam-01') as ws:
+        print('state:', ws.state.name)   # OPEN
+asyncio.run(t())
+EOF
+```
+
+**Test 3 — Message routing (Redis required)**
+
+```python
+import asyncio, websockets, json, redis as r
+
+async def test():
+    async with websockets.connect('ws://localhost:8010/ws/live/cam-01') as ws1, \
+               websockets.connect('ws://localhost:8010/ws/live/cam-01') as ws2:
+        await asyncio.sleep(0.4)   # let reader task start
+        r.Redis.from_url('redis://localhost:6379/0').xadd(
+            'stream:iep2:live:cam-01',
+            {'data': json.dumps({
+                'camera_id': 'cam-01', 'timestamp_ms': 1700000000000,
+                's3_key': 'frames/cam-01/1700000000000.jpg',
+                'detections': [{'track_id': 3, 'local_id': None,
+                                'x1': 120, 'y1': 45, 'x2': 280, 'y2': 390,
+                                'confidence': 0.87}]
+            })},
+            maxlen=500, approximate=True,
+        )
+        msg1 = json.loads(await asyncio.wait_for(ws1.recv(), timeout=3))
+        msg2 = json.loads(await asyncio.wait_for(ws2.recv(), timeout=3))
+        assert msg1 == msg2                             # both clients got same message
+        assert 'frame_url' in msg1                     # presigned URL injected
+        assert msg1['detections'][0]['local_id'] is None
+
+asyncio.run(test())
+```
+
+---
+
+### Layer 3 — Frontend Live View
+
+`frontend/src/pages/LiveView.jsx` — canvas-based live view at `/store/{slug}/live-view`.
+
+**Test 1 — Build compiles with zero errors**
+
+```bash
+cd frontend
+npm run build
+# ✓ built in ~28s   (chunk-size warning is pre-existing, not an error)
+```
+
+**Test 2 — Env vars and routing are wired correctly**
+
+```bash
+# After build, grep the bundle:
+grep -o '"ws://localhost:8010"\|"cam-01,cam-02"\|"live-view"\|"Live View"' dist/assets/index-*.js
+# Expect all four strings to appear — confirms VITE vars inlined and routes registered
+```
+
+**Test 3 — Browser smoke test (full stack required)**
+
+1. Open `/store/{slug}/live-view` in the browser.
+2. Select a camera from the dropdown.
+3. Status badge turns **green** ("Live") once the WebSocket opens.
+4. Canvas shows live JPEG frames with green bounding boxes and `#track_id` labels.
+5. Detections table updates in sync with each frame.
+6. Switch camera in the dropdown — old WebSocket closes, new one opens, no errors in live_bridge logs.
+
+---
+
+### Full End-to-End Test (Docker)
+
+```powershell
+# 1. Start RTSP source (Terminal 1)
+docker run -d --name mediamtx -p 8554:8554 bluenviron/mediamtx:latest
+ffmpeg -re -stream_loop -1 -i "path\to\video.mp4" -c copy -f rtsp rtsp://localhost:8554/test
+
+# 2. Start full stack
+docker compose up --build -d postgres redis minio iep1_ingestion iep2_vision live_bridge
+
+# 3. Create bucket (first time only)
+aws --endpoint-url http://localhost:9000 s3 mb s3://retailvision --region us-east-1
+
+# 4. Check IEP2 live stream is publishing
+redis-cli XLEN stream:iep2:live:cam-01         # should grow over time
+
+# 5. Check live_bridge health and WebSocket
+curl http://localhost:8010/health              # {"status": "ok"}
+
+# 6. Start frontend
+cd frontend && npm run dev
+# Open http://localhost:5173 → navigate to Live View → select cam-01
+```
+
+**What you should see:**
+- `iep2_vision` logs: `INFO iep2.live_publisher` entries (if DEBUG level enabled)
+- `live_bridge` logs: `Started reader task camera=cam-01` on first client connect, `Cancelled reader task` on disconnect
+- Browser: green "Live" badge, frames rendering at ~5 fps with bbox overlays
 
 ---
 

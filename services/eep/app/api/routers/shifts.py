@@ -139,6 +139,27 @@ async def create_shift_pattern(
     await _get_employee_or_404(body.employee_id, ctx.store_id, db)
     await _get_section_or_404(body.section_id, ctx.store_id, db)
 
+    # Check for overlapping active pattern on the same employee + day
+    existing_result = await db.execute(
+        select(ShiftPattern).where(
+            ShiftPattern.employee_id == body.employee_id,
+            ShiftPattern.day_of_week == body.day_of_week,
+            ShiftPattern.is_active == True,
+        )
+    )
+    for existing in existing_result.scalars().all():
+        if body.start_time < existing.end_time and body.end_time > existing.start_time:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Time overlaps with an existing shift pattern",
+                    "code": "SHIFT_CONFLICT",
+                    "conflicting_id": str(existing.id),
+                    "conflicting_start": str(existing.start_time),
+                    "conflicting_end": str(existing.end_time),
+                },
+            )
+
     pattern = ShiftPattern(
         employee_id=body.employee_id,
         section_id=body.section_id,

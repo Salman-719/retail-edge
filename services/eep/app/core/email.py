@@ -55,3 +55,50 @@ async def send_invitation_email(to_email: str, store_name: str, slug: str, token
         logger.info("Invitation email sent to %s", to_email)
     except Exception as exc:
         logger.error("Failed to send invitation email to %s: %s", to_email, exc)
+
+
+async def send_password_reset_email(to_email: str, token: str) -> None:
+    reset_url = f"http://localhost:5173/reset-password?token={token}"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "Reset your RetailVision AI password"
+    msg["From"] = settings.SMTP_FROM
+    msg["To"] = to_email
+    msg["Message-ID"] = make_msgid(domain="retailvision.ai")
+    msg["Date"] = formatdate(localtime=False)
+
+    text = (
+        f"You requested a password reset for your RetailVision AI account.\n\n"
+        f"Click the link below to set a new password:\n{reset_url}\n\n"
+        f"This link expires in 1 hour. If you did not request this, you can safely ignore it."
+    )
+    html = f"""
+    <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+      <h2 style="color:#1B3A5C">Reset your password</h2>
+      <p>You requested a password reset for your RetailVision AI account.</p>
+      <a href="{reset_url}"
+         style="display:inline-block;margin:16px 0;padding:10px 24px;
+                background:#1B3A5C;color:#fff;border-radius:8px;
+                text-decoration:none;font-weight:600">
+        Reset Password
+      </a>
+      <p style="color:#888;font-size:12px">This link expires in 1 hour.<br>
+        If you didn't request this, you can safely ignore it.</p>
+    </div>
+    """
+
+    msg.attach(MIMEText(text, "plain"))
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        await aiosmtplib.send(
+            msg,
+            hostname=settings.SMTP_HOST,
+            port=settings.SMTP_PORT,
+            username=settings.SMTP_USER,
+            password=settings.SMTP_PASSWORD,
+            start_tls=True,
+        )
+        logger.info("Password reset email sent to %s", to_email)
+    except Exception as exc:
+        logger.error("Failed to send password reset email to %s: %s", to_email, exc)

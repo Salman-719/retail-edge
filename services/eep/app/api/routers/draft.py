@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
@@ -321,7 +322,19 @@ async def create_draft(
         created_by=ctx.user_id,
     )
     db.add(draft)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        existing = await _get_draft(ctx.store_id, db)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "A draft already exists",
+                "code": "DRAFT_EXISTS",
+                "draft_created_by": str(existing.created_by) if existing else None,
+            },
+        )
 
     if body.clone_from_active:
         await _clone_active_into_draft(draft.id, ctx.store_id, db)
@@ -1243,6 +1256,18 @@ async def compute_homography_calibration(
         result = compute_homography(corr_list)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"error": str(exc), "code": "HOMOGRAPHY_FAILED"})
+
+    if result["coverage_score"] < 0.25:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": (
+                    f"Points are too clustered (coverage {result['coverage_score']:.2f} < 0.25). "
+                    "Add more points spread across different areas of the camera frame."
+                ),
+                "code": "POOR_COVERAGE",
+            },
+        )
 
     now = datetime.now(timezone.utc)
 
