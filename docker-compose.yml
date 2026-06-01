@@ -123,7 +123,7 @@ services:
       --camera-id ${CAMERA_ID:-cam-01}
       --rtsp ${RTSP_URL}
       --fps ${TARGET_FPS:-5.0}
-      --window ${BATCH_WINDOW_SECONDS:-30.0}
+      --window ${BATCH_WINDOW_SECONDS:-60.0}
     depends_on:
       redis:
         condition: service_healthy

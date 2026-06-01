@@ -21,7 +21,7 @@ def now_ms() -> int:
 class Iep1Settings:
     store_id:             str
     camera_id:            str
-    rtsp_url:             str
+    rtsp_url:             str | None = None
     target_fps:           float = 5.0
     batch_window_seconds: float = 60.0
     s3_bucket:            str   = "retailvision"
@@ -29,9 +29,9 @@ class Iep1Settings:
 
 
 class Iep1Runtime:
-    def __init__(self, settings: Iep1Settings) -> None:
+    def __init__(self, settings: Iep1Settings, source=None) -> None:
         self._settings = settings
-        self._source = RtspSource(
+        self._source = source or RtspSource(
             settings.rtsp_url,
             settings.target_fps,
             settings.camera_id,
