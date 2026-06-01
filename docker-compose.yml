@@ -103,6 +103,10 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       DEBUG_MODE: ${DEBUG_MODE:-true}
+      IEP2_IMAGE: ${IEP2_IMAGE:-retailvision-iep2:latest}
+      DOCKER_NETWORK: ${DOCKER_NETWORK:-retail-edge_default}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy

@@ -10,11 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core import orchestrator
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
 from app.models.camera_config import CameraConfig
 from app.models.camera_schedule import CameraSchedule
 from app.models.version import StoreConfigVersion
 from app.schemas.camera_schedule import ScheduleCreate, ScheduleResponse, ScheduleUpdate, TriggerRequest
+from app.tasks.camera_scheduler import mark_running, mark_stopped
 
 log = logging.getLogger(__name__)
 
@@ -135,10 +137,26 @@ async def trigger_schedule(
     require_owner_or_manager(ctx)
     schedule = await _get_schedule_or_404(schedule_id, ctx.store_id, db)
 
-    log.info(
-        "Schedule trigger accepted  schedule_id=%s  action=%s  camera_config_id=%s",
-        schedule_id, body.action, schedule.camera_config_id,
-    )
+    store_id_str  = str(ctx.store_id)
+    config_id_str = str(schedule.camera_config_id)
+
+    try:
+        if body.action == "start":
+            await orchestrator.start_camera_workers(
+                store_id=store_id_str,
+                camera_config_id=config_id_str,
+            )
+            mark_running(store_id_str, config_id_str)
+
+        elif body.action == "stop":
+            await orchestrator.stop_camera_workers(
+                store_id=store_id_str,
+                camera_config_id=config_id_str,
+            )
+            mark_stopped(store_id_str, config_id_str)
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Orchestration failed: {str(exc)}")
 
     return JSONResponse(
         status_code=202,
@@ -146,5 +164,6 @@ async def trigger_schedule(
             "status": "accepted",
             "action": body.action,
             "schedule_id": str(schedule_id),
+            "camera_config_id": config_id_str,
         },
     )

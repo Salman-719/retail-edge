@@ -11,12 +11,21 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
+from app.core import orchestrator
 
 log = logging.getLogger(__name__)
 
 # In-memory set of currently-running (store_id, camera_config_id) pairs.
 # Resets on EEP restart. Phase 7 will replace this with a DB/Docker status query.
 _running_cameras: set[tuple[str, str]] = set()
+
+
+def mark_running(store_id: str, camera_config_id: str) -> None:
+    _running_cameras.add((str(store_id), str(camera_config_id)))
+
+
+def mark_stopped(store_id: str, camera_config_id: str) -> None:
+    _running_cameras.discard((str(store_id), str(camera_config_id)))
 
 _LOAD_SQL = text("""
 SELECT
@@ -56,8 +65,20 @@ async def _on_camera_start(row: dict) -> None:
             "camera_config_id": str(row["camera_config_id"]),
         },
     )
-    # Phase 7: call Docker SDK to start IEP2 container
-    # Phase 7: push StartCamera command to edge agent for IEP1
+    try:
+        await orchestrator.start_camera_workers(
+            store_id=str(row["store_id"]),
+            camera_config_id=str(row["camera_config_id"]),
+        )
+    except Exception as exc:
+        log.error(
+            "Failed to start camera workers",
+            exc_info=exc,
+            extra={
+                "store_id":         str(row["store_id"]),
+                "camera_config_id": str(row["camera_config_id"]),
+            },
+        )
 
 
 async def _on_camera_stop(row: dict) -> None:
@@ -68,8 +89,20 @@ async def _on_camera_stop(row: dict) -> None:
             "camera_config_id": str(row["camera_config_id"]),
         },
     )
-    # Phase 7: call Docker SDK to stop IEP2 container
-    # Phase 7: push StopCamera command to edge agent for IEP1
+    try:
+        await orchestrator.stop_camera_workers(
+            store_id=str(row["store_id"]),
+            camera_config_id=str(row["camera_config_id"]),
+        )
+    except Exception as exc:
+        log.error(
+            "Failed to stop camera workers",
+            exc_info=exc,
+            extra={
+                "store_id":         str(row["store_id"]),
+                "camera_config_id": str(row["camera_config_id"]),
+            },
+        )
 
 
 async def evaluate_schedules() -> None:
