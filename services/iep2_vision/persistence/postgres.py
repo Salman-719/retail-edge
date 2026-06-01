@@ -1,103 +1,82 @@
-"""PostgreSQL persistence — sole owner of the DB connection and tracking_history writes.
+"""PostgreSQL persistence — async writes to tracking_history via asyncpg.
 
-No identity logic, no embedding logic — pure DB I/O.
+No identity logic, no embedding logic, no DDL — pure async DB I/O.
 """
 import logging
-import os
-import re
+import uuid
 
-import psycopg2
-from dotenv import load_dotenv
+import asyncpg
 
 log = logging.getLogger("iep2.persistence")
 
 _INSERT_SQL = """
 INSERT INTO tracking_history
-    (local_id, track_id, camera_id, frame_index, x1, y1, x2, y2, confidence)
-VALUES
-    (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+    (store_id, camera_id, local_id, timestamp_ms,
+     floor_x, floor_y, zone_id,
+     bbox_confidence, bbox_area)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 """
 
 
 def _redact(dsn: str) -> str:
-    """Replace password in a DSN with *** for safe logging."""
+    import re
     return re.sub(r"(:)[^:@]+(@)", r"\1***\2", dsn)
 
 
-class TrackingPersistence:
-    def __init__(self, connection_string: str, camera_id: str):
-        """Load .env if present, then open a synchronous psycopg2 connection."""
-        load_dotenv()
+class PostgresPersistence:
+    def __init__(self, database_url: str, store_id: str, camera_id: str):
+        self._database_url = database_url
+        self._store_id = uuid.UUID(store_id)
         self._camera_id = camera_id
-        log.info("Connecting to DB  camera=%s  dsn=%s", camera_id, _redact(connection_string))
-        self._conn = psycopg2.connect(connection_string)
-        log.info("DB connected.")
+        self._pool = None
 
-    def write_detection(
+    @property
+    def pool(self) -> asyncpg.Pool:
+        return self._pool
+
+    async def connect(self) -> None:
+        log.info("Creating DB pool  camera=%s  dsn=%s", self._camera_id, _redact(self._database_url))
+        self._pool = await asyncpg.create_pool(
+            self._database_url, min_size=1, max_size=5
+        )
+        log.info("DB pool ready  camera=%s", self._camera_id)
+
+    async def close(self) -> None:
+        if self._pool:
+            await self._pool.close()
+            log.info("DB pool closed  camera=%s", self._camera_id)
+
+    async def insert_detection(
         self,
-        local_id: int,
-        track_id: int,
-        frame_index: int,
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
-        confidence: float,
+        local_id: uuid.UUID,
+        timestamp_ms: int,
+        bbox_confidence: float,
+        bbox_area: int,
+        floor_x: float | None,
+        floor_y: float | None,
+        zone_id: uuid.UUID | None,
     ) -> None:
-        """Insert one detection row and commit immediately."""
-        with self._conn.cursor() as cur:
-            cur.execute(
-                _INSERT_SQL,
-                (local_id, track_id, self._camera_id, frame_index,
-                 x1, y1, x2, y2, confidence),
-            )
-        self._conn.commit()
+        await self._pool.execute(
+            _INSERT_SQL,
+            self._store_id,
+            self._camera_id,
+            local_id,
+            timestamp_ms,
+            floor_x,
+            floor_y,
+            zone_id,
+            bbox_confidence,
+            bbox_area,
+        )
         log.debug(
-            "DB write  local_id=%d  track_id=%d  frame=%d  bbox=[%d,%d,%d,%d]  conf=%.2f",
-            local_id, track_id, frame_index, x1, y1, x2, y2, confidence,
+            "DB write  local_id=%s  ts=%d  conf=%.2f  area=%d",
+            local_id, timestamp_ms, bbox_confidence, bbox_area,
         )
 
-    def close(self) -> None:
-        """Close the connection cleanly."""
-        self._conn.close()
-        log.info("DB connection closed  camera=%s", self._camera_id)
+    async def __aenter__(self):
+        await self.connect()
+        return self
 
-
-# ---------------------------------------------------------------------------
-# Standalone smoke test: python persistence/postgres.py
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    logging.basicConfig(level="INFO", format="%(asctime)s  %(levelname)-8s  %(message)s")
-    load_dotenv()
-    url = os.environ["DATABASE_URL"]
-
-    db = TrackingPersistence(url, camera_id="cam-smoke-test")
-
-    # Clean up any leftover rows from previous runs so count is always 3.
-    with db._conn.cursor() as cur:
-        cur.execute("DELETE FROM tracking_history WHERE camera_id = 'cam-smoke-test';")
-    db._conn.commit()
-
-    # Insert 3 fake rows.
-    for i in range(3):
-        db.write_detection(
-            local_id=i + 1,
-            track_id=i + 10,
-            frame_index=i,
-            x1=10 * i, y1=10 * i,
-            x2=10 * i + 50, y2=10 * i + 80,
-            confidence=0.9,
-        )
-
-    # Query back and print count.
-    with db._conn.cursor() as cur:
-        cur.execute(
-            "SELECT COUNT(*) FROM tracking_history WHERE camera_id = 'cam-smoke-test';"
-        )
-        count = cur.fetchone()[0]
-
-    print(count)  # must print 3
-    assert count == 3, f"expected 3 rows, got {count}"
-
-    db.close()
-    print("smoke test passed")
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+        return False

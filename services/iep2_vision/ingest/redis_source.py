@@ -1,15 +1,21 @@
+"""Redis Stream consumer for IEP1 manifests.
+
+Uses XREADGROUP for at-least-once delivery with crash recovery.
+S3 frame fetching is NOT done here — callers receive raw manifest dicts
+and handle S3 themselves.
+"""
 import json
 import logging
-from typing import Iterator, Tuple
 
 import boto3
-import cv2
-import numpy as np
-import redis as redis_lib
+import redis.asyncio as aioredis
 
 log = logging.getLogger("iep2.redis_source")
 
 STREAM_PREFIX = "stream:iep1"
+GROUP_NAME    = "iep2_workers"
+BLOCK_MS      = 2000
+READ_COUNT    = 10
 
 
 def make_s3_client(endpoint_url: str, access_key: str, secret_key: str):
@@ -24,108 +30,104 @@ def make_s3_client(endpoint_url: str, access_key: str, secret_key: str):
 
 
 class RedisStreamFrameSource:
-    def __init__(self, camera_id: str, redis_url: str, s3_client, s3_bucket: str) -> None:
-        self._camera_id = camera_id
-        self._s3_client = s3_client
-        self._s3_bucket = s3_bucket
-        self._stream_name = f"{STREAM_PREFIX}:{camera_id}"
-        self._redis = redis_lib.Redis.from_url(redis_url)
-        self._stop = False
-        self._last_id = "$"
+    def __init__(self, camera_id: str, redis_url: str, s3_client) -> None:
+        self._camera_id     = camera_id
+        self._s3_client     = s3_client
+        self._stream_name   = f"{STREAM_PREFIX}:{camera_id}"
+        self._consumer_name = f"iep2_{camera_id}"
+        self._redis_url     = redis_url
+        self._redis         = None
 
-    def frames(self) -> Iterator[Tuple[int, np.ndarray]]:
-        while not self._stop:
-            response = self._redis.xread(
-                {self._stream_name: self._last_id},
-                block=2000,
-                count=1,
+    async def connect(self) -> None:
+        self._redis = aioredis.Redis.from_url(self._redis_url)
+        await self._ensure_group()
+        log.info(
+            "Consumer group ready  stream=%s  group=%s  consumer=%s",
+            self._stream_name, GROUP_NAME, self._consumer_name,
+        )
+
+    async def _ensure_group(self) -> None:
+        try:
+            await self._redis.xgroup_create(
+                name=self._stream_name,
+                groupname=GROUP_NAME,
+                id="0",
+                mkstream=True,
+            )
+        except aioredis.ResponseError as exc:
+            if "BUSYGROUP" not in str(exc):
+                raise
+
+    async def manifests(self):
+        """Async generator yielding (message_id, manifest_dict).
+
+        Phase A: drain all pending messages from before a crash (ID="0").
+        Phase B: read new messages (ID=">") indefinitely.
+        ACK is the caller's responsibility after the DB write succeeds.
+        """
+        # Phase A — crash recovery: replay any un-ACKed messages
+        log.info("Phase A: draining pending messages  stream=%s", self._stream_name)
+        while True:
+            response = await self._redis.xreadgroup(
+                groupname=GROUP_NAME,
+                consumername=self._consumer_name,
+                streams={self._stream_name: "0"},
+                count=READ_COUNT,
+                block=BLOCK_MS,
+            )
+            if not response:
+                break
+            any_yielded = False
+            for _stream, messages in response:
+                for message_id, fields in messages:
+                    manifest = self._parse_fields(fields)
+                    if manifest is None:
+                        continue
+                    any_yielded = True
+                    yield message_id, manifest
+            if not any_yielded:
+                break
+
+        log.info("Phase B: reading new messages  stream=%s", self._stream_name)
+
+        # Phase B — normal operation: read new messages
+        while True:
+            response = await self._redis.xreadgroup(
+                groupname=GROUP_NAME,
+                consumername=self._consumer_name,
+                streams={self._stream_name: ">"},
+                count=READ_COUNT,
+                block=BLOCK_MS,
             )
             if not response:
                 continue
-
             for _stream, messages in response:
-                for msg_id, fields in messages:
-                    self._last_id = msg_id
-
-                    raw = fields.get(b"manifest") or fields.get("manifest")
-                    if raw is None:
+                for message_id, fields in messages:
+                    manifest = self._parse_fields(fields)
+                    if manifest is None:
                         continue
+                    yield message_id, manifest
 
-                    manifest = json.loads(raw)
+    async def ack(self, message_id) -> None:
+        """ACK a message after successful processing and DB write."""
+        await self._redis.xack(self._stream_name, GROUP_NAME, message_id)
 
-                    if manifest.get("status") == "offline":
-                        log.debug(
-                            "camera_id=%s: skipping offline window batch=%s",
-                            self._camera_id, manifest.get("batch_number"),
-                        )
-                        continue
+    async def close(self) -> None:
+        if self._redis:
+            await self._redis.aclose()
+            log.info("Redis client closed  stream=%s", self._stream_name)
 
-                    for frame_entry in manifest.get("frames", []):
-                        if self._stop:
-                            return
-                        capture_ts_ms = int(frame_entry[0])
-                        s3_key = frame_entry[1]
+    async def __aenter__(self):
+        await self.connect()
+        return self
 
-                        try:
-                            s3_resp = self._s3_client.get_object(
-                                Bucket=self._s3_bucket,
-                                Key=s3_key,
-                            )
-                            data = s3_resp["Body"].read()
-                        except Exception as exc:
-                            log.warning(
-                                "camera_id=%s: S3 fetch failed key=%s: %s",
-                                self._camera_id, s3_key, exc,
-                            )
-                            continue
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+        return False
 
-                        arr = np.frombuffer(data, dtype=np.uint8)
-                        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                        if frame is None:
-                            log.warning(
-                                "camera_id=%s: imdecode failed key=%s",
-                                self._camera_id, s3_key,
-                            )
-                            continue
-
-                        yield capture_ts_ms, s3_key, frame
-
-    def release(self) -> None:
-        self._stop = True
-
-
-# ---------------------------------------------------------------------------
-# Standalone: python IEP2/ingest/redis_source.py
-# Requires Redis running with at least one IEP1 manifest in stream:iep1:test
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    import os
-    import sys
-    from dotenv import load_dotenv
-
-    load_dotenv()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-
-    redis_url  = os.environ.get("REDIS_URL",       "redis://localhost:6379/0")
-    endpoint   = os.environ.get("S3_ENDPOINT_URL", "")
-    access_key = os.environ.get("S3_ACCESS_KEY",   "")
-    secret_key = os.environ.get("S3_SECRET_KEY",   "")
-    bucket     = os.environ.get("S3_BUCKET",       "retailvision")
-
-    s3 = make_s3_client(endpoint, access_key, secret_key)
-    source = RedisStreamFrameSource(
-        camera_id="test",
-        redis_url=redis_url,
-        s3_client=s3,
-        s3_bucket=bucket,
-    )
-
-    count = 0
-    for ts, frame in source.frames():
-        print(f"frame capture_ts_ms={ts} shape={frame.shape}")
-        count += 1
-        if count >= 1:
-            break
-
-    source.release()
-    print(f"frame_count={count}")
+    @staticmethod
+    def _parse_fields(fields: dict) -> dict | None:
+        raw = fields.get(b"manifest") or fields.get("manifest")
+        if raw is None:
+            return None
+        return json.loads(raw)
