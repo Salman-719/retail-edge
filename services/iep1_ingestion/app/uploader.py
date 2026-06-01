@@ -74,6 +74,31 @@ class S3Uploader:
         return None
 
 
+    def delete_keys(self, keys: list) -> None:
+        if not keys:
+            return
+        chunk_size = 1000
+        total_deleted = 0
+        for i in range(0, len(keys), chunk_size):
+            chunk = keys[i : i + chunk_size]
+            objects = [{"Key": k} for k in chunk]
+            try:
+                self._client.delete_objects(
+                    Bucket=self.bucket,
+                    Delete={"Objects": objects, "Quiet": True},
+                )
+                total_deleted += len(chunk)
+            except Exception as exc:
+                logger.error(
+                    "camera_id=%s: delete_objects failed for %d keys: %s",
+                    self.camera_id,
+                    len(chunk),
+                    exc,
+                )
+        if total_deleted:
+            logger.info("camera_id=%s: deleted %d keys from S3", self.camera_id, total_deleted)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 

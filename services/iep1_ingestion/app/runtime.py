@@ -1,3 +1,4 @@
+import collections
 import logging
 import time
 from dataclasses import dataclass
@@ -8,6 +9,8 @@ from services.iep1_ingestion.app.window import WindowAccumulator
 from services.iep1_ingestion.app.publisher import WindowPublisher
 
 logger = logging.getLogger(__name__)
+
+BATCH_TTL_SECONDS = 300
 
 
 def now_ms() -> int:
@@ -40,6 +43,7 @@ class Iep1Runtime:
         )
         self._publisher = WindowPublisher(settings.camera_id, settings.redis_url)
         self._batch_number = 0
+        self._pending_cleanup: collections.deque = collections.deque()
 
     def _close_window(self, window_start_ms: int) -> None:
         window_end_ms = now_ms()
@@ -55,7 +59,16 @@ class Iep1Runtime:
         )
         self._publisher.publish(manifest)
         self._accumulator.reset()
+        keys = [frame[1] for frame in manifest.frames]
+        if keys:
+            self._pending_cleanup.append((now_ms(), keys))
         self._batch_number += 1
+
+    def _flush_expired_batches(self) -> None:
+        cutoff_ms = now_ms() - BATCH_TTL_SECONDS * 1000
+        while self._pending_cleanup and self._pending_cleanup[0][0] <= cutoff_ms:
+            _, keys = self._pending_cleanup.popleft()
+            self._uploader.delete_keys(keys)
 
     def run(self) -> None:
         window_start_ms = now_ms()
@@ -74,11 +87,18 @@ class Iep1Runtime:
                         capture_ts_ms,
                     )
 
+                self._flush_expired_batches()
+
                 if now_ms() - window_start_ms >= batch_duration_ms:
                     self._close_window(window_start_ms)
                     window_start_ms = now_ms()
         finally:
             self._close_window(window_start_ms)
+            self._flush_expired_batches()
+            # Unconditional cleanup of all remaining batches on exit
+            while self._pending_cleanup:
+                _, keys = self._pending_cleanup.popleft()
+                self._uploader.delete_keys(keys)
             self._source.release()
 
 
