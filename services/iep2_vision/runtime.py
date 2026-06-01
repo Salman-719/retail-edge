@@ -34,6 +34,7 @@ try:
     from .identity.manager import LocalIdentityManager
     from .persistence.postgres import TrackingPersistence
     from .ingest.redis_source import RedisStreamFrameSource, make_s3_client
+    from .live_publisher import LivePublisher
 except ImportError:
     _root = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, _root)
@@ -44,21 +45,23 @@ except ImportError:
     from identity.manager import LocalIdentityManager
     from persistence.postgres import TrackingPersistence
     from ingest.redis_source import RedisStreamFrameSource, make_s3_client
+    from live_publisher import LivePublisher
 
 _MAX_WIRE_WIDTH = 640
 
 
 @dataclass
 class Iep2Settings:
-    store_id:        str
-    camera_id:       str
-    database_url:    str
-    redis_url:       str   = "redis://localhost:6379/0"
-    s3_endpoint_url: str   = ""
-    s3_access_key:   str   = ""
-    s3_secret_key:   str   = ""
-    s3_bucket:       str   = "retailvision"
-    target_fps:      float = 5.0
+    store_id:            str
+    camera_id:           str
+    database_url:        str
+    redis_url:           str   = "redis://localhost:6379/0"
+    s3_endpoint_url:     str   = ""
+    s3_access_key:       str   = ""
+    s3_secret_key:       str   = ""
+    s3_bucket:           str   = "retailvision"
+    target_fps:          float = 5.0
+    live_stream_enabled: bool  = True
 
 
 @dataclass
@@ -126,11 +129,16 @@ class IEP2Runtime:
             s3,
             self.settings.s3_bucket,
         )
+        live_pub = (
+            LivePublisher(camera_id, self.settings.redis_url, enabled=True)
+            if self.settings.live_stream_enabled
+            else None
+        )
         log.info("Opening DB connection  camera=%s", camera_id)
         db = TrackingPersistence(self.settings.database_url, camera_id)
         db.create_table()
         try:
-            yield self._stream_from_source(source.frames(), db)
+            yield self._stream_from_source(source.frames(), db, live_pub=live_pub)
         finally:
             source.release()
             db.close()
@@ -138,14 +146,15 @@ class IEP2Runtime:
 
     @staticmethod
     def _video_source(video_path: str) -> Iterator[Tuple[int, np.ndarray]]:
-        """Wrap video file frames as (capture_ts_ms, frame) — ts is 0 placeholder."""
+        """Wrap video file frames as (capture_ts_ms, s3_key, frame) — ts and key are placeholders."""
         for frame in extract_frames(video_path):
-            yield 0, frame
+            yield 0, None, frame
 
     def _stream_from_source(
         self,
         source: Iterator[Tuple[int, np.ndarray]],
         db: TrackingPersistence,
+        live_pub=None,
     ):
         """Single pipeline implementation — both run() and run_from_iep1() use this."""
         camera_id = self.settings.camera_id
@@ -156,7 +165,7 @@ class IEP2Runtime:
         frame_index = 0
         db_rows_written = 0
 
-        for _capture_ts_ms, frame in source:
+        for _capture_ts_ms, _s3_key, frame in source:
             detections = detect(self.yolo_model, frame)
             tracks     = update(tracker, detections)
             enriched   = manager.process_frame(frame, tracks)
@@ -193,6 +202,9 @@ class IEP2Runtime:
             seen_ids.update(t["track_id"] for t in enriched)
             if new_entries:
                 log.info("Frame %4d  new track_ids=%s", frame_index, new_entries)
+
+            if live_pub:
+                live_pub.publish(_s3_key or "", _capture_ts_ms, display_tracks)
 
             yield FrameResult(
                 frame_index=frame_index,

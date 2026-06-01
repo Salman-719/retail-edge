@@ -141,6 +141,7 @@ services:
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
       S3_BUCKET: ${S3_BUCKET:-retailvision}
+      LIVE_STREAM_ENABLED: "true"
     command: >
       python services/iep2_vision/main.py
       --store-id ${STORE_ID:-store-01}
@@ -181,6 +182,24 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8006:8006"
+
+  live_bridge:
+    build:
+      context: ./services/live_bridge
+    ports:
+      - "8010:8010"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_URL: ${S3_PUBLIC_URL:-http://localhost:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
+      S3_BUCKET: ${S3_BUCKET:-retailvision}
+      PRESIGNED_URL_EXPIRY: 30
+    depends_on:
+      - redis
+      - minio
+    restart: unless-stopped
 
 volumes:
   postgres_data:

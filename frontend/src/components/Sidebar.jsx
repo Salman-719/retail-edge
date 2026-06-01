@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { NavLink, useNavigate, useParams } from 'react-router-dom'
 import {
   Store, Radio, BarChart2, Bot, Users, Calendar,
-  UserCheck, ClipboardList, SlidersHorizontal, ChevronLeft,
+  UserCheck, ClipboardList, SlidersHorizontal, ChevronLeft, Video,
 } from 'lucide-react'
 import { useAuth } from '../store'
 import { logout, getActiveAlerts, getActiveVersion } from '../api'
@@ -12,6 +12,7 @@ const NAV_GROUPS = [
     label: null,
     items: [
       { label: 'Live Monitoring', path: 'live',      Icon: Radio },
+      { label: 'Live View',       path: 'live-view', Icon: Video },
       { label: 'Analytics',       path: 'analytics', Icon: BarChart2 },
       { label: 'AI Assistant',    path: 'agent',     Icon: Bot },
     ],

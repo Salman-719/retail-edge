@@ -31,7 +31,7 @@ class RedisStreamFrameSource:
         self._stream_name = f"{STREAM_PREFIX}:{camera_id}"
         self._redis = redis_lib.Redis.from_url(redis_url)
         self._stop = False
-        self._last_id = "0"
+        self._last_id = "$"
 
     def frames(self) -> Iterator[Tuple[int, np.ndarray]]:
         while not self._stop:
@@ -88,7 +88,7 @@ class RedisStreamFrameSource:
                             )
                             continue
 
-                        yield capture_ts_ms, frame
+                        yield capture_ts_ms, s3_key, frame
 
     def release(self) -> None:
         self._stop = True

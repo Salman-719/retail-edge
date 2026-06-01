@@ -21,6 +21,7 @@ import Members from './pages/Members'
 import Audit from './pages/Audit'
 import AIAgent from './pages/AIAgent'
 import Settings from './pages/Settings'
+import LiveView from './pages/LiveView'
 
 export default function App() {
   return (
@@ -43,6 +44,7 @@ export default function App() {
           <Route path="config" element={<StoreConfig />} />
           <Route path="config/edit" element={<StoreConfigEdit />} />
           <Route path="live" element={<LiveMonitoring />} />
+          <Route path="live-view" element={<LiveView />} />
           <Route path="analytics" element={<Analytics />} />
           <Route path="agent" element={<AIAgent />} />
           <Route path="employees" element={<Employees />} />
