@@ -5,7 +5,7 @@ import {
   activateDraft, computeHomography, createCamera, createDraft, createObstacle, createZone,
   deleteCameraConfig, deleteCamera, deleteDraft, deleteObstacle, deleteZone,
   getActiveVersion, getDraft, getDraftCameraConfigs, getDraftFloorPlan, getDraftObstacles,
-  getDraftZones, getCalibrations, getSyncEvent, listSections, placeCameraConfig,
+  getDraftZones, getCalibrations, getSyncEvent, listSections, patchCamera, placeCameraConfig,
   setFloorPlanScale, updateCameraConfig, uploadCameraFrame, uploadFloorPlan, verifyCalibration,
 } from '../api'
 
@@ -13,7 +13,7 @@ import {
 
 const STEPS = [
   { n: 1, label: 'Upload Floor Plan' },
-  { n: 2, label: 'Set Scale' },
+  { n: 2, label: 'Scale & Boundary' },
   { n: 3, label: 'Place Cameras' },
   { n: 4, label: 'Camera Frames' },
   { n: 5, label: 'Correspondences' },
@@ -63,6 +63,7 @@ function FloorPlanStage({
   pendingMarker = null,
   correspondencePoints = [],
   activeConfigId = null,
+  worldBounds = [],
   onCanvasClick,
   showGrid = false,
   width = 700,
@@ -74,6 +75,7 @@ function FloorPlanStage({
 
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [cursor, setCursor] = useState('default')
   const isDragging = useRef(false)
   const didMove = useRef(false)
   const lastPos = useRef(null)
@@ -107,6 +109,7 @@ function FloorPlanStage({
     isDragging.current = true
     didMove.current = false
     lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
+    setCursor('grabbing')
   }
 
   const handleMouseMove = (e) => {
@@ -118,7 +121,7 @@ function FloorPlanStage({
     setPan(prev => clampPan(prev.x + dx, prev.y + dy, zoom))
   }
 
-  const handleMouseUp = () => { isDragging.current = false }
+  const handleMouseUp = () => { isDragging.current = false; setCursor('default') }
 
   const handleClick = (e) => {
     if (!onCanvasClick || didMove.current) return
@@ -176,7 +179,7 @@ function FloorPlanStage({
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        style={{ cursor: isDragging.current ? 'grabbing' : 'grab', background: '#f3f4f6', borderRadius: 8, display: 'block' }}
+        style={{ cursor, background: '#f3f4f6', borderRadius: 8, display: 'block' }}
       >
         <Layer>
           {bgImage && (
@@ -189,6 +192,20 @@ function FloorPlanStage({
           )}
 
           {showGrid && gridLines}
+
+          {worldBounds.length >= 2 && (
+            <Line
+              points={worldBounds.flatMap(([x, y]) => [tx(x), ty(y)])}
+              closed={worldBounds.length >= 3}
+              stroke="#f97316"
+              strokeWidth={2 / zoom}
+              dash={[8, 4]}
+              fill={worldBounds.length >= 3 ? '#f9731611' : undefined}
+            />
+          )}
+          {worldBounds.map(([x, y], i) => (
+            <Circle key={i} x={tx(x)} y={ty(y)} radius={5 / zoom} fill="#f97316" stroke="#fff" strokeWidth={1.5 / zoom} />
+          ))}
 
           {obstacles.map(obs => (
             <Line key={obs.id}
@@ -306,11 +323,12 @@ function FloorPlanStage({
 
 // ─── Camera Frame Viewer ──────────────────────────────────────────────────────
 
-function FrameStage({ frameUrl, width = 360, height = 260, points = [], onCanvasClick }) {
+function FrameStage({ frameUrl, width = 360, height = 260, points = [], pendingCount = 0, onCanvasClick }) {
   const image = useKonvaImage(frameUrl)
   const [imgSize, setImgSize] = useState({ w: width, h: height })
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [cursor, setCursor] = useState('default')
   const isDragging = useRef(false)
   const didMove = useRef(false)
   const lastPos = useRef(null)
@@ -348,6 +366,7 @@ function FrameStage({ frameUrl, width = 360, height = 260, points = [], onCanvas
     isDragging.current = true
     didMove.current = false
     lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
+    setCursor('grabbing')
   }
 
   const handleMouseMove = (e) => {
@@ -359,7 +378,7 @@ function FrameStage({ frameUrl, width = 360, height = 260, points = [], onCanvas
     setPan(prev => clampPan(prev.x + dx, prev.y + dy, zoom))
   }
 
-  const handleMouseUp = () => { isDragging.current = false }
+  const handleMouseUp = () => { isDragging.current = false; setCursor('default') }
 
   const handleClick = (e) => {
     if (!onCanvasClick || didMove.current) return
@@ -381,16 +400,20 @@ function FrameStage({ frameUrl, width = 360, height = 260, points = [], onCanvas
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        style={{ cursor: isDragging.current ? 'grabbing' : 'grab', background: '#111', borderRadius: 8, display: 'block' }}
+        style={{ cursor, background: '#111', borderRadius: 8, display: 'block' }}
       >
         <Layer>
           {image && <KonvaImage image={image} x={pan.x} y={pan.y} width={imgSize.w * scale} height={imgSize.h * scale} />}
-          {points.map((pt, i) => (
-            <React.Fragment key={i}>
-              <Circle x={tx(pt[0])} y={ty(pt[1])} radius={6 / zoom} fill="#22c55e" stroke="#fff" strokeWidth={2 / zoom} />
-              <Text x={tx(pt[0]) + 8 / zoom} y={ty(pt[1]) - 8 / zoom} text={`${i + 1}`} fontSize={Math.max(9, 11 / zoom)} fill="#22c55e" />
-            </React.Fragment>
-          ))}
+          {points.map((pt, i) => {
+            const isPending = i >= points.length - pendingCount
+            const color = isPending ? '#f97316' : '#22c55e'
+            return (
+              <React.Fragment key={i}>
+                <Circle x={tx(pt[0])} y={ty(pt[1])} radius={7 / zoom} fill={color} stroke="#fff" strokeWidth={2 / zoom} />
+                <Text x={tx(pt[0]) + 9 / zoom} y={ty(pt[1]) - 9 / zoom} text={isPending ? '?' : `${i + 1}`} fontSize={Math.max(10, 12 / zoom)} fill={color} />
+              </React.Fragment>
+            )
+          })}
         </Layer>
       </Stage>
       {zoom > 1 && (
@@ -431,6 +454,9 @@ export default function StoreConfigEdit() {
   // scalePoints = [origin, refA, refB]; not cleared on save so markers stay visible
   const [scalePoints, setScalePoints] = useState([])
   const [realDistance, setRealDistance] = useState('')
+  const [worldBoundsPoints, setWorldBoundsPoints] = useState([])
+  const [drawingWorldBounds, setDrawingWorldBounds] = useState(false)
+  const [settingScale, setSettingScale] = useState(false)
 
   // Step 3 — camera placement
   const [pendingCameraPlacement, setPendingCameraPlacement] = useState(null)
@@ -443,7 +469,8 @@ export default function StoreConfigEdit() {
 
   // Step 3 — inline camera config editing
   const [editingConfigId, setEditingConfigId] = useState(null)
-  const [editCameraForm, setEditCameraForm] = useState({ height_meters: '' })
+  const [editCameraForm, setEditCameraForm] = useState({ height_meters: '', stream_url: '' })
+  const [newCameraStreamUrl, setNewCameraStreamUrl] = useState('')
 
   // Steps 5-6 — per-camera correspondences and computed calibration results
   const [correspondencesMap, setCorrespondencesMap] = useState({})
@@ -474,7 +501,7 @@ export default function StoreConfigEdit() {
   function isStepComplete(n) {
     switch (n) {
       case 1: return !!floorPlan?.image_uploaded
-      case 2: return !!floorPlan?.scale_defined
+      case 2: return !!floorPlan?.scale_defined && (floorPlan?.boundary_polygon?.length >= 3 || worldBoundsPoints.length >= 3)
       case 3: return cameraConfigs.length > 0
       case 4: return cameraConfigs.length > 0 &&
         cameraConfigs.every(cc => cc.status !== 'pending')
@@ -579,6 +606,13 @@ export default function StoreConfigEdit() {
       setScalePoints([])
     }
 
+    // Restore world bounds polygon if previously saved
+    if (fp?.boundary_polygon?.length >= 3) {
+      setWorldBoundsPoints(fp.boundary_polygon)
+    } else {
+      setWorldBoundsPoints([])
+    }
+
     // Load stored calibration data and pre-populate correspondences for calibrated cameras
     const corrMap = {}
     const calibMap = {}
@@ -615,6 +649,10 @@ export default function StoreConfigEdit() {
     setSelectedConfigId(null)
     setScalePoints([])
     setRealDistance('')
+    setWorldBoundsPoints([])
+    setDrawingWorldBounds(false)
+    setSettingScale(false)
+    setNewCameraStreamUrl('')
     setCorrespondencesMap({})
     setCalibResultsMap({})
     setInProgressPoints([])
@@ -663,9 +701,10 @@ export default function StoreConfigEdit() {
     setFloorPlan(prev => prev ? { ...prev, scale_defined: false } : null)
   }
 
-  async function handleSetScale() {
+  async function handleSetScale(boundsOverride) {
     if (scalePoints.length < 3 || !realDistance || !selectedSection) return
     setSaving(true)
+    const bounds = boundsOverride !== undefined ? boundsOverride : worldBoundsPoints
     try {
       const updated = await setFloorPlanScale(slug, selectedSection.id, {
         origin_x: scalePoints[0][0],
@@ -673,6 +712,7 @@ export default function StoreConfigEdit() {
         ref_point_1: scalePoints[1],
         ref_point_2: scalePoints[2],
         real_distance_meters: parseFloat(realDistance),
+        ...(bounds.length >= 3 ? { boundary_polygon: bounds } : {}),
       })
       setFloorPlan(updated)
       // Keep scalePoints so the markers remain visible on the canvas
@@ -680,6 +720,27 @@ export default function StoreConfigEdit() {
       setError(err?.response?.data?.error || err.message)
     } finally {
       setSaving(false)
+    }
+  }
+
+  function handleWorldBoundsClick(x, y) {
+    setWorldBoundsPoints(prev => [...prev, [x, y]])
+  }
+
+  async function handleCloseWorldBounds() {
+    if (worldBoundsPoints.length < 3 || !selectedSection) return
+    setDrawingWorldBounds(false)
+    // Save immediately if scale is already defined
+    if (floorPlan?.scale_defined && scalePoints.length >= 3 && realDistance) {
+      await handleSetScale(worldBoundsPoints)
+    }
+  }
+
+  async function handleClearWorldBounds() {
+    setWorldBoundsPoints([])
+    setDrawingWorldBounds(false)
+    if (floorPlan?.scale_defined && scalePoints.length >= 3 && realDistance) {
+      await handleSetScale([])
     }
   }
 
@@ -697,17 +758,21 @@ export default function StoreConfigEdit() {
     if (!newCameraName.trim() || !selectedSection) return
     setSaving(true)
     try {
-      const cam = await createCamera(slug, { name: newCameraName.trim() })
+      const cam = await createCamera(slug, {
+        name: newCameraName.trim(),
+        ...(newCameraStreamUrl.trim() ? { cloud_stream_url: newCameraStreamUrl.trim() } : {}),
+      })
       const cc = await placeCameraConfig(slug, selectedSection.id, {
         physical_camera_id: cam.id,
         position_x: pendingCameraPlacement.x,
         position_y: pendingCameraPlacement.y,
         height_meters: newCameraHeight ? parseFloat(newCameraHeight) : null,
       })
-      setCameraConfigs(prev => [...prev, cc])
+      setCameraConfigs(prev => [...prev, { ...cc, stream_url: newCameraStreamUrl.trim() || null }])
       setCorrespondencesMap(prev => ({ ...prev, [cc.id]: [] }))
       setSelectedConfigId(cc.id)
       setPendingCameraPlacement(null)
+      setNewCameraStreamUrl('')
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
     } finally {
@@ -734,10 +799,16 @@ export default function StoreConfigEdit() {
     if (!editingConfigId) return
     setSaving(true)
     try {
-      const body = {}
-      if (editCameraForm.height_meters !== '') body.height_meters = parseFloat(editCameraForm.height_meters)
-      const updated = await updateCameraConfig(slug, editingConfigId, body)
-      setCameraConfigs(prev => prev.map(c => c.id === editingConfigId ? { ...c, ...updated } : c))
+      const cc = cameraConfigs.find(c => c.id === editingConfigId)
+      const configBody = {}
+      if (editCameraForm.height_meters !== '') configBody.height_meters = parseFloat(editCameraForm.height_meters)
+      const [updated] = await Promise.all([
+        updateCameraConfig(slug, editingConfigId, configBody),
+        patchCamera(slug, cc.physical_camera_id, { cloud_stream_url: editCameraForm.stream_url.trim() || null }),
+      ])
+      setCameraConfigs(prev => prev.map(c =>
+        c.id === editingConfigId ? { ...c, ...updated, stream_url: editCameraForm.stream_url.trim() || null } : c
+      ))
       setEditingConfigId(null)
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
@@ -1079,7 +1150,7 @@ export default function StoreConfigEdit() {
                   <span className="w-5 h-5 bg-green-100 rounded-full flex items-center justify-center text-green-600">✓</span>
                   Floor plan uploaded · {floorPlan.width_px} × {floorPlan.height_px} px
                 </div>
-                <FloorPlanStage floorPlan={floorPlan} />
+                <FloorPlanStage floorPlan={floorPlan} worldBounds={floorPlan?.boundary_polygon || []} />
               </div>
             )}
           </div>
@@ -1089,73 +1160,161 @@ export default function StoreConfigEdit() {
         {step === 2 && (
           <div className="space-y-4 max-w-3xl">
             <div>
-              <h2 className="text-xl font-semibold mb-1">Set Scale</h2>
-              <p className="text-sm text-gray-500">
-                Click to place: (1) Origin, (2) Reference point A, (3) Reference point B.
-                Then enter the real-world distance A→B in metres.
-              </p>
+              <h2 className="text-xl font-semibold mb-1">Scale & Boundary</h2>
             </div>
 
-            {floorPlan?.scale_defined && (
-              <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 px-3 py-2 rounded">
-                <span>✓</span>
-                <span>Scale set: {floorPlan.pixels_per_meter?.toFixed(2)} px/m</span>
+            {/* Set Scale card */}
+            <div className="border border-gray-200 rounded-lg p-3 space-y-2 bg-gray-50">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-gray-700">Set Scale</p>
+                {floorPlan?.scale_defined && !drawingWorldBounds && scalePoints.length < 3 && (
+                  <span className="text-xs text-green-600 font-medium">✓ {floorPlan.pixels_per_meter?.toFixed(2)} px/m</span>
+                )}
               </div>
-            )}
-
-            {/* Per-point chips with individual remove buttons */}
-            <div className="flex gap-2 flex-wrap">
-              {[
-                { label: 'Origin (O)', placed: 'text-orange-600 bg-orange-50 border-orange-200' },
-                { label: 'Ref A', placed: 'text-blue-600 bg-blue-50 border-blue-200' },
-                { label: 'Ref B', placed: 'text-blue-600 bg-blue-50 border-blue-200' },
-              ].map((item, i) => (
-                <div key={i} className={`flex items-center gap-1.5 px-2 py-1 rounded border text-xs ${
-                  scalePoints.length > i ? item.placed : 'bg-gray-50 border-gray-200 text-gray-400'
-                }`}>
-                  <span className="font-bold">{i + 1}.</span>
-                  <span>{item.label}</span>
-                  {scalePoints.length > i && (
-                    <>
-                      <span className="text-gray-400">
-                        ({scalePoints[i][0].toFixed(0)}, {scalePoints[i][1].toFixed(0)})
-                      </span>
+              <p className="text-xs text-gray-500">
+                Place Origin, Reference A, and Reference B on the map, then enter the real-world A→B distance.
+              </p>
+              {!settingScale ? (
+                <button
+                  onClick={() => { setSettingScale(true); setDrawingWorldBounds(false); setScalePoints([]); setRealDistance('') }}
+                  className="px-3 py-1.5 rounded border text-sm border-blue-300 text-blue-700 hover:bg-blue-50"
+                >
+                  {floorPlan?.scale_defined ? 'Reset Scale' : 'Set Scale'}
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  {/* Per-point chips */}
+                  <div className="flex gap-2 flex-wrap">
+                    {[
+                      { label: 'Origin (O)', placed: 'text-orange-600 bg-orange-50 border-orange-200' },
+                      { label: 'Ref A', placed: 'text-blue-600 bg-blue-50 border-blue-200' },
+                      { label: 'Ref B', placed: 'text-blue-600 bg-blue-50 border-blue-200' },
+                    ].map((item, i) => (
+                      <div key={i} className={`flex items-center gap-1.5 px-2 py-1 rounded border text-xs ${
+                        scalePoints.length > i ? item.placed : 'bg-gray-50 border-gray-200 text-gray-400'
+                      }`}>
+                        <span className="font-bold">{i + 1}.</span>
+                        <span>{item.label}</span>
+                        {scalePoints.length > i && (
+                          <>
+                            <span className="text-gray-400">
+                              ({scalePoints[i][0].toFixed(0)}, {scalePoints[i][1].toFixed(0)})
+                            </span>
+                            <button
+                              onClick={() => removeScalePoint(i)}
+                              title="Remove this point and all after it"
+                              className="ml-1 text-gray-400 hover:text-red-500 font-bold leading-none"
+                            >✕</button>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {scalePoints.length === 3 && (
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <label className="text-sm text-gray-700">Distance A→B (metres):</label>
+                      <input
+                        type="number" step="0.01" min="0.01"
+                        value={realDistance}
+                        onChange={e => setRealDistance(e.target.value)}
+                        className="w-28 border border-gray-300 rounded px-2 py-1.5 text-sm"
+                        placeholder="e.g. 2.5"
+                      />
                       <button
-                        onClick={() => removeScalePoint(i)}
-                        title="Remove this point and all after it"
-                        className="ml-1 text-gray-400 hover:text-red-500 font-bold leading-none"
-                      >✕</button>
-                    </>
+                        onClick={async () => { await handleSetScale(); setSettingScale(false) }}
+                        disabled={!realDistance || saving}
+                        className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm font-medium disabled:opacity-50"
+                      >
+                        {saving ? 'Saving…' : 'Save Scale'}
+                      </button>
+                      <button
+                        onClick={() => { setSettingScale(false); setScalePoints(floorPlan?.origin_x != null ? [[floorPlan.origin_x, floorPlan.origin_y]] : []) }}
+                        className="text-sm text-gray-500 hover:text-gray-700"
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   )}
                 </div>
-              ))}
+              )}
             </div>
 
             <FloorPlanStage
               floorPlan={floorPlan}
               scalePoints={scalePoints}
-              onCanvasClick={scalePoints.length < 3 ? handleScaleClick : null}
+              worldBounds={drawingWorldBounds ? worldBoundsPoints : (floorPlan?.boundary_polygon || worldBoundsPoints)}
+              onCanvasClick={
+                drawingWorldBounds
+                  ? handleWorldBoundsClick
+                  : (settingScale && scalePoints.length < 3 ? handleScaleClick : null)
+              }
             />
 
-            {scalePoints.length === 3 && (
-              <div className="flex items-center gap-3 flex-wrap">
-                <label className="text-sm text-gray-700">Distance A→B (metres):</label>
-                <input
-                  type="number" step="0.01" min="0.01"
-                  value={realDistance}
-                  onChange={e => setRealDistance(e.target.value)}
-                  className="w-28 border border-gray-300 rounded px-2 py-1.5 text-sm"
-                  placeholder="e.g. 2.5"
-                />
-                <button
-                  onClick={handleSetScale}
-                  disabled={!realDistance || saving}
-                  className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm font-medium disabled:opacity-50"
-                >
-                  {saving ? 'Saving…' : 'Set Scale'}
-                </button>
+            {/* Walkable area boundary drawing */}
+            <div className="border border-gray-200 rounded-lg p-3 space-y-2 bg-gray-50">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-gray-700">Walkable Area Boundary</p>
+                {(worldBoundsPoints.length > 0 || floorPlan?.boundary_polygon?.length >= 3) && !drawingWorldBounds && (
+                  <button
+                    onClick={handleClearWorldBounds}
+                    className="text-xs text-red-400 hover:text-red-600"
+                  >
+                    Clear boundary
+                  </button>
+                )}
               </div>
-            )}
+              <p className="text-xs text-gray-500">
+                Draw a polygon defining the walkable floor area. Tracked positions projected outside this boundary will be clamped to its edge.
+              </p>
+              {!drawingWorldBounds ? (
+                <button
+                  onClick={() => { setDrawingWorldBounds(true); setWorldBoundsPoints([]) }}
+                  className="px-3 py-1.5 rounded border text-sm border-orange-300 text-orange-700 hover:bg-orange-50"
+                >
+                  {(floorPlan?.boundary_polygon?.length >= 3 || worldBoundsPoints.length >= 3) ? 'Redraw Boundary' : 'Draw Boundary'}
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="text-xs text-gray-500">{worldBoundsPoints.length} point{worldBoundsPoints.length !== 1 ? 's' : ''} placed — click the floor plan to add more</span>
+                    {worldBoundsPoints.length >= 3 && (
+                      <button
+                        onClick={handleCloseWorldBounds}
+                        disabled={saving}
+                        className="px-3 py-1.5 rounded border text-sm bg-orange-500 text-white border-orange-500 hover:bg-orange-600 disabled:opacity-50"
+                      >
+                        {saving ? 'Saving…' : `Close & Save (${worldBoundsPoints.length} pts)`}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { setDrawingWorldBounds(false); setWorldBoundsPoints(floorPlan?.boundary_polygon || []) }}
+                      className="text-sm text-gray-500 hover:text-gray-700"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {worldBoundsPoints.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {worldBoundsPoints.map(([x, y], i) => (
+                        <span key={i} className="flex items-center gap-1 px-2 py-0.5 rounded bg-orange-50 border border-orange-200 text-xs text-orange-700">
+                          <span>{i + 1}. ({Math.round(x)}, {Math.round(y)})</span>
+                          <button
+                            onClick={() => setWorldBoundsPoints(prev => prev.filter((_, j) => j !== i))}
+                            className="ml-0.5 text-orange-400 hover:text-red-500 font-bold leading-none"
+                            title="Remove this point"
+                          >✕</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {!drawingWorldBounds && (worldBoundsPoints.length >= 3 || floorPlan?.boundary_polygon?.length >= 3) && (
+                <p className="text-xs text-orange-600 font-medium">
+                  ✓ Boundary set ({(floorPlan?.boundary_polygon || worldBoundsPoints).length} vertices)
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -1173,6 +1332,7 @@ export default function StoreConfigEdit() {
               floorPlan={floorPlan}
               cameraConfigs={cameraConfigs}
               pendingMarker={pendingCameraPlacement}
+              worldBounds={floorPlan?.boundary_polygon || []}
               onCanvasClick={!pendingCameraPlacement ? handleMapClickForCamera : null}
             />
 
@@ -1196,6 +1356,13 @@ export default function StoreConfigEdit() {
                   onChange={e => setNewCameraHeight(e.target.value)}
                   step="0.1" min="0.1"
                   className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                />
+                <input
+                  type="text"
+                  placeholder="Stream URL (optional, e.g. rtsp://host:8554/cam1)"
+                  value={newCameraStreamUrl}
+                  onChange={e => setNewCameraStreamUrl(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm font-mono"
                 />
                 <div className="flex gap-2">
                   <button
@@ -1223,9 +1390,10 @@ export default function StoreConfigEdit() {
                   <div key={cc.id} className="bg-gray-50 border border-gray-100 rounded text-sm">
                     <div className="flex items-center justify-between px-3 py-2">
                       <span className="font-medium">{cc.physical_camera_name}</span>
-                      <span className="text-xs text-gray-400 mx-2">
+                      <span className="text-xs text-gray-400 mx-2 truncate max-w-xs">
                         ({Math.round(cc.position_x)}, {Math.round(cc.position_y)})
                         {cc.height_meters != null ? ` · ${cc.height_meters}m` : ''}
+                        {cc.stream_url ? ` · ${cc.stream_url}` : ''}
                       </span>
                       <div className="flex gap-2 flex-shrink-0">
                         <button
@@ -1234,6 +1402,7 @@ export default function StoreConfigEdit() {
                             setEditingConfigId(cc.id)
                             setEditCameraForm({
                               height_meters: cc.height_meters ?? '',
+                              stream_url: cc.stream_url ?? '',
                             })
                           }}
                           className="text-xs text-blue-500 hover:text-blue-700"
@@ -1251,25 +1420,37 @@ export default function StoreConfigEdit() {
                     {editingConfigId === cc.id && (
                       <form
                         onSubmit={handleUpdateCameraConfig}
-                        className="border-t border-gray-200 px-3 py-2 flex items-center gap-3 flex-wrap"
+                        className="border-t border-gray-200 px-3 py-2 space-y-2"
                       >
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <div className="flex items-center gap-1.5">
+                            <label className="text-xs text-gray-500">Height (m):</label>
+                            <input
+                              type="number" step="0.1" min="0.1"
+                              value={editCameraForm.height_meters}
+                              onChange={e => setEditCameraForm(f => ({ ...f, height_meters: e.target.value }))}
+                              className="w-20 border border-gray-300 rounded px-2 py-1 text-xs"
+                              placeholder="e.g. 3.5"
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            disabled={saving}
+                            className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium disabled:opacity-50"
+                          >
+                            {saving ? 'Saving…' : 'Save'}
+                          </button>
+                        </div>
                         <div className="flex items-center gap-1.5">
-                          <label className="text-xs text-gray-500">Height (m):</label>
+                          <label className="text-xs text-gray-500 flex-shrink-0">Stream URL:</label>
                           <input
-                            type="number" step="0.1" min="0.1"
-                            value={editCameraForm.height_meters}
-                            onChange={e => setEditCameraForm(f => ({ ...f, height_meters: e.target.value }))}
-                            className="w-20 border border-gray-300 rounded px-2 py-1 text-xs"
-                            placeholder="e.g. 3.5"
+                            type="text"
+                            value={editCameraForm.stream_url}
+                            onChange={e => setEditCameraForm(f => ({ ...f, stream_url: e.target.value }))}
+                            className="flex-1 border border-gray-300 rounded px-2 py-1 text-xs font-mono"
+                            placeholder="rtsp://host:8554/cam1"
                           />
                         </div>
-                        <button
-                          type="submit"
-                          disabled={saving}
-                          className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium disabled:opacity-50"
-                        >
-                          {saving ? 'Saving…' : 'Save'}
-                        </button>
                       </form>
                     )}
                   </div>
@@ -1388,57 +1569,64 @@ export default function StoreConfigEdit() {
             )}
 
             {selectedConfig && (
-              <div className="flex gap-4 items-start flex-wrap">
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-gray-500 mb-1 font-medium">
-                    Camera Frame — click a point
-                    {pendingPixelPt && <span className="text-gray-400"> (waiting for floor plan click)</span>}
-                  </p>
-                  {selectedConfig.frame_url ? (
-                    <FrameStage
-                      frameUrl={selectedConfig.frame_url}
-                      width={380} height={280}
-                      points={activeCorrespondences.map(c => c.pixel)}
-                      onCanvasClick={!pendingPixelPt ? handleFrameClickForCorrespondence : null}
+              <div className="flex items-start">
+                {/* Canvases — left column */}
+                <div className="flex-1 min-w-0 space-y-4">
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1 font-medium">
+                      Camera Frame — click a point
+                      {pendingPixelPt && <span className="text-blue-600 font-medium"> → now click the matching spot on the floor plan below</span>}
+                    </p>
+                    {selectedConfig.frame_url ? (
+                      <FrameStage
+                        frameUrl={selectedConfig.frame_url}
+                        width={900} height={480}
+                        points={[
+                          ...activeCorrespondences.map(c => c.pixel),
+                          ...(pendingPixelPt ? [pendingPixelPt] : []),
+                        ]}
+                        pendingCount={pendingPixelPt ? 1 : 0}
+                        onCanvasClick={!pendingPixelPt ? handleFrameClickForCorrespondence : null}
+                      />
+                    ) : (
+                      <div className="flex items-center justify-center h-40 bg-gray-100 rounded text-sm text-gray-400">
+                        No frame uploaded — go back to Step 4
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1 font-medium">Floor Plan — click matching point</p>
+                    <FloorPlanStage
+                      floorPlan={floorPlan}
+                      cameraConfigs={cameraConfigs}
+                      activeConfigId={selectedConfigId}
+                      correspondencePoints={activeCorrespondences.map(c => c.world)}
+                      worldBounds={floorPlan?.boundary_polygon || []}
+                      onCanvasClick={pendingPixelPt ? handleMapClickForCorrespondence : null}
+                      showGrid={true}
+                      width={1400} height={2400}
                     />
-                  ) : (
-                    <div className="flex items-center justify-center h-40 bg-gray-100 rounded text-sm text-gray-400">
-                      No frame uploaded — go back to Step 4
-                    </div>
-                  )}
+                  </div>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-gray-500 mb-1 font-medium">Floor Plan — click matching point</p>
-                  <FloorPlanStage
-                    floorPlan={floorPlan}
-                    cameraConfigs={cameraConfigs}
-                    activeConfigId={selectedConfigId}
-                    correspondencePoints={activeCorrespondences.map(c => c.world)}
-                    onCanvasClick={pendingPixelPt ? handleMapClickForCorrespondence : null}
-                    showGrid={true}
-                    width={380} height={280}
-                  />
-                </div>
-              </div>
-            )}
 
-            {activeCorrespondences.length > 0 && (
-              <div className="bg-gray-50 rounded p-3 max-w-2xl">
-                <p className="text-xs font-medium text-gray-600 mb-2">{activeCorrespondences.length} pair(s):</p>
-                <div className="space-y-1 max-h-32 overflow-y-auto">
-                  {activeCorrespondences.map((c, i) => (
-                    <div key={i} className="flex items-center justify-between text-xs text-gray-600">
-                      <span>
-                        #{i + 1}: pixel ({c.pixel[0].toFixed(0)}, {c.pixel[1].toFixed(0)})
-                        → world ({c.world[0].toFixed(1)}, {c.world[1].toFixed(1)})
-                      </span>
-                      <button
-                        onClick={() => removeCorrespondence(selectedConfigId, i)}
-                        className="text-red-400 hover:text-red-600 ml-2"
-                      >✕</button>
+                {/* Pairs list — right column */}
+                {activeCorrespondences.length > 0 && (
+                  <div className="w-96 flex-shrink-0 bg-gray-50 rounded p-4 -ml-32 mt-16">
+                    <p className="text-sm font-medium text-gray-600 mb-3">{activeCorrespondences.length} pair(s):</p>
+                    <div className="space-y-0.5 max-h-[680px] overflow-y-auto">
+                      {activeCorrespondences.map((c, i) => (
+                        <div key={i} className="flex items-center justify-between gap-2 text-sm text-gray-600 py-1.5 border-b border-gray-100 last:border-0">
+                          <span className="font-medium text-gray-400 w-5 flex-shrink-0">#{i + 1}</span>
+                          <span className="flex-1 font-mono">({c.pixel[0].toFixed(0)}, {c.pixel[1].toFixed(0)}) → ({c.world[0].toFixed(1)}, {c.world[1].toFixed(1)})</span>
+                          <button
+                            onClick={() => removeCorrespondence(selectedConfigId, i)}
+                            className="text-red-400 hover:text-red-600 flex-shrink-0"
+                          >✕</button>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1507,7 +1695,7 @@ export default function StoreConfigEdit() {
 
         {/* ─ Step 7 ──────────────────────────────────────────────────────── */}
         {step === 7 && (
-          <div className="space-y-4">
+          <div className="space-y-4 max-w-5xl">
             <div>
               <h2 className="text-xl font-semibold mb-1">Verify Calibration</h2>
               <p className="text-sm text-gray-500">
@@ -1546,14 +1734,14 @@ export default function StoreConfigEdit() {
                   </div>
                 ) : null}
 
-                <div className="flex gap-4 items-start flex-wrap">
-                  <div className="flex-1 min-w-0">
+                <div className="space-y-4">
+                  <div>
                     <p className="text-xs text-gray-500 mb-1 font-medium">
                       {correctionMode && !correctionPixel ? '→ Click inaccurate point on frame' : 'Camera Frame — click a point to project'}
                     </p>
                     <FrameStage
                       frameUrl={selectedConfig.frame_url}
-                      width={380} height={280}
+                      width={900} height={480}
                       points={correctionMode && correctionPixel
                         ? [correctionPixel]
                         : verifyPreview?.pixel ? [verifyPreview.pixel] : []}
@@ -1562,7 +1750,7 @@ export default function StoreConfigEdit() {
                         : (!correctionMode ? handleFrameClickForVerify : null)}
                     />
                   </div>
-                  <div className="flex-1 min-w-0">
+                  <div>
                     <p className="text-xs text-gray-500 mb-1 font-medium">
                       {correctionMode && correctionPixel ? '→ Click correct location on floor plan' : 'Floor Plan — projected location'}
                     </p>
@@ -1571,8 +1759,9 @@ export default function StoreConfigEdit() {
                       cameraConfigs={cameraConfigs}
                       activeConfigId={selectedConfigId}
                       correspondencePoints={verifyPreview?.world && !correctionMode ? [verifyPreview.world] : []}
+                      worldBounds={floorPlan?.boundary_polygon || []}
                       onCanvasClick={correctionMode && correctionPixel ? handleMapClickForCorrection : null}
-                      width={380} height={280}
+                      width={1400} height={2400}
                     />
                   </div>
                 </div>
@@ -1677,6 +1866,7 @@ export default function StoreConfigEdit() {
               cameraConfigs={cameraConfigs}
               overlayPoints={pendingPolygon ? pendingPolygon.points : inProgressPoints}
               overlayMode={pendingPolygon ? pendingPolygon.mode : drawMode}
+              worldBounds={floorPlan?.boundary_polygon || []}
               onCanvasClick={!pendingPolygon ? handleMapClickForDrawing : null}
             />
 
