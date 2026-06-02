@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
 
 import grpc
@@ -87,13 +88,13 @@ async def _upsert_agent(
         await session.execute(
             text("""
                 INSERT INTO edge_agents (store_id, status, last_heartbeat_at, agent_version, updated_at)
-                VALUES (:store_id::uuid, :status, :now, :version, :now)
+                VALUES (:store_id, :status, :now, :version, :now)
                 ON CONFLICT (store_id) DO UPDATE SET
                     status            = EXCLUDED.status,
                     last_heartbeat_at = EXCLUDED.last_heartbeat_at,
                     agent_version     = COALESCE(EXCLUDED.agent_version, edge_agents.agent_version),
                     updated_at        = EXCLUDED.updated_at
             """),
-            {"store_id": store_id, "status": status, "now": now, "version": agent_version},
+            {"store_id": uuid.UUID(store_id), "status": status, "now": now, "version": agent_version},
         )
         await session.commit()

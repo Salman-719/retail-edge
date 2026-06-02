@@ -26,7 +26,7 @@ def start_iep1(cmd, image: str, network: str) -> None:
     try:
         old = client.containers.get(name)
         old.remove(force=True)
-        logger.info("Removed existing container", extra={"name": name})
+        logger.info("Removed existing container", extra={"container_name": name})
     except docker.errors.NotFound:
         pass
 
@@ -52,7 +52,7 @@ def start_iep1(cmd, image: str, network: str) -> None:
         detach=True,
         restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
     )
-    logger.info("Started IEP1 container", extra={"name": name})
+    logger.info("Started IEP1 container", extra={"container_name": name})
 
 
 def stop_iep1(store_id: str, camera_id: str) -> None:
@@ -61,9 +61,9 @@ def stop_iep1(store_id: str, camera_id: str) -> None:
     try:
         container = client.containers.get(name)
         container.stop(timeout=10)
-        logger.info("Stopped IEP1 container", extra={"name": name})
+        logger.info("Stopped IEP1 container", extra={"container_name": name})
     except docker.errors.NotFound:
-        logger.info("Container not found, already gone", extra={"name": name})
+        logger.info("Container not found, already gone", extra={"container_name": name})
 
 
 def get_status(store_id: str, camera_id: str) -> str:

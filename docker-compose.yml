@@ -125,8 +125,8 @@ services:
       REDIS_URL: redis://redis:6379/0
     command: >
       python -m services.iep1_ingestion.app.main
-      --store-id ${STORE_ID:-store-01}
-      --camera-id ${CAMERA_ID:-cam-01}
+      --store-id ${STORE_ID}
+      --camera-id ${CAMERA_ID}
       --rtsp ${RTSP_URL}
       --fps ${TARGET_FPS:-5.0}
       --window ${BATCH_WINDOW_SECONDS:-60.0}
@@ -148,10 +148,12 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
       S3_BUCKET: ${S3_BUCKET:-retailvision}
       LIVE_STREAM_ENABLED: "true"
+    volumes:
+      - ./testing-data:/workspace/testing-data:ro
     command: >
       python services/iep2_vision/main.py
-      --store-id ${STORE_ID:-store-01}
-      --camera-id ${CAMERA_ID:-cam-01}
+      --store-id ${STORE_ID}
+      --camera-id ${CAMERA_ID}
       --source redis
     depends_on:
       postgres:
@@ -210,7 +212,7 @@ services:
   # ─── Edge Agent (dev-only) ────────────────────────────────────────────────
   # In production the Edge Agent runs on the physical edge device, not here.
   # This entry lets you test the full gRPC loop on a single machine.
-  edge_agent:
+  edge_agent_dev:
     build:
       context: ./services/edge_agent
       dockerfile: Dockerfile

@@ -39,7 +39,7 @@ def start_iep2(
     try:
         old = client.containers.get(name)
         old.remove(force=True)
-        logger.info("Removed existing IEP2 container", extra={"name": name})
+        logger.info("Removed existing IEP2 container", extra={"container_name": name})
     except docker.errors.NotFound:
         pass
 
@@ -65,7 +65,7 @@ def start_iep2(
         detach=True,
         restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
     )
-    logger.info("Started IEP2 container", extra={"name": name})
+    logger.info("Started IEP2 container", extra={"container_name": name})
 
 
 def stop_iep2(store_id: str, physical_camera_id: str) -> None:
@@ -73,9 +73,9 @@ def stop_iep2(store_id: str, physical_camera_id: str) -> None:
     try:
         container = get_client().containers.get(name)
         container.stop(timeout=10)
-        logger.info("Stopped IEP2 container", extra={"name": name})
+        logger.info("Stopped IEP2 container", extra={"container_name": name})
     except docker.errors.NotFound:
-        logger.info("IEP2 container not found", extra={"name": name})
+        logger.info("IEP2 container not found", extra={"container_name": name})
 
 
 def get_iep2_status(store_id: str, physical_camera_id: str) -> str:

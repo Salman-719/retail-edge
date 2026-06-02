@@ -3,19 +3,28 @@ import asyncio
 import logging
 import os
 import sys
+import uuid as _uuid
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
+def _uuid_arg(value: str) -> str:
+    try:
+        _uuid.UUID(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a valid UUID: {value!r}")
+    return value
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(
         description="IEP2 vision worker — one process per camera",
     )
-    parser.add_argument("--store-id",          required=True,                  help="Store identifier (UUID)")
+    parser.add_argument("--store-id",          required=True,  type=_uuid_arg, help="Store identifier (UUID)")
     parser.add_argument("--camera-id",         required=True,                  help="Camera identifier")
-    parser.add_argument("--camera-config-id",  default=None,
+    parser.add_argument("--camera-config-id",  default=None,   type=_uuid_arg,
                         help="UUID of the camera_configs row. Required for floor projection. "
                              "If omitted, floor_x/floor_y/zone_id are stored as NULL.")
     parser.add_argument("--source",            choices=["video", "redis"],
