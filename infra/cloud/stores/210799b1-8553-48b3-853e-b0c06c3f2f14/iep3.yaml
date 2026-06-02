@@ -1,21 +1,21 @@
-# Template — copy to stores/{store_id}/ and replace __STORE_ID__ placeholder.
+# Template — copy to stores/{store_id}/ and replace 210799b1-8553-48b3-853e-b0c06c3f2f14 placeholder.
 # Apply with: kubectl apply -k infra/cloud/stores/{store_id}/
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: iep3-__STORE_ID__
+  name: iep3-210799b1-8553-48b3-853e-b0c06c3f2f14
   namespace: retail-edge
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: iep3
-      store: __STORE_ID__
+      store: 210799b1-8553-48b3-853e-b0c06c3f2f14
   template:
     metadata:
       labels:
         app: iep3
-        store: __STORE_ID__
+        store: 210799b1-8553-48b3-853e-b0c06c3f2f14
     spec:
       containers:
         - name: iep3
@@ -23,12 +23,11 @@ spec:
           command: ["python", "-m", "services.iep3_reconciliation.app.main"]
           env:
             - name: STORE_ID
-              value: "__STORE_ID__"
+              value: "210799b1-8553-48b3-853e-b0c06c3f2f14"
             - name: IEP3_REDIS_STREAM
-              value: "stream:store:__STORE_ID__:batch_complete"
-            # Optional override. Leave empty in production — IEP3 reads the
-            # store's cameras from the DB and auto-refreshes when you change
-            # them in the GUI (no restart needed). Set only for testing.
+              value: "stream:store:210799b1-8553-48b3-853e-b0c06c3f2f14:batch_complete"
+            # Comma-separated camera IDs for this store. Empty = pod idles until
+            # the store's cameras are configured; set this and restart the pod.
             - name: IEP3_CAMERA_IDS
               value: ""
           envFrom:

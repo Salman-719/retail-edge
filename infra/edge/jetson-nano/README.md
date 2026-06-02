@@ -20,5 +20,5 @@ cannot read the Jetson filesystem. Use `IEP1_FRAME_STORAGE=s3`.
 - `scripts/install-edge-host.sh` - base Docker/host directory setup.
 - `systemd/retail-edge-iaip1.service` - optional boot service.
 
-See [docs/production-jetson-edge-deployment.md](../../../docs/production-jetson-edge-deployment.md)
+See [docs/deploy-edge.md](../../../docs/deploy-edge.md)
 for the full installation and deployment guide.

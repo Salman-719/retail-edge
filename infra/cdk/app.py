@@ -8,7 +8,7 @@ app = cdk.App()
 
 env = cdk.Environment(
     account=app.node.try_get_context("account") or None,
-    region=app.node.try_get_context("region") or "me-south-1",
+    region=app.node.try_get_context("region") or "eu-west-1",
 )
 
 network = NetworkStack(app, "RetailEdgeNetwork", env=env)

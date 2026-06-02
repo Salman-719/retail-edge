@@ -33,15 +33,16 @@ async def _cleanup_deactivated_users():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Add deactivated_at column if it doesn't exist (safe for existing DBs)
     async with engine.begin() as conn:
-        await conn.execute(text(
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ"
-        ))
-        # Phase 4 tables — created via ORM metadata if absent
+        # Create all tables first — on a fresh DB (e.g. RDS) nothing exists yet,
+        # so this must run before any ALTER. create_all is checkfirst/idempotent.
         import app.models  # noqa: F401 — ensures all mappers are registered
         from app.models.base import Base as ModelBase
         await conn.run_sync(ModelBase.metadata.create_all)
+        # Backfill deactivated_at on DBs that predate the column (no-op on fresh).
+        await conn.execute(text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ"
+        ))
 
     try:
         from app.core.s3_client import ensure_bucket

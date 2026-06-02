@@ -91,13 +91,37 @@ EEP is stateless — it reads from DB per request. Any replica serves any store.
 
 **Decision:** `IEP1_FRAME_STORAGE=filesystem`. IEP1 writes frames to a shared PVC. IEP2 reads them via `file://` URI. S3 is not used for frame transport.
 
-**Why:** IEP1 and IEP2 share the same Jetson. Uploading a frame to S3 in Bahrain (100ms) and downloading it back (100ms) for immediate processing is 200ms of wasted latency per frame. At 2fps/4 cameras, that's 1.6MB/s of unnecessary bandwidth. The shared PVC delivers frames in 1ms.
+**Why:** IEP1 and IEP2 share the same Jetson. Uploading a frame to S3 in Ireland (100ms) and downloading it back (100ms) for immediate processing is 200ms of wasted latency per frame. At 2fps/4 cameras, that's 1.6MB/s of unnecessary bandwidth. The shared PVC delivers frames in 1ms.
 
-S3 is still provisioned and available for explicit archival if needed, with a 2-hour lifecycle rule on the `vision-frames/` prefix to prevent accumulation.
+S3 is still provisioned and available for explicit archival if needed, with a 1-day lifecycle rule (AWS minimum granularity) on the `vision-frames/` prefix to prevent accumulation.
 
 ---
 
-## Cost summary (me-south-1, single store)
+## ADR-009 — EEP autoscales; IEP3 does not
+
+**Decision:** EEP runs behind a HorizontalPodAutoscaler (2→6 replicas, 70% CPU / 80% memory). IEP3 stays at exactly one replica per store.
+
+**Why:** EEP is stateless — any replica serves any request, so horizontal scaling is safe and the ingress load-balances. IEP3 is a stateful per-store coordinator consuming a Redis stream with a consumer group; a second replica would split or double-process `batch_complete` events and corrupt reconciliation. You scale IEP3 by adding stores (more pods), never by adding replicas to one store.
+
+---
+
+## ADR-010 — IEP3 reads its camera list from the DB, not config
+
+**Decision:** IEP3 queries `physical_cameras` for the store's active config version on startup and refreshes every 30s. Cameras are not passed as a static env var in production.
+
+**Why:** Cameras are configured in the GUI *after* the IEP3 pod is deployed. A static `IEP3_CAMERA_IDS` would force a manual env edit + pod restart every time the store's cameras change. Reading from the DB makes GUI changes take effect automatically within 30s. The env var remains as an optional override for testing.
+
+---
+
+## ADR-011 — Edge→cloud auth and ECR pulls
+
+**Decision:** The edge authenticates to EEP with a shared `X-Internal-Token`. k3s pulls images from ECR via a `docker-registry` secret refreshed every 6h by an in-cluster CronJob.
+
+**Why:** k3s does not natively authenticate to ECR using the node IAM role, and ECR tokens expire after 12h — so a static secret breaks within a day. The CronJob uses the node role (via IMDS) to mint a fresh token and patch the pull secret, keeping pulls working with no human intervention. The shared token (vs per-request auth) is sufficient because the edge only calls one internal endpoint and the token is rotated per store.
+
+---
+
+## Cost summary (eu-west-1, single store)
 
 | Component | $/month |
 |-----------|---------|
@@ -105,7 +129,7 @@ S3 is still provisioned and available for explicit archival if needed, with a 2-
 | EC2 t3.small (k3s worker: IEP3 pods) | ~$16 |
 | RDS t3.micro (shared, all stores) | ~$13 |
 | CloudFront + S3 frontend | ~$5 |
-| S3 frames (2hr lifecycle) | ~$1 |
+| S3 frames (1-day lifecycle) | ~$1 |
 | **Total (1 store)** | **~$69/month** |
 | **Per 5 additional stores** | **+$16 (new worker node)** |
 | **20 stores** | **~$133/month** |

@@ -3,7 +3,8 @@ kind: Deployment
 metadata:
   name: eep
 spec:
-  replicas: 2
+  # replicas intentionally omitted — managed by the HorizontalPodAutoscaler
+  # in hpa.yaml (minReplicas: 2). Setting it here would fight the HPA on apply.
   selector:
     matchLabels:
       app: eep
@@ -19,7 +20,7 @@ spec:
     spec:
       containers:
         - name: eep
-          image: REPLACE_WITH_ECR_OR_REGISTRY/eep:latest
+          image: 692461731658.dkr.ecr.eu-west-1.amazonaws.com/eep:latest
           ports:
             - containerPort: 8000
           envFrom:

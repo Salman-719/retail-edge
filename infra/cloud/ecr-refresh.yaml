@@ -1,0 +1,80 @@
+# Refreshes the ECR image-pull secret every 6h.
+# k3s does not natively authenticate to ECR with the node IAM role, and ECR
+# tokens expire after 12h — without this, image pulls break after the first day.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ecr-refresh
+  namespace: retail-edge
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ecr-refresh
+  namespace: retail-edge
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ecr-refresh
+  namespace: retail-edge
+subjects:
+  - kind: ServiceAccount
+    name: ecr-refresh
+    namespace: retail-edge
+roleRef:
+  kind: Role
+  name: ecr-refresh
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ecr-refresh
+  namespace: retail-edge
+spec:
+  schedule: "0 */6 * * *"   # every 6 hours
+  concurrencyPolicy: Replace
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: ecr-refresh
+          restartPolicy: OnFailure
+          containers:
+            - name: refresh
+              # amazon/aws-cli image has both aws + can install kubectl; use
+              # bitnami/kubectl + aws via the node role would be cleaner, but
+              # this image bundles aws-cli and we add kubectl below.
+              image: amazon/aws-cli:2.15.30
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                  chmod +x kubectl && mv kubectl /usr/local/bin/
+                  ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+                  ECR_REGISTRY="$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+                  TOKEN=$(aws ecr get-login-password --region "$AWS_REGION")
+                  kubectl create secret docker-registry ecr-creds \
+                    --docker-server="$ECR_REGISTRY" \
+                    --docker-username=AWS \
+                    --docker-password="$TOKEN" \
+                    --namespace=retail-edge \
+                    --dry-run=client -o yaml | kubectl apply -f -
+                  kubectl patch serviceaccount default -n retail-edge \
+                    -p '{"imagePullSecrets":[{"name":"ecr-creds"}]}'
+              env:
+                - name: AWS_REGION
+                  valueFrom:
+                    configMapKeyRef:
+                      name: retail-edge-config
+                      key: S3_REGION

@@ -42,24 +42,29 @@ kubectl get nodes   # should show Ready after ~30s
 
 ## Step 3 — Enable NVIDIA GPU in k3s
 
+k3s v1.35.5 on JetPack 6 **auto-detects the NVIDIA runtime** and adds it to
+the generated `config.toml` automatically. No manual containerd configuration
+is needed. Simply deploy the device plugin and label the node:
+
 ```bash
-# Configure containerd to use NVIDIA runtime
-sudo nvidia-ctk runtime configure \
-  --runtime=containerd \
-  --config=/var/lib/rancher/k3s/agent/etc/containerd/config.toml
-
-sudo systemctl restart k3s
-
-# Deploy NVIDIA device plugin (so pods can request nvidia.com/gpu)
+# Deploy NVIDIA device plugin (exposes nvidia.com/gpu resource to pods)
 kubectl apply -f \
   https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml
 
-# Label this node so IEP2 can schedule on it
+# Label node so IEP2 deployment can schedule on it
 kubectl label node $(hostname) accelerator=nvidia
 
-# Verify GPU is visible
-kubectl get nodes -o json | grep -A3 nvidia
+# Verify GPU is allocatable
+kubectl get node $(hostname) -o json \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['status']['allocatable'])"
+# Expect "nvidia.com/gpu": "1" in the output
 ```
+
+> **Do not run `nvidia-ctk runtime configure`** on k3s v1.35.5+ — it fails
+> with `unsupported configure version: 3` and is not needed.
+> Do not create `config.toml.tmpl` or `config-v3.toml.tmpl` — editing the
+> auto-generated config breaks CNI (`NetworkPluginNotReady`) and requires a
+> full k3s reinstall to recover.
 
 ---
 

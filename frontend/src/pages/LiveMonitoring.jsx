@@ -4,7 +4,10 @@ import { usePageTitle } from '../components/PageMeta'
 import { StatsSkeleton } from '../components/Skeletons'
 import SectionTabs from '../components/SectionTabs'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
-import { getActiveVersion } from '../api'
+import { getActiveVersion, getCameraHealth } from '../api'
+
+// A camera counts as "online" only if it reported within this window.
+const EDGE_ONLINE_WINDOW_MS = 30000
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -47,14 +50,6 @@ const MOCK_ALERTS_INIT = [
   { id: 'a1', type: 'Queue',        zone: 'Checkout 1', ts: '14:22' },
   { id: 'a2', type: 'Overcrowding', zone: 'Entrance',   ts: '14:18' },
   { id: 'a3', type: 'Absence',      zone: 'Aisle B',    ts: '14:05' },
-]
-
-// MOCK: replace with API call to GET /store/{slug}/cameras/health
-const MOCK_CAMERAS = [
-  { id: 'c1', name: 'CAM-01', online: true },
-  { id: 'c2', name: 'CAM-02', online: true },
-  { id: 'c3', name: 'CAM-03', online: false },
-  { id: 'c4', name: 'CAM-04', online: true },
 ]
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -219,8 +214,34 @@ export default function LiveMonitoring() {
   // MOCK: replace with API call to GET /store/{slug}/alerts/active + websocket/polling
   const [alerts, setAlerts] = useState(MOCK_ALERTS_INIT)
 
-  // MOCK: replace with API call to GET /store/{slug}/cameras/health
-  const [cameras] = useState(MOCK_CAMERAS)
+  // Live camera health from the edge (Jetson IEP1 → EEP). Polls every 10s.
+  const [cameras, setCameras] = useState([])
+  useEffect(() => {
+    let active = true
+    const load = () =>
+      getCameraHealth(slug)
+        .then(d => {
+          if (!active) return
+          const now = Date.now()
+          setCameras((d?.cameras || []).map(c => {
+            const seen = c.last_seen_at ? new Date(c.last_seen_at).getTime() : 0
+            const fresh = now - seen < EDGE_ONLINE_WINDOW_MS
+            return {
+              id: c.camera_id,
+              name: c.name,
+              online: c.health_status === 'online' && fresh,
+              status: c.health_status,
+            }
+          }))
+        })
+        .catch(() => {})
+    load()
+    const t = setInterval(load, 10000)
+    return () => { active = false; clearInterval(t) }
+  }, [slug])
+
+  // Edge device is "online" if any of its cameras reported online recently.
+  const edgeOnline = cameras.some(c => c.online)
 
   // MOCK: replace with API call to GET /store/{slug}/live/positions
   const [people] = useState(MOCK_PEOPLE)
@@ -356,17 +377,22 @@ export default function LiveMonitoring() {
         </div>
 
         {/* ── Camera Health Strip ──────────────────────────────────────────── */}
-        {/* Uses selectedSection.camera_configs when available, falls back to MOCK_CAMERAS */}
+        {/* Live health from the edge (Jetson IEP1 → EEP /vision/camera-health) */}
         <div className="bg-white border border-gray-200 rounded-xl px-5 py-3 flex items-center gap-2 flex-wrap shrink-0">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-2">Camera Status</span>
-          {(selectedSection?.camera_configs?.length > 0
-            ? selectedSection.camera_configs.map(cc => ({
-                id: cc.id,
-                name: cc.physical_camera_name,
-                online: cc.status === 'verified',
-              }))
-            : cameras
-          ).map(cam => (
+          {/* Edge device rollup */}
+          <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-semibold mr-1 ${
+            edgeOnline
+              ? 'bg-green-50 border-green-300 text-green-700'
+              : 'bg-gray-50 border-gray-300 text-gray-500'
+          }`}>
+            <span className={`w-2 h-2 rounded-full ${edgeOnline ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
+            Edge {edgeOnline ? 'Online' : 'Offline'}
+          </div>
+          {cameras.length === 0 && (
+            <span className="text-xs text-gray-400">No cameras reporting yet</span>
+          )}
+          {cameras.map(cam => (
             <div
               key={cam.id}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium ${

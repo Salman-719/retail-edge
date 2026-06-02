@@ -50,9 +50,13 @@ helm repo add kedacore https://kedacore.github.io/charts
 helm repo update
 helm install keda kedacore/keda --namespace keda --create-namespace
 
-# ── Nginx Ingress ─────────────────────────────────────────────────────────────
-kubectl apply -f \
-  https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml
+# ── Nginx Ingress (pinned version; retry until k3s API is ready) ───────────────
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+until kubectl apply -f \
+  https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/cloud/deploy.yaml; do
+  echo "ingress-nginx apply failed, retrying in 10s..."
+  sleep 10
+done
 """
 
 _WORKER_USERDATA = r"""#!/bin/bash
@@ -96,10 +100,18 @@ class ClusterStack(Stack):
         self.sg.add_ingress_rule(ec2.Peer.ipv4(vpc.vpc_cidr_block), ec2.Port.tcp(10250), "kubelet")
 
         # ── Master node (runs EEP, Redis, Nginx Ingress) ──────────────────────
-        master_ud = ec2.UserData.for_linux()
-        master_ud.add_commands(_MASTER_USERDATA)
+        # Allocate the EIP first so we can bake its IP into the k3s TLS SANs —
+        # the serving cert must be valid for the public IP clients connect to.
+        master_eip = ec2.CfnEIP(self, "MasterEip", domain="vpc")
 
-        master_eip = ec2.CfnEIP(self, "MasterEip")
+        master_ud = ec2.UserData.for_linux()
+        # Write k3s config with tls-san BEFORE install so the serving cert
+        # includes the public Elastic IP (no insecure-skip-tls-verify needed).
+        master_ud.add_commands(
+            "mkdir -p /etc/rancher/k3s",
+            f"printf 'tls-san:\\n  - %s\\n' {master_eip.ref} > /etc/rancher/k3s/config.yaml",
+        )
+        master_ud.add_commands(_MASTER_USERDATA)
 
         master = ec2.Instance(
             self, "Master",
@@ -121,7 +133,7 @@ class ClusterStack(Stack):
         )
         ec2.CfnEIPAssociation(
             self, "MasterEipAssoc",
-            eip=master_eip.ref,
+            allocation_id=master_eip.attr_allocation_id,
             instance_id=master.instance_id,
         )
 
@@ -172,6 +184,9 @@ class ClusterStack(Stack):
                 owner="Salman-719",
                 repo="retail-edge",
                 branch_or_ref="codex/salman-marji-alignment",
+                # Requires a GitHub OAuth connection configured in the AWS Console:
+                # Developer Tools → Settings → Connections → Create connection (GitHub)
+                # After connecting, re-run: cdk deploy RetailEdgeCluster
             ),
             environment=codebuild.BuildEnvironment(
                 build_image=codebuild.LinuxBuildImage.STANDARD_7_0,

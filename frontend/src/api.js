@@ -400,4 +400,11 @@ export const patchAlertConfig = (slug, body) =>
 export const getAuditLog = (slug, params) =>
   api.get(`/store/${slug}/audit`, { params }).then(r => r.data)
 
+// ─── Vision / edge health ────────────────────────────────────────────────────
+
+// Live camera health reported by the edge (Jetson IEP1). Each camera has
+// health_status (online|offline|degraded) and last_seen_at.
+export const getCameraHealth = (slug) =>
+  api.get(`/store/${slug}/vision/camera-health`).then(r => r.data)
+
 export default api

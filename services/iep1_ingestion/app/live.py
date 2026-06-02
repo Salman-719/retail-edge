@@ -6,6 +6,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from common.config import get_settings
@@ -118,17 +119,30 @@ async def _publish_camera(
     frame_dir.mkdir(parents=True, exist_ok=True)
     s3_client = S3Client(get_settings()) if os.getenv("IEP1_FRAME_STORAGE", "filesystem").lower() == "s3" else None
     period = 1.0 / request.sample_rate_fps
+    # Heartbeat: re-post "online" health at least this often while streaming so
+    # the GUI's freshness check sees a live last_seen_at (and flips to offline
+    # within this window if the device dies). Independent of the sample rate.
+    heartbeat_secs = float(os.getenv("IEP1_HEARTBEAT_SECONDS", "10"))
     sequence = 0
-    try:
+
+    async def _beat(stat: str, **extra) -> None:
         await eep_client.post_camera_health({
             "store_id": str(request.store_id),
             "section_id": str(camera.section_id),
             "camera_id": camera_key,
             "camera_config_id": str(camera.camera_config_id),
-            "status": "online",
+            "status": stat,
             "last_seen_at": datetime.now(timezone.utc).isoformat(),
+            **extra,
         })
+
+    try:
+        await _beat("online")
+        last_beat = monotonic()
         while request.max_frames_per_camera is None or sequence < request.max_frames_per_camera:
+            if monotonic() - last_beat >= heartbeat_secs:
+                await _beat("online")
+                last_beat = monotonic()
             ok, frame = cap.read()
             if not ok:
                 await eep_client.post_camera_health({

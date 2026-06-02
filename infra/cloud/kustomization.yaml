@@ -5,6 +5,9 @@ resources:
   - namespace.yaml
   - redis.yaml
   - eep.yaml
+  - hpa.yaml
+  - frontend.yaml
   - ingress.yaml
   - configmap.yaml
   - secrets.yaml
+  - ecr-refresh.yaml

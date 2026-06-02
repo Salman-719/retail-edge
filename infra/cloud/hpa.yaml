@@ -1,0 +1,34 @@
+# Autoscale EEP on CPU + memory. Requires metrics-server (k3s ships it by default).
+# EEP is stateless, so horizontal scaling is safe — the ingress load-balances
+# across replicas. IEP3 is intentionally NOT autoscaled: it's a per-store
+# singleton coordinator; a second replica would double-consume its Redis stream.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: eep
+  namespace: retail-edge
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: eep
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300   # wait 5 min of low load before scaling down
+    scaleUp:
+      stabilizationWindowSeconds: 30    # react quickly to load spikes
