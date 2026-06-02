@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
 from app.grpc_generated import agent_pb2, agent_pb2_grpc
-from app.grpc_server import registry
+from app.grpc_server import camera_status, registry
 
 logger = logging.getLogger(__name__)
 
@@ -61,15 +61,21 @@ async def _reader(request_iterator, store_id: str) -> None:
         if msg.HasField("heartbeat"):
             await _upsert_agent(store_id, msg.heartbeat.agent_version, status="online")
         elif msg.HasField("camera_status"):
+            rpt = msg.camera_status
             logger.info(
                 "Camera status report",
                 extra={
                     "store_id": store_id,
-                    "camera_id": msg.camera_status.camera_id,
-                    "status": msg.camera_status.container_status,
+                    "camera_id": rpt.camera_id,
+                    "status": rpt.container_status,
                 },
             )
-            # Phase 7: update container state tracking here
+            camera_status.update(
+                store_id=store_id,
+                camera_id=rpt.camera_id,
+                status=rpt.container_status,
+                timestamp_ms=rpt.timestamp_ms,
+            )
 
 
 async def _writer(queue: asyncio.Queue, context) -> None:

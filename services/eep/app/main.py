@@ -60,6 +60,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_cleanup_deactivated_users())
     await start_grpc_server()
     start_scheduler()
+    from app.tasks.camera_scheduler import rebuild_running_cameras
+    await rebuild_running_cameras()
     try:
         yield
     finally:
