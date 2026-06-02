@@ -17,6 +17,7 @@ try:
     from ..reid.reid import extract_embedding
     from .pools import ActiveTrack, PendingTrack, LostEntry
     from .gallery import EmbeddingGallery
+    from .spatial_gate import SpatialGateConfig, evaluate
 except ImportError:
     import sys as _sys, os as _os
     _here = _os.path.dirname(_os.path.abspath(__file__))
@@ -25,20 +26,24 @@ except ImportError:
     from reid.reid import extract_embedding
     from pools import ActiveTrack, PendingTrack, LostEntry
     from gallery import EmbeddingGallery
+    from spatial_gate import SpatialGateConfig, evaluate
 
 # ── Constants (single source of truth) ────────────────────────────────────────
 TTL_FRAMES                 = 150   # 30 s at 5 fps
 INIT_EMBEDDINGS_COUNT      = 5     # embeddings collected before ReID attempt
-REID_THRESHOLD             = 0.75  # cosine similarity threshold for a match
 SAMPLE_INTERVAL            = 15    # frames between samples in sampled phase
 QUALITY_CONFIDENCE_THRESHOLD = 0.6 # minimum YOLO conf for sampled-phase sample
 MIN_BBOX_AREA              = 2500  # minimum bbox area (px²) for sampled-phase sample
+# ReID similarity threshold lives in SpatialGateConfig.base_threshold (default 0.75)
 
 
 class LocalIdentityManager:
-    def __init__(self, reid_model):
+    def __init__(self, reid_model, fps: float = 5.0):
         """reid_model is the object returned by reid.load_model(); injected once."""
         self._reid_model = reid_model
+        self._fps = fps
+        self._lost_ttl_frames = TTL_FRAMES
+        self._gate_cfg = SpatialGateConfig()
         self._active:  dict[int, ActiveTrack]  = {}  # track_id  → ActiveTrack
         self._pending: dict[int, PendingTrack] = {}  # track_id  → PendingTrack
         self._lost:    dict[int, LostEntry]    = {}  # local_id  → LostEntry
@@ -82,6 +87,7 @@ class LocalIdentityManager:
                 local_id=entry.local_id,
                 lost_at_frame=self._frame_index,
                 gallery=entry.gallery,
+                last_floor_pos=entry.last_floor_pos,
             )
             log.info(
                 "F%04d  track disappeared  track_id=%d  local_id=%d  → lost pool (TTL=%d frames)",
@@ -100,6 +106,12 @@ class LocalIdentityManager:
             # ── Branch A: already active ───────────────────────────────────────
             if tid in self._active:
                 active = self._active[tid]
+
+                floor_x = track.get("floor_x")
+                floor_y = track.get("floor_y")
+                if floor_x is not None and floor_y is not None:
+                    active.last_floor_pos = (floor_x, floor_y)
+
                 gallery = active.gallery
 
                 if gallery.is_init_phase:
@@ -128,7 +140,7 @@ class LocalIdentityManager:
                     pending.init_embeddings.append(emb)
 
                 if len(pending.init_embeddings) >= INIT_EMBEDDINGS_COUNT:
-                    local_id, gallery = self._resolve_pending(pending)
+                    local_id, gallery = self._resolve_pending(pending, new_pos=track.get("floor_pos"))
                     self._active[tid] = ActiveTrack(
                         local_id=local_id, track_id=tid, gallery=gallery
                     )
@@ -191,9 +203,10 @@ class LocalIdentityManager:
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
-    def _resolve_pending(self, pending: PendingTrack):
+    def _resolve_pending(self, pending: PendingTrack, new_pos=None):
         """Match pending init embeddings against the lost pool.
 
+        new_pos: the re-appearing track's current floor position (tuple or None).
         Returns (local_id, gallery): either a recovered pair or a freshly minted one.
         """
         mean_emb = np.mean(pending.init_embeddings, axis=0).astype(np.float32)
@@ -203,7 +216,24 @@ class LocalIdentityManager:
 
         best_sim = -1.0
         best_lid = None
+        best_threshold = self._gate_cfg.base_threshold
+
         for lid, lost_entry in self._lost.items():
+            gate_result = evaluate(
+                new_pos=new_pos,
+                lost_pos=lost_entry.last_floor_pos,
+                elapsed_frames=self._frame_index - lost_entry.lost_at_frame,
+                fps=self._fps,
+                lost_ttl_frames=self._lost_ttl_frames,
+                cfg=self._gate_cfg,
+            )
+            if not gate_result.allowed:
+                log.debug(
+                    "F%04d  SpatioTemporalGate VETO  track_id=%d  candidate_local_id=%d",
+                    self._frame_index, pending.track_id, lid,
+                )
+                continue
+
             centroid = lost_entry.gallery.snapshot_centroid()
             if centroid is None:
                 continue
@@ -211,8 +241,9 @@ class LocalIdentityManager:
             if sim > best_sim:
                 best_sim = sim
                 best_lid = lid
+                best_threshold = gate_result.threshold
 
-        if best_lid is not None and best_sim >= REID_THRESHOLD:
+        if best_lid is not None and best_sim >= best_threshold:
             # Recover lost identity
             lost_entry = self._lost.pop(best_lid)
             local_id = lost_entry.local_id
@@ -220,7 +251,7 @@ class LocalIdentityManager:
             self._track_to_local[pending.track_id] = local_id
             log.info(
                 "F%04d  ReID MATCH  track_id=%d  → local_id=%d  sim=%.3f  (threshold=%.2f)",
-                self._frame_index, pending.track_id, local_id, best_sim, REID_THRESHOLD,
+                self._frame_index, pending.track_id, local_id, best_sim, best_threshold,
             )
         else:
             # Stranger — mint new identity
@@ -231,7 +262,7 @@ class LocalIdentityManager:
             log.info(
                 "F%04d  ReID NO MATCH  track_id=%d  → new local_id=%d  best_sim=%.3f  (threshold=%.2f)",
                 self._frame_index, pending.track_id, local_id,
-                best_sim if best_lid is not None else 0.0, REID_THRESHOLD,
+                best_sim if best_lid is not None else 0.0, self._gate_cfg.base_threshold,
             )
 
         # Seed gallery with the collected init embeddings (already L2-normalized)
@@ -367,5 +398,39 @@ if __name__ == "__main__":
     assert 1 not in mgr4._pending, "must NOT go through pending on ByteTrack reuse"
     assert 1 not in mgr4._lost,    "must be removed from lost pool on reuse"
     print(f"[6] ByteTrack 1-frame gap → local_id={r[0]['local_id']} restored instantly ✓")
+
+    # ── Test 7: last_floor_pos preserved in LostEntry ─────────────────────────
+    mgr5 = LocalIdentityManager(mock)
+    mock.emb = emb_a
+    mgr5.process_frame(frame, [_track(1)])                                  # fast path → active, no floor pos
+    mgr5.process_frame(frame, [{**_track(1), "floor_x": 2.5, "floor_y": 3.0}])  # Branch A: set pos
+    mgr5.process_frame(frame, [{**_track(1), "floor_x": 3.5, "floor_y": 4.0}])  # Branch A: update pos
+    assert mgr5._active[1].last_floor_pos == (3.5, 4.0), \
+        f"expected (3.5, 4.0), got {mgr5._active[1].last_floor_pos}"
+    mgr5.process_frame(frame, [])                                           # disappears → lost
+    assert mgr5._lost[1].last_floor_pos == (3.5, 4.0), \
+        f"LostEntry.last_floor_pos must equal last active position, got {mgr5._lost[1].last_floor_pos}"
+    print("[7] last_floor_pos preserved in LostEntry OK")
+
+    # ── Test 8: last_floor_pos stays None when projection never available ─────
+    mgr6 = LocalIdentityManager(mock)
+    mock.emb = emb_a
+    mgr6.process_frame(frame, [_track(1)])   # fast path, no floor_x/y keys
+    mgr6.process_frame(frame, [_track(1)])   # Branch A, still no floor_x/y
+    mgr6.process_frame(frame, [])            # → lost
+    assert mgr6._lost[1].last_floor_pos is None, \
+        f"LostEntry.last_floor_pos must be None when never projected, got {mgr6._lost[1].last_floor_pos}"
+    print("[8] last_floor_pos is None when projection never available OK")
+
+    # ── Test 9: track dict without floor_x key does not raise ─────────────────
+    mgr7 = LocalIdentityManager(mock)
+    mock.emb = emb_a
+    try:
+        mgr7.process_frame(frame, [_track(1)])   # no floor_x key
+        mgr7.process_frame(frame, [_track(1)])   # Branch A, no floor_x key
+        print("[9] missing floor_x/y keys do not raise OK")
+    except KeyError as exc:
+        print(f"[9] FAILED: KeyError {exc}")
+        import sys as _sys; _sys.exit(1)
 
     print("\nsmoke test passed")

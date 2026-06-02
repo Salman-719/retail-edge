@@ -18,6 +18,7 @@ class ActiveTrack:
     local_id: int
     track_id: int
     gallery: EmbeddingGallery
+    last_floor_pos: tuple[float, float] | None = None
 
 
 @dataclass
@@ -31,3 +32,4 @@ class LostEntry:
     local_id: int
     lost_at_frame: int  # TTL anchor used in Step 4
     gallery: EmbeddingGallery
+    last_floor_pos: tuple[float, float] | None = None

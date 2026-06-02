@@ -106,6 +106,28 @@ def _fetch_s3_frame(s3_client, bucket: str, key: str) -> np.ndarray | None:
     return frame
 
 
+def _project_tracks(tracks: list[dict], projector: FloorProjector) -> None:
+    """Project each confirmed track's bbox foot point and attach floor_x, floor_y, clamped in-place.
+
+    Called after ByteTrack update, before identity manager, so the manager and
+    the persist step both read projection results from the track dict rather than
+    recomputing them independently.
+    """
+    for t in tracks:
+        x1, y1, x2, y2 = [int(c) for c in t["bbox"]]
+        res = projector.project_and_clamp(x1, y1, x2, y2)
+        if res is not None:
+            t["floor_x"] = res.x
+            t["floor_y"] = res.y
+            t["clamped"] = res.clamped
+            t["floor_pos"] = (res.x, res.y)
+        else:
+            t["floor_x"] = None
+            t["floor_y"] = None
+            t["clamped"] = False
+            t["floor_pos"] = None
+
+
 async def _load_projector(persistence: PostgresPersistence, camera_config_id: str | None) -> FloorProjector:
     projector = FloorProjector()
     if camera_config_id:
@@ -181,12 +203,13 @@ class IEP2Runtime:
                 x1, y1, x2, y2 = [int(c) for c in track["bbox"]]
                 bbox_area = (x2 - x1) * (y2 - y1)
                 local_id_uuid = uuid.UUID(int=track["local_id"])
-                proj = projector.project(x1, y1, x2, y2)
-                if proj:
-                    floor_x, floor_y = proj
-                    zone_id = projector.zone_of(floor_x, floor_y)
-                else:
-                    floor_x, floor_y, zone_id = None, None, None
+                floor_x = track.get("floor_x")
+                floor_y = track.get("floor_y")
+                zone_id = (
+                    projector.zone_of(floor_x, floor_y)
+                    if floor_x is not None and floor_y is not None
+                    else None
+                )
                 await persistence.insert_detection(
                     local_id=local_id_uuid,
                     timestamp_ms=capture_ts_ms,
@@ -218,6 +241,7 @@ class IEP2Runtime:
         for _capture_ts_ms, _s3_key, frame in source:
             detections = detect(self.yolo_model, frame)
             tracks     = update(tracker, detections)
+            _project_tracks(tracks, projector)
             enriched   = manager.process_frame(frame, tracks)
 
             log.debug(
@@ -294,6 +318,7 @@ class IEP2Runtime:
 
                 detections = detect(self.yolo_model, frame)
                 tracks     = update(tracker, detections)
+                _project_tracks(tracks, projector)
                 enriched   = manager.process_frame(frame, tracks)
 
                 log.debug(
