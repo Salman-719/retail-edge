@@ -8,7 +8,7 @@ An intelligent retail analytics platform that uses multi-camera computer vision 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  CLOUD / SERVER HOST                                                    │
+│  SERVER HOST  (Docker Compose / cloud)                                  │
 │                                                                         │
 │  ┌───────────────────────────────────────────────────────────────────┐  │
 │  │  React Frontend  :3000  (Vite · React Router · Konva · Zustand)  │  │
@@ -17,35 +17,39 @@ An intelligent retail analytics platform that uses multi-camera computer vision 
 │  ┌─────────────────────────────▼─────────────────────────────────────┐  │
 │  │  EEP  :8000 (REST) + :50051 (gRPC)                                │  │
 │  │  FastAPI · SQLAlchemy asyncpg · APScheduler · grpc.aio            │  │
-│  │                                                                   │  │
-│  │  REST API (stores, cameras, calibration, schedules, audit)        │  │
-│  │  gRPC AgentService.Connect — bidirectional stream per agent       │  │
-│  │  APScheduler — evaluate_schedules() every 60 s                    │  │
-│  │  Orchestrator — start/stop_camera_workers()                       │  │
-│  └───────────────────────┬───────────────────────────────────────────┘  │
-│                           │ Docker socket + env vars                   │
-│  PostgreSQL :5432    Redis :6379    MinIO :9000/:9001                  │
+│  │  REST API · gRPC server · evaluate_schedules() every 60 s         │  │
+│  │  Orchestrator → starts IEP2 via local Docker socket               │  │
+│  └────────┬─────────────────────────────────────────────────────────┘  │
+│            │ /var/run/docker.sock                                       │
+│  ┌─────────▼───────────────────────────────────────────────────────┐   │
+│  │  iep2_{store}_{cam}   IEP2 Vision                               │   │
+│  │  XREADGROUP iep2_workers → S3 fetch → YOLOv8 → ByteTrack        │   │
+│  │  → LocalIdentityManager (ReID) → FloorProjector (homography)    │   │
+│  │  → INSERT tracking_history                                       │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  PostgreSQL :5432    Redis :6379    MinIO :9000/:9001                   │
+│                                                                         │
+│  IEP3 Reconciliation · IEP4 Alerts · IEP5 Analytics · IEP6 AI Agent   │
+│  (skeleton services — not yet implemented)                              │
 └───────────────────────────┬─────────────────────────────────────────────┘
-                            │ gRPC (edge dials out, stream stays open)
+                            │ gRPC bidirectional stream
+                            │ (edge dials out to :50051, stream stays open)
+                            │ IEP1 pushes frames → MinIO S3 (reachable from server)
+                            │ IEP1 publishes manifests → Redis (reachable from server)
 ┌───────────────────────────▼─────────────────────────────────────────────┐
 │  EDGE DEVICE                                                            │
 │                                                                         │
 │  Edge Agent  (Python daemon, no HTTP server)                            │
 │    grpc.aio client · 30 s heartbeat · exponential-backoff reconnect     │
 │    _handle_control() → docker_manager.start/stop_iep1()                 │
-│                                                                         │
-│  iep1_{store}_{cam}   IEP1 Ingestion                                    │
-│    Camera (RTSP or video file) → JPEG frames → MinIO S3                 │
-│    60 s window → manifest → Redis XADD stream:iep1:{camera_id}          │
-│                                                                         │
-│  iep2_{store}_{cam}   IEP2 Vision  (started by EEP via Docker socket)  │
-│    XREADGROUP iep2_workers → S3 fetch → YOLOv8 → ByteTrack             │
-│    → LocalIdentityManager (ReID) → FloorProjector (homography)         │
-│    → INSERT tracking_history                                            │
+│            │ /var/run/docker.sock (edge host)                           │
+│  ┌─────────▼───────────────────────────────────────────────────────┐   │
+│  │  iep1_{store}_{cam}   IEP1 Ingestion                            │   │
+│  │  Camera (RTSP or video file) → JPEG frames → MinIO S3           │   │
+│  │  60 s window → manifest → Redis XADD stream:iep1:{camera_id}    │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
-
-IEP3 Reconciliation  · IEP4 Alerts  · IEP5 Analytics  · IEP6 AI Agent
-  (skeleton services, not yet implemented)
 ```
 
 ---
@@ -200,8 +204,8 @@ The pipeline activates cameras through two paths: a time-based schedule, or a ma
 
 ### What "starting a camera" means
 
-1. EEP pushes a `StartCamera` gRPC message to the Edge Agent → Edge Agent starts an **IEP1** container on the edge device (reads RTSP, uploads frames to S3, publishes manifests to Redis).
-2. EEP starts an **IEP2** Docker container directly (reads Redis manifests, runs YOLO+ByteTrack+ReID, writes `tracking_history`).
+1. EEP pushes a `StartCamera` gRPC message to the Edge Agent → Edge Agent starts an **IEP1** container **on the edge device** (reads RTSP, uploads frames to MinIO S3, publishes manifests to Redis).
+2. EEP starts an **IEP2** container **on the server host** via its local Docker socket (reads Redis manifests, runs YOLO+ByteTrack+ReID, writes `tracking_history` to PostgreSQL).
 
 ### Step 1 — Start infrastructure and EEP
 
@@ -211,11 +215,13 @@ docker compose up -d postgres redis minio eep
 
 ### Step 2 — Start the Edge Agent
 
-The Edge Agent runs on the edge device. For local development it runs on the same host:
+In production the Edge Agent runs on the physical edge device and connects to EEP over the network. For local development it runs on the same machine using the `edge` Docker Compose profile:
 
 ```bash
-docker compose up -d edge_agent
+docker compose --profile edge up -d edge_agent
 ```
+
+The `edge` profile is intentionally excluded from the default `docker compose up` so the edge agent does not start automatically as part of the server stack.
 
 Verify it connected:
 

@@ -1,7 +1,7 @@
 # RetailVision Codebase Audit
 **Date:** 2026-06-02  
 **Scope:** EEP, IEP1, IEP2, Edge Agent — post Phase 1–8 implementation  
-**Architecture:** Edge-cloud hybrid. EEP (cloud) orchestrates; IEP1/IEP2 run on edge; Edge Agent brokers commands.
+**Architecture:** Edge-cloud hybrid. EEP (server) orchestrates; IEP1 runs on the edge device (managed by the Edge Agent); IEP2 runs on the server alongside EEP (managed by EEP via the local Docker socket); Edge Agent brokers cloud→edge commands.
 
 ---
 
@@ -24,74 +24,65 @@
 ## 1. System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  CLOUD (docker-compose, one host in dev; Kubernetes in prod)        │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │  EEP  :8000 (HTTP/REST) + :50051 (gRPC)                      │  │
-│  │  FastAPI + SQLAlchemy asyncpg + APScheduler + grpc.aio        │  │
-│  │                                                               │  │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐  │  │
-│  │  │ REST API    │  │ gRPC Server  │  │ APScheduler         │  │  │
-│  │  │ (30+ routes)│  │ AgentService │  │ evaluate_schedules  │  │  │
-│  │  │             │  │ .Connect()   │  │ every 60 s          │  │  │
-│  │  └──────┬──────┘  └──────┬───────┘  └────────┬────────────┘  │  │
-│  │         │                │                    │               │  │
-│  │         └────────────────┴────────────────────┘               │  │
-│  │                          │                                    │  │
-│  │               orchestrator.start/stop_camera_workers()        │  │
-│  │               ┌──────────┴────────────────────┐               │  │
-│  │               │ registry.send_command()         │               │  │
-│  │               │ (gRPC ControlMessage →)         │               │  │
-│  │               └──────────────────────────────┘               │  │
-│  └──────────────────────────────────────────────────────────────┘  │
-│                                                                     │
-│  PostgreSQL :5432   Redis :6379   MinIO S3 :9000                   │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ gRPC bidirectional stream
-                               │ (edge dials out, stays connected)
-┌──────────────────────────────▼──────────────────────────────────────┐
-│  EDGE DEVICE                                                        │
-│                                                                     │
-│  ┌──────────────────┐                                               │
-│  │  Edge Agent       │  services/edge_agent/                        │
-│  │  (Python daemon)  │  grpc.aio client, 30 s heartbeat            │
-│  │  run_agent()      │  exponential backoff reconnect               │
-│  │  _heartbeat_loop()│                                              │
-│  │  _handle_control()│                                              │
-│  └──────┬───────────┘                                               │
-│         │ docker.from_env() — blocking calls via run_in_executor   │
-│  ┌──────▼──────────────────────────────────────────────────────┐   │
-│  │  Docker Engine (on edge host)                                │   │
-│  │                                                              │   │
-│  │  iep1_{store}_{cam}   services/iep1_ingestion/              │   │
-│  │  ┌──────────────────────────────────────────────────────┐   │   │
-│  │  │ Camera → RtspSource/VideoFileSource                  │   │   │
-│  │  │       → S3Uploader (JPEG frames)                     │   │   │
-│  │  │       → WindowAccumulator (60 s window)              │   │   │
-│  │  │       → WindowPublisher (Redis XADD manifest)        │   │   │
-│  │  └──────────────────────────────────────────────────────┘   │   │
-│  │                                                              │   │
-│  │  iep2_{store}_{physicalcam}   services/iep2_vision/         │   │
-│  │  ┌──────────────────────────────────────────────────────┐   │   │
-│  │  │ RedisStreamFrameSource (XREADGROUP iep2_workers)     │   │   │
-│  │  │       → S3 fetch JPEG → YOLO detect                  │   │   │
-│  │  │       → ByteTrack → LocalIdentityManager (ReID)      │   │   │
-│  │  │       → FloorProjector (homography + shapely zones)  │   │   │
-│  │  │       → PostgresPersistence INSERT tracking_history  │   │   │
-│  │  └──────────────────────────────────────────────────────┘   │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  SERVER HOST  (Docker Compose in dev; cloud/k8s in prod)                 │
+│                                                                          │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  EEP  :8000 (HTTP/REST) + :50051 (gRPC)                           │  │
+│  │  FastAPI + SQLAlchemy asyncpg + APScheduler + grpc.aio             │  │
+│  │                                                                    │  │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │  │
+│  │  │ REST API    │  │ gRPC Server  │  │ APScheduler              │  │  │
+│  │  │ (30+ routes)│  │ AgentService │  │ evaluate_schedules 60 s  │  │  │
+│  │  └──────┬──────┘  └──────┬───────┘  └──────────┬───────────────┘  │  │
+│  │         └────────────────┴──────────────────────┘                  │  │
+│  │                          │                                          │  │
+│  │         orchestrator.start/stop_camera_workers()                   │  │
+│  │           ├─ registry.send_command() → gRPC → Edge Agent → IEP1   │  │
+│  │           └─ iep2_docker.start_iep2() → local Docker socket        │  │
+│  └────────────────────────────────────┬─────────────────────────────┘  │
+│                                        │ /var/run/docker.sock           │
+│  ┌─────────────────────────────────────▼───────────────────────────┐   │
+│  │  iep2_{store}_{cam}   services/iep2_vision/                     │   │
+│  │  RedisStreamFrameSource (XREADGROUP iep2_workers)               │   │
+│  │    → S3 fetch JPEG → YOLOv8 → ByteTrack                         │   │
+│  │    → LocalIdentityManager (ReID)                                │   │
+│  │    → FloorProjector (homography + shapely zones)                │   │
+│  │    → asyncpg INSERT tracking_history                            │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  PostgreSQL :5432     Redis :6379     MinIO S3 :9000                    │
+└─────────────────────────────────┬────────────────────────────────────────┘
+                                  │ gRPC bidirectional stream :50051
+                                  │ (edge dials out, stream stays open)
+                                  │ IEP1 → MinIO S3  (server-reachable endpoint)
+                                  │ IEP1 → Redis     (server-reachable endpoint)
+┌─────────────────────────────────▼────────────────────────────────────────┐
+│  EDGE DEVICE                                                             │
+│                                                                          │
+│  Edge Agent  services/edge_agent/                                        │
+│    grpc.aio client · 30 s heartbeat · exponential-backoff reconnect      │
+│    _handle_control() → docker_manager.start/stop_iep1()                  │
+│                │ /var/run/docker.sock (edge host Docker daemon)           │
+│  ┌─────────────▼──────────────────────────────────────────────────┐     │
+│  │  iep1_{store}_{cam}   services/iep1_ingestion/                 │     │
+│  │  Camera (RTSP or video file)                                   │     │
+│  │    → RtspSource / VideoFileSource                              │     │
+│  │    → S3Uploader (JPEG frames → MinIO S3 on server)            │     │
+│  │    → WindowAccumulator (60 s window)                           │     │
+│  │    → WindowPublisher (Redis XADD on server)                    │     │
+│  └────────────────────────────────────────────────────────────────┘     │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Key design decisions:**
 
-- EEP manages all configuration and lifecycle. IEP1/IEP2 are stateless workers that consume config from CLI args and env vars.
-- gRPC bidirectional stream (not polling) keeps the cloud-edge link alive. Edge dials out — no inbound firewall rules needed.
+- **IEP1 runs on the edge device.** The Edge Agent manages it via the edge host's Docker socket. IEP1 uploads frames to MinIO S3 and publishes manifests to Redis — both of which are reachable from the edge device over the network.
+- **IEP2 runs on the server alongside EEP.** EEP starts IEP2 containers via the server's local Docker socket (mounted at `/var/run/docker.sock`). IEP2 reads from Redis and writes to PostgreSQL, both of which are co-located on the same host.
+- gRPC bidirectional stream (not polling) keeps the server-edge link alive. Edge dials out to `:50051` — no inbound firewall rules needed on the edge device.
 - Redis Streams with `XREADGROUP` give at-least-once delivery for IEP1 manifests. XACK fires after the DB write completes, not before.
 - `tracking_history` rows use `camera_id TEXT` (not UUID FK) to decouple IEP2 from EEP's camera_configs schema.
 - `local_id` in `tracking_history` is a UUID derived deterministically from an int via `uuid.UUID(int=local_id)`. The int comes from `LocalIdentityManager`. The UUID form satisfies the PK/indexing needs.
-- Docker socket is mounted into EEP container so EEP can start IEP2 via `docker.from_env()`. Edge Agent manages IEP1 locally via the same mechanism.
 
 ---
 
@@ -996,22 +987,28 @@ message S3Config {
 ### 8.1 Schedule → Workers Start (normal path)
 
 ```
-APScheduler fires (every 60 s)
+[SERVER] APScheduler fires (every 60 s)
   → evaluate_schedules()
     → _LOAD_SQL: SELECT camera_schedules JOIN stores WHERE is_active=true AND status='active'
     → per-schedule: _should_run(row, now_local_tz)
     → _on_camera_start(row) if should_run and not already running
       → orchestrator.start_camera_workers(store_id, camera_config_id)
-        → _load_camera_data: JOIN camera_configs → physical_cameras → store_settings
-        → registry.send_command(store_id, StartCamera{...})
-          → asyncio.Queue.put() → _writer task → context.write() → gRPC stream
-            → Edge Agent _handle_control()
-              → run_in_executor(docker_manager.start_iep1, cmd, IMAGE, NETWORK)
-                → docker.containers.run("iep1_...", detach=True)
-                  → IEP1 process: frames → S3 upload → Redis XADD manifest
-        → run_in_executor(iep2_docker.start_iep2, ...)
-          → docker.containers.run("iep2_...", detach=True)
-            → IEP2 process: XREADGROUP → S3 fetch → YOLO → track → project → INSERT
+          → _load_camera_data: JOIN camera_configs → physical_cameras → store_settings
+
+          ── IEP1 path (best-effort) ──────────────────────────────────────
+          → registry.send_command(store_id, StartCamera{...})
+            → asyncio.Queue.put() → _writer task → context.write()
+              ── gRPC stream ──────────────────────────────────────────────
+              [EDGE] → Edge Agent _handle_control()
+                → run_in_executor(docker_manager.start_iep1, cmd, IMAGE, NETWORK)
+                  → edge docker.containers.run("iep1_...", detach=True)
+                    → IEP1: frames → MinIO S3 (server) → Redis XADD (server)
+
+          ── IEP2 path (mandatory) ────────────────────────────────────────
+          [SERVER] → run_in_executor(iep2_docker.start_iep2, ...)
+            → server docker.containers.run("iep2_...", detach=True)
+              → IEP2: XREADGROUP (Redis on server) → S3 fetch → YOLO
+                    → track → project → INSERT tracking_history (server DB)
 ```
 
 ### 8.2 Manual Trigger Path
@@ -1032,14 +1029,16 @@ POST /api/store/{slug}/schedules/{id}/trigger {action: "start"}
 ### 8.3 IEP1 → IEP2 Frame Delivery
 
 ```
-IEP1 (camera loop):
+[EDGE] IEP1 (camera loop, runs on edge device):
   frame captured → cv2.imencode JPEG → S3.put_object(Key=frames/{cam}/{batch}/{ts}.jpg)
+                                        ↑ MinIO S3 endpoint on server (S3_ENDPOINT_URL)
   accumulator.add(ts_ms, s3_key)
   if window elapsed:
     manifest = {frames: [[ts, key], ...], status, batch_number, ...}
     redis.XADD stream:iep1:{camera_id} {manifest: json(manifest)}
+              ↑ Redis on server (REDIS_URL)
 
-IEP2 (redis consumer loop):
+[SERVER] IEP2 (redis consumer loop, runs on server alongside EEP):
   XREADGROUP iep2_workers iep2_{cam} stream:iep1:{cam} > COUNT 10 BLOCK 2000
   for each message:
     manifest = json.loads(fields["manifest"])

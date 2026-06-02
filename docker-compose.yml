@@ -207,6 +207,26 @@ services:
       - minio
     restart: unless-stopped
 
+  # ─── Edge Agent (dev-only) ────────────────────────────────────────────────
+  # In production the Edge Agent runs on the physical edge device, not here.
+  # This entry lets you test the full gRPC loop on a single machine.
+  edge_agent:
+    build:
+      context: ./services/edge_agent
+      dockerfile: Dockerfile
+    environment:
+      EEP_GRPC_URL: eep:50051
+      STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
+      AGENT_VERSION: ${AGENT_VERSION:-0.1.0}
+      IEP1_IMAGE: ${IEP1_IMAGE:-retailvision-iep1:latest}
+      DOCKER_NETWORK: ${DOCKER_NETWORK:-retail-edge_default}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - eep
+    profiles:
+      - edge
+
 volumes:
   postgres_data:
   redis_data:
