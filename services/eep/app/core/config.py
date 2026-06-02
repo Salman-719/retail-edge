@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = ""
 
+    # Must match IEP1's --window argument. IEP2 is agnostic to this value.
+    CAMERA_WINDOW_SECONDS: float = 60.0
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

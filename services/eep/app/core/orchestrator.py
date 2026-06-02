@@ -6,6 +6,7 @@ from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
 from app.core import iep2_docker
+from app.core.config import settings
 from app.grpc_generated import agent_pb2
 from app.grpc_server import registry
 
@@ -66,7 +67,7 @@ async def start_camera_workers(store_id: str, camera_config_id: str) -> None:
             store_id=store_id,
             rtsp_url=rtsp_url,
             target_fps=target_fps,
-            window_seconds=60.0,
+            window_seconds=settings.CAMERA_WINDOW_SECONDS,
             redis_url=_REDIS_URL,
             s3_config=agent_pb2.S3Config(
                 endpoint_url=_S3_ENDPOINT_URL,
