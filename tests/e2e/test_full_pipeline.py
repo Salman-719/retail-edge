@@ -35,21 +35,19 @@ CAMERA_ID  = os.environ.get("E2E_CAMERA_ID", "")
 STORE_ID   = os.environ.get("E2E_STORE_ID", "")
 
 
-@pytest.fixture(scope="module")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
+# Fixtures are function-scoped (the default). pytest-asyncio 0.23.6 creates one
+# event loop per test function; keeping fixtures at function scope ensures each
+# connection is opened and closed in the same loop as the test that uses it,
+# avoiding "Future attached to a different loop" errors.
 
-
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def pg():
     conn = await asyncpg.connect(DATABASE_URL)
     yield conn
     await conn.close()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def redis_client():
     r = aioredis.Redis.from_url(REDIS_URL)
     yield r
@@ -148,9 +146,19 @@ async def test_consumer_group_exists(redis_client):
 
 
 async def test_no_pending_messages(redis_client):
-    stream  = f"stream:iep1:{CAMERA_ID}"
-    pending = await redis_client.xpending(stream, "iep2_workers")
-    count   = pending["pending"]
+    """
+    Retry for up to 30 s. IEP2 may have a message in-flight (picked up via
+    XREADGROUP but not yet ACKed) if the batch window is still open. Retrying
+    gives the current batch time to complete and ACK.
+    """
+    stream = f"stream:iep1:{CAMERA_ID}"
+    count = None
+    for _ in range(6):
+        pending = await redis_client.xpending(stream, "iep2_workers")
+        count = pending["pending"]
+        if count == 0:
+            break
+        await asyncio.sleep(5)
     assert count == 0, (
         f"{count} messages still pending (not ACKed) in iep2_workers"
     )

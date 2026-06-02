@@ -162,9 +162,10 @@ class IEP2Runtime:
 
     @staticmethod
     def _video_source(video_path: str) -> Iterator[Tuple[int, str | None, np.ndarray]]:
-        """Wrap video file frames as (capture_ts_ms, s3_key, frame) — ts and key are placeholders."""
+        """Wrap video file frames as (capture_ts_ms, s3_key, frame)."""
+        import time
         for frame in extract_frames(video_path):
-            yield 0, None, frame
+            yield int(time.time() * 1000), None, frame
 
     async def _run_frame_detections(
         self,
