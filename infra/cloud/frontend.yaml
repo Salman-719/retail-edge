@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: 692461731658.dkr.ecr.eu-west-1.amazonaws.com/frontend:latest
+          image: REPLACE_WITH_ECR_OR_REGISTRY/frontend:latest
           ports:
             - containerPort: 80
           readinessProbe:

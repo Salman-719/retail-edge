@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: iep3
-          image: 692461731658.dkr.ecr.eu-west-1.amazonaws.com/iep3-reconciliation:latest
+          image: REPLACE_WITH_ECR_OR_REGISTRY/iep3-reconciliation:latest
           command: ["python", "-m", "services.iep3_reconciliation.app.main"]
           env:
             - name: STORE_ID
