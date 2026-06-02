@@ -16,24 +16,30 @@ spec:
       containers:
         - name: redpanda
           image: docker.redpanda.com/redpandadata/redpanda:v23.3.11
+          # Use rpk (the wrapper CLI) — it understands --mode dev-container,
+          # which configures a single-node dev broker (smp=1, developer mode,
+          # auto-create topics). The raw `redpanda start` binary does NOT accept
+          # --mode/--node-id/--set; those are rpk flags.
           command:
+            - rpk
             - redpanda
             - start
-            - --mode=dev-container
-            - --smp=1
-            - --memory=256M
-            - --reserve-memory=0M
-            - --node-id=0
-            - --kafka-addr=0.0.0.0:9092
-            - --advertise-kafka-addr=redpanda.retail-edge.svc.cluster.local:9092
+            - --mode
+            - dev-container
+            - --smp
+            - "1"
+            - --kafka-addr
+            - 0.0.0.0:9092
+            - --advertise-kafka-addr
+            - redpanda.retail-edge.svc.cluster.local:9092
           ports:
             - containerPort: 9092
           resources:
             requests:
-              memory: 256Mi
+              memory: 384Mi
               cpu: 100m
             limits:
-              memory: 512Mi
+              memory: 768Mi
           readinessProbe:
             exec:
               command: ["rpk", "cluster", "health"]

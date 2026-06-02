@@ -243,3 +243,57 @@ async def update_camera_health(
     await db.execute(update(PhysicalCamera).where(PhysicalCamera.id == uuid.UUID(str(camera_id))).values(**values))
     await db.commit()
     return {"status": "ok"}
+
+
+# ── Edge connectivity heartbeat ────────────────────────────────────────────────
+# Store-level "is the Jetson reaching the cloud" signal — independent of cameras
+# or any published config. IEP1 posts this on a timer; the GUI reads edge-status.
+# Stored in Redis with a TTL so "connected" means "pinged within the TTL window".
+
+_EDGE_HB_TTL = 60  # seconds; a missed window marks the edge disconnected
+
+
+def _redis():
+    import redis.asyncio as aioredis
+    return aioredis.from_url(settings.REDIS_URL)
+
+
+@router.post("/internal/vision/edge-heartbeat")
+async def edge_heartbeat(
+    payload: dict[str, Any],
+    x_vision_internal_token: str | None = Header(default=None),
+):
+    _require_internal(x_vision_internal_token)
+    store_id = payload.get("store_id")
+    if not store_id:
+        raise HTTPException(status_code=422, detail={"error": "store_id is required", "code": "BAD_PAYLOAD"})
+    import json
+    r = _redis()
+    try:
+        await r.set(
+            f"edge:hb:{store_id}",
+            json.dumps({
+                "last_seen": datetime.utcnow().isoformat() + "Z",
+                "hostname": payload.get("hostname", ""),
+            }),
+            ex=_EDGE_HB_TTL,
+        )
+    finally:
+        await r.aclose()
+    return {"status": "ok"}
+
+
+@router.get("/store/{slug}/vision/edge-status")
+async def edge_status(
+    ctx: StoreContext = Depends(get_store_context),
+):
+    import json
+    r = _redis()
+    try:
+        raw = await r.get(f"edge:hb:{ctx.store_id}")
+    finally:
+        await r.aclose()
+    if not raw:
+        return {"connected": False, "last_seen": None, "hostname": None}
+    data = json.loads(raw)
+    return {"connected": True, "last_seen": data.get("last_seen"), "hostname": data.get("hostname")}

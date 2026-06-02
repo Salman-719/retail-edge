@@ -407,4 +407,8 @@ export const getAuditLog = (slug, params) =>
 export const getCameraHealth = (slug) =>
   api.get(`/store/${slug}/vision/camera-health`).then(r => r.data)
 
+// Store-level edge connectivity (Jetson reachable?) — independent of cameras/config.
+export const getEdgeStatus = (slug) =>
+  api.get(`/store/${slug}/vision/edge-status`).then(r => r.data)
+
 export default api

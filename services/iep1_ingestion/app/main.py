@@ -124,11 +124,32 @@ def _optional_int_env(name: str) -> int | None:
     return int(raw)
 
 
+async def _edge_heartbeat_loop(store_id: str) -> None:
+    """Ping EEP every ~15s so the GUI can show 'Edge Connected' for this store —
+    works even with no cameras/config (pure connectivity signal)."""
+    import socket
+    from .eep_client import EepClient
+    interval = float(os.getenv("IEP1_HEARTBEAT_SECONDS", "15"))
+    hostname = socket.gethostname()
+    client = EepClient()
+    while True:
+        try:
+            await client.post_edge_heartbeat(store_id, hostname)
+        except Exception:
+            pass  # cloud unreachable — just retry next tick
+        await asyncio.sleep(interval)
+
+
 @app.on_event("startup")
 async def auto_start_store_topology_run() -> None:
     raw_store_id = os.getenv("IEP1_AUTO_START_STORE_ID")
     if not raw_store_id:
         return
+
+    # Edge connectivity heartbeat — runs regardless of whether cameras exist.
+    hb = asyncio.create_task(_edge_heartbeat_loop(raw_store_id))
+    _startup_tasks.add(hb)
+    hb.add_done_callback(_startup_tasks.discard)
 
     run_id = os.getenv("IEP1_AUTO_START_RUN_ID") or f"edge-{uuid.uuid4().hex}"
     store_id = uuid.UUID(raw_store_id)

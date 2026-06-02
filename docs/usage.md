@@ -7,6 +7,27 @@ The web GUI is served at the cluster's ingress: **`http://<MASTER_IP>/`**.
 
 ---
 
+## Quick start — first run in the GUI
+
+Do this once after the cloud is deployed (the edge can come later):
+
+1. **Open** `http://<MASTER_IP>/`
+   *(get the IP on the Mac: `aws cloudformation describe-stacks --region eu-west-1 --stack-name RetailEdgeCluster --query "Stacks[0].Outputs[?OutputKey=='MasterPublicIp'].OutputValue" --output text`)*
+2. **Register** the owner account → lands on the Owner Dashboard.
+3. **Create a store.** Use the **same store UUID** you onboarded in the cloud
+   (cloud deploy Step 9). The per-store IEP3 pod is keyed to that ID.
+4. **Open the store** (`/store/<slug>/`) → **Store Config**, then in order:
+   **Cameras** → **Zones** (assign roles) → **Calibration** (homography per camera).
+5. **Verify the pipeline** once a Jetson is streaming:
+   - **Live Monitoring** → "Edge Online" badge + green camera dots
+   - **Live View** → annotated video with bounding boxes + IDs
+   - **Analytics** → occupancy, dwell time, heatmaps
+
+Without a streaming edge you can still register, create the store, and configure
+cameras/zones — the live/analytics views populate once tracking data flows in.
+
+---
+
 ## 1. Accounts and stores
 
 The platform is multi-tenant: an **owner** account manages one or more **stores**,
@@ -65,18 +86,50 @@ Cameras → IEP1 (sample frames) → IEP2 (detect/track/ReID, GPU)
 
 ---
 
+## 3a. Confirm the edge is connected (no config needed)
+
+You don't need cameras, zones, or calibration to verify the Jetson is reaching
+the cloud. IEP1 sends a **store-level heartbeat** every ~15s as soon as it starts
+(it only needs `IEP1_AUTO_START_STORE_ID`).
+
+- **In the GUI:** Live Monitoring shows a green **"Edge connected (hostname)"**
+  banner when the Jetson is reachable, and an amber "Edge not connected" banner
+  otherwise. Flips to disconnected ~60s after the Jetson stops.
+- **From the CLI:**
+  ```bash
+  curl -s "http://<MASTER_IP>/api/store/<slug>/vision/edge-status"
+  # {"connected": true, "last_seen": "...", "hostname": "saljetson-desktop"}
+  ```
+
+This is the quickest end-to-end check while building: deploy the Jetson → see
+"Edge connected" — before configuring anything else.
+
+---
+
 ## 4. Viewing results
 
-| Page | Path | What it shows |
-|------|------|---------------|
-| **Live Monitoring** | `/store/<slug>/live` | Real-time per-camera status and current occupancy |
-| **Live View** | `/store/<slug>/live-view` | Annotated camera video with bounding boxes + global/local IDs |
-| **Analytics** | `/store/<slug>/analytics` | Zone occupancy, dwell time, traffic trends, heatmaps |
-| **AI Assistant** | `/store/<slug>/agent` | Natural-language questions over the store's analytics |
+| Page | Path | What it shows | Data source |
+|------|------|---------------|-------------|
+| **Live Monitoring** | `/store/<slug>/live` | Camera/edge status + occupancy KPIs and active alerts | **mixed** — see below |
+| **Live View** | `/store/<slug>/live-view` | Annotated camera video with bounding boxes + global/local IDs | live (edge stream) |
+| **Analytics** | `/store/<slug>/analytics` | Zone occupancy, dwell time, traffic trends, heatmaps | live (DB) |
+| **AI Assistant** | `/store/<slug>/agent` | Natural-language questions over the store's analytics | live (DB) |
+
+> **Live Monitoring — what's wired vs. demo.** These are **real**: the
+> **Edge connected** banner (store-level heartbeat, `…/vision/edge-status`) and
+> the **Camera Status** strip (`…/vision/camera-health`, polled every 10s). These
+> are still **demo placeholders**: **Total People / Customers / Staff / Active
+> Alerts** tiles and the floor-plan dots — they aren't wired to live endpoints
+> yet, so don't read those numbers as real. The amber demo banner only shows
+> while the edge is disconnected.
 
 Cross-camera identities (the same person seen on camera A then B getting one
 `global_id`) appear once IEP3 has reconciled a batch — within a few seconds of
 the batch window closing.
+
+> If a freshly deployed frontend still shows old camera names (CAM-01…04) or no
+> "Edge Online" badge, your browser cached the old bundle — hard-refresh
+> (Cmd/Ctrl+Shift+R) after `kubectl rollout restart deployment/frontend`.
 
 ---
 

@@ -43,3 +43,17 @@ class EepClient:
                 headers=self._headers(),
             )
             response.raise_for_status()
+
+    async def post_edge_heartbeat(self, store_id: str, hostname: str = "") -> None:
+        """Store-level 'edge is reachable' ping — independent of cameras/config."""
+        try:
+            import httpx
+        except Exception:
+            return
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{self.base_url}/api/internal/vision/edge-heartbeat",
+                json={"store_id": store_id, "hostname": hostname},
+                headers=self._headers(),
+            )
+            response.raise_for_status()

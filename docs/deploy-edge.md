@@ -110,12 +110,35 @@ docker buildx build --platform linux/arm64 \
 
 ## Step 5 — Fill in config and secrets
 
+All three values come from the cloud side. The **store UUID must be the one EEP
+generated** when you created the store in the GUI — the *same* UUID the store's
+IEP3 pod uses. Get it on the cloud side with:
+
+```sql
+-- on the Mac, via the psql pod (see deploy-cloud.md Step 9)
+SELECT id, slug, name FROM stores;
+```
+
 Edit `infra/edge/configmap.yaml`:
-- `IEP1_AUTO_START_STORE_ID` — the store's UUID (from EEP store onboarding)
-- `EEP_BASE_URL` — `http://<MASTER_IP>` from cloud deployment output
+- `IEP1_AUTO_START_STORE_ID` — the store's real UUID (matches the IEP3 pod's `STORE_ID`)
+- `EEP_BASE_URL` — `http://<MASTER_IP>`
 
 Edit `infra/edge/secrets.yaml`:
 - `VISION_INTERNAL_TOKEN` — must match the cloud value exactly
+  (`kubectl -n retail-edge get secret retail-edge-secrets -o jsonpath='{.data.VISION_INTERNAL_TOKEN}' | base64 -d`)
+
+You can set the store UUID and EEP URL with `sed` instead of an editor:
+
+```bash
+STORE_UUID=<real-uuid>
+MASTER_IP=<cloud-master-ip>
+sed -i "s|IEP1_AUTO_START_STORE_ID:.*|IEP1_AUTO_START_STORE_ID: \"$STORE_UUID\"|" infra/edge/configmap.yaml
+sed -i "s|EEP_BASE_URL:.*|EEP_BASE_URL: \"http://$MASTER_IP\"|" infra/edge/configmap.yaml
+```
+
+> All three — GUI store, cloud IEP3 pod, and this edge config — must share the
+> one real UUID, or the edge's data won't link to the store and reconciliation
+> won't run.
 
 ---
 
@@ -203,14 +226,35 @@ Only outbound connections are needed — no inbound ports on the Jetson.
 
 ---
 
+## Applying changes (important)
+
+`kubectl apply -k infra/edge/` only diffs the **YAML manifests**. Two common
+changes are invisible to it and need an explicit restart:
+
+| You changed | Why `apply` says "unchanged" | What to run |
+|-------------|------------------------------|-------------|
+| Rebuilt an image (same `:latest` tag) | Deployment YAML is byte-identical | `rollout restart` the deployment |
+| Edited `configmap.yaml` / `secrets.yaml` | Pods read env at startup; live pods keep old values | `apply -k` **then** `rollout restart` |
+
+```bash
+kubectl apply -k infra/edge/
+kubectl -n retail-edge rollout restart \
+  deployment/iaip1-ingestion deployment/iaip2-detector-workers statefulset/redpanda
+kubectl -n retail-edge get pods -w
+```
+
+> Confirm an edit actually saved before restarting:
+> `grep -E "IEP1_AUTO_START_STORE_ID|EEP_BASE_URL" infra/edge/configmap.yaml`
+
 ## Updating images
 
 ```bash
-# Rebuild and reimport
+# Rebuild and reimport (the :latest tag stays the same)
 docker build -f services/iep2_vision/Dockerfile -t retail-edge/iep2-vision:latest .
 docker save retail-edge/iep2-vision:latest | sudo k3s ctr images import -
 
-# Restart the deployment to pick up the new image
+# Restart the deployment so the pod picks up the freshly-imported image
+# (apply alone won't — the manifest hasn't changed)
 kubectl -n retail-edge rollout restart deployment/iaip2-detector-workers
 kubectl -n retail-edge rollout status deployment/iaip2-detector-workers
 ```
@@ -221,6 +265,8 @@ kubectl -n retail-edge rollout status deployment/iaip2-detector-workers
 
 | Symptom | Check |
 |---------|-------|
+| Redpanda `Argument parse error: unrecognised option '--mode'/'--node-id'/'--set'` | Those are **rpk** flags, not raw `redpanda` flags. The manifest runs `rpk redpanda start --mode dev-container` — make sure `command:` starts with `rpk`, not `redpanda`. |
+| IEP2 `KafkaConnectionError: Unable to bootstrap from redpanda...:9092` | Downstream of Redpanda being down. Fix Redpanda first, then `kubectl -n retail-edge rollout restart deployment/iaip2-detector-workers`. |
 | IEP2 stuck at `Pending` | `kubectl describe pod` — GPU resource not available; confirm device plugin is running |
 | IEP1 camera `offline` | RTSP URL reachable? Try `ffprobe rtsp://...` from the pod |
 | Tracking batches not appearing in cloud DB | Check `VISION_INTERNAL_TOKEN` matches cloud; check `kubectl logs iaip2-*` for HTTP errors |

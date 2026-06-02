@@ -4,7 +4,7 @@ import { usePageTitle } from '../components/PageMeta'
 import { StatsSkeleton } from '../components/Skeletons'
 import SectionTabs from '../components/SectionTabs'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
-import { getActiveVersion, getCameraHealth } from '../api'
+import { getActiveVersion, getCameraHealth, getEdgeStatus } from '../api'
 
 // A camera counts as "online" only if it reported within this window.
 const EDGE_ONLINE_WINDOW_MS = 30000
@@ -240,8 +240,21 @@ export default function LiveMonitoring() {
     return () => { active = false; clearInterval(t) }
   }, [slug])
 
-  // Edge device is "online" if any of its cameras reported online recently.
-  const edgeOnline = cameras.some(c => c.online)
+  // Store-level edge connectivity — works even with no cameras/config.
+  const [edge, setEdge] = useState({ connected: false, last_seen: null })
+  useEffect(() => {
+    let active = true
+    const load = () =>
+      getEdgeStatus(slug)
+        .then(d => { if (active) setEdge(d || { connected: false }) })
+        .catch(() => {})
+    load()
+    const t = setInterval(load, 10000)
+    return () => { active = false; clearInterval(t) }
+  }, [slug])
+
+  // Edge is connected if it heartbeated recently (store-level) OR any camera is live.
+  const edgeOnline = edge.connected || cameras.some(c => c.online)
 
   // MOCK: replace with API call to GET /store/{slug}/live/positions
   const [people] = useState(MOCK_PEOPLE)
@@ -283,12 +296,23 @@ export default function LiveMonitoring() {
         </div>
       </header>
 
-      {/* ── Demo data banner ────────────────────────────────────────────────── */}
-      {demoBannerVisible && (
-        <div className="bg-amber-50 border-b border-amber-200 text-amber-800 text-xs px-6 py-2 flex items-center justify-between shrink-0">
-          <span>Showing demo data — live backend not connected.</span>
-          <button onClick={() => setDemoBannerVisible(false)} className="ml-4 text-amber-600 hover:text-amber-900 leading-none">✕</button>
+      {/* ── Edge connectivity banner (real) ─────────────────────────────────── */}
+      {edge.connected ? (
+        <div className="bg-green-50 border-b border-green-200 text-green-800 text-xs px-6 py-2 flex items-center gap-2 shrink-0">
+          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+          <span>
+            Edge connected{edge.hostname ? ` (${edge.hostname})` : ''}
+            {edge.last_seen ? ` — last seen ${new Date(edge.last_seen).toLocaleTimeString()}` : ''}.
+            KPI tiles below are still demo placeholders.
+          </span>
         </div>
+      ) : (
+        demoBannerVisible && (
+          <div className="bg-amber-50 border-b border-amber-200 text-amber-800 text-xs px-6 py-2 flex items-center justify-between shrink-0">
+            <span>Edge not connected — showing demo data. Start the Jetson (IEP1) for this store to go live.</span>
+            <button onClick={() => setDemoBannerVisible(false)} className="ml-4 text-amber-600 hover:text-amber-900 leading-none">✕</button>
+          </div>
+        )
       )}
 
       <div className="flex-1 overflow-auto p-5 space-y-4">
