@@ -787,3 +787,147 @@ ALTER TABLE calibrations
 DROP INDEX IF EXISTS one_current_per_camera_config;
 CREATE UNIQUE INDEX IF NOT EXISTS one_current_per_camera_config
     ON calibrations(camera_config_id) WHERE is_current = TRUE;
+
+-- ============================================================================
+-- DOMAIN 9 ADDITIONS — IEP3 Reconciliation Prerequisites
+-- Idempotent: safe to run against both fresh and existing databases.
+-- FK dependency order: physical_cameras (no deps) → crs index → local_centroids
+-- (stores) → global_identities (stores, zones) → global_local_mapping →
+-- global_embeddings → global_tracking_history (global_identities, stores,
+-- store_config_versions, zones).
+-- ============================================================================
+
+-- 1. Stream resolution on physical_cameras — read by IEP3 for aspect-ratio
+--    normalisation during cross-camera ReID matching.
+ALTER TABLE physical_cameras
+    ADD COLUMN IF NOT EXISTS stream_width  INTEGER,
+    ADD COLUMN IF NOT EXISTS stream_height INTEGER;
+
+-- 2. Fast lookup of open sessions by physical camera — used by IEP3 to resolve
+--    which store a camera_id belongs to at reconciliation time.
+CREATE INDEX IF NOT EXISTS idx_crs_physical_open
+    ON camera_runtime_sessions(physical_camera_id)
+    WHERE stopped_at IS NULL;
+
+-- 3. local_centroids — per-camera appearance centroid per local track.
+--    Written by IEP2 after each batch; read by IEP3 for cross-camera matching.
+--    local_id is the same UUID derived by uuid.UUID(int=local_id) in IEP2.
+CREATE TABLE IF NOT EXISTS local_centroids (
+    local_id         UUID        PRIMARY KEY,
+    camera_id        TEXT        NOT NULL,
+    store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    centroid         BYTEA       NOT NULL,
+    updated_at_batch INT         NOT NULL,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_local_centroids_camera
+    ON local_centroids(camera_id);
+
+CREATE INDEX IF NOT EXISTS idx_local_centroids_store
+    ON local_centroids(store_id);
+
+-- 4. global_identities — one row per store-wide person identity.
+--    Owned by IEP3. state machine: active → lost → exited.
+--    All timestamps are epoch ms sourced from tracking_history.timestamp_ms.
+CREATE TABLE IF NOT EXISTS global_identities (
+    global_id      UUID             PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id       UUID             NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    first_seen_ts  BIGINT           NOT NULL,
+    last_seen_ts   BIGINT           NOT NULL,
+    last_floor_x   DOUBLE PRECISION,
+    last_floor_y   DOUBLE PRECISION,
+    state          VARCHAR(16)      NOT NULL DEFAULT 'active'
+                   CHECK (state IN ('active', 'lost', 'exited')),
+    lost_since_ts  BIGINT,
+    entry_zone_id  UUID             REFERENCES zones(id) ON DELETE SET NULL,
+    exit_zone_id   UUID             REFERENCES zones(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_global_identities_store_state
+    ON global_identities(store_id, state);
+
+-- Partial index: only index lost rows for the lost-timeout sweep query.
+CREATE INDEX IF NOT EXISTS idx_global_identities_lost
+    ON global_identities(state, lost_since_ts)
+    WHERE state = 'lost';
+
+-- 5. global_local_mapping — maps per-camera LocalIDs to GlobalIDs.
+--    All timestamps are epoch ms. Partial unique index enforces one active
+--    LocalID per camera per GlobalID at DB level.
+CREATE TABLE IF NOT EXISTS global_local_mapping (
+    id             BIGSERIAL   PRIMARY KEY,
+    global_id      UUID        NOT NULL
+                   REFERENCES global_identities(global_id) ON DELETE CASCADE,
+    camera_id      TEXT        NOT NULL,
+    local_id       UUID        NOT NULL,
+    is_active      BOOLEAN     NOT NULL DEFAULT TRUE,
+    linked_at_ts   BIGINT      NOT NULL,
+    last_seen_ts   BIGINT      NOT NULL,
+    unlinked_at_ts BIGINT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_glm_one_active_per_camera
+    ON global_local_mapping(global_id, camera_id)
+    WHERE is_active = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_glm_local_id
+    ON global_local_mapping(local_id);
+
+CREATE INDEX IF NOT EXISTS idx_glm_global_active
+    ON global_local_mapping(global_id, is_active);
+
+-- 6. global_embeddings — per-camera appearance centroid per GlobalID.
+--    centroid is a float32[512] numpy array stored as raw bytes (.tobytes()).
+--    Representative centroid is computed at query time, never stored.
+CREATE TABLE IF NOT EXISTS global_embeddings (
+    global_id      UUID    NOT NULL
+                   REFERENCES global_identities(global_id) ON DELETE CASCADE,
+    camera_id      TEXT    NOT NULL,
+    centroid       BYTEA   NOT NULL,
+    updated_at_ts  BIGINT  NOT NULL,
+    PRIMARY KEY (global_id, camera_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_global_embeddings_global
+    ON global_embeddings(global_id);
+
+-- 7. global_tracking_history — canonical store-wide position per GlobalID per
+--    batch. floor_x/floor_y are NOT NULL: calibration is a hard prerequisite
+--    for version activation (enforced in A2). version_id and zone_id use
+--    ON DELETE SET NULL to preserve history when configs are archived.
+--    batch_number is correlation metadata only — not used by the state machine.
+CREATE TABLE IF NOT EXISTS global_tracking_history (
+    id              BIGSERIAL        PRIMARY KEY,
+    global_id       UUID             NOT NULL
+                    REFERENCES global_identities(global_id) ON DELETE CASCADE,
+    store_id        UUID             NOT NULL
+                    REFERENCES stores(id) ON DELETE CASCADE,
+    version_id      UUID
+                    REFERENCES store_config_versions(id) ON DELETE SET NULL,
+    batch_number    INT              NOT NULL,
+    timestamp_ms    BIGINT           NOT NULL,
+    floor_x         DOUBLE PRECISION NOT NULL,
+    floor_y         DOUBLE PRECISION NOT NULL,
+    zone_id         UUID             REFERENCES zones(id) ON DELETE SET NULL,
+    source_camera   TEXT             NOT NULL,
+    source_local_id UUID             NOT NULL,
+    selection_score FLOAT4           NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gth_global_ts
+    ON global_tracking_history(global_id, timestamp_ms);
+
+CREATE INDEX IF NOT EXISTS idx_gth_store_ts
+    ON global_tracking_history(store_id, timestamp_ms);
+
+CREATE INDEX IF NOT EXISTS idx_gth_batch
+    ON global_tracking_history(store_id, batch_number);
+
+CREATE INDEX IF NOT EXISTS idx_gth_zone_ts
+    ON global_tracking_history(zone_id, timestamp_ms)
+    WHERE zone_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_gth_version
+    ON global_tracking_history(version_id)
+    WHERE version_id IS NOT NULL;

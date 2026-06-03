@@ -4,6 +4,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
+from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +44,47 @@ WHERE cc.id        = :camera_config_id
   AND scv.store_id = :store_id
 LIMIT 1
 """)
+
+
+_CALIBRATION_CHECK_SQL = text("""
+    SELECT pc.name
+    FROM camera_configs cc
+    JOIN physical_cameras pc ON pc.id = cc.physical_camera_id
+    LEFT JOIN calibrations c
+           ON c.camera_config_id = cc.id
+          AND c.is_current = TRUE
+          AND c.status IN ('ok', 'verified')
+    WHERE cc.version_id = :version_id
+      AND c.id IS NULL
+""")
+
+
+async def _check_all_cameras_calibrated(
+    db: AsyncSession,
+    new_version_id: str,
+) -> None:
+    """Raise HTTP 422 if any camera in new_version_id lacks a current valid calibration.
+
+    Must be called before any container or version state changes so that a
+    failed check leaves the system completely unmodified.
+    """
+    result = await db.execute(
+        _CALIBRATION_CHECK_SQL,
+        {"version_id": uuid.UUID(new_version_id)},
+    )
+    uncalibrated = [row.name for row in result]
+    if uncalibrated:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "uncalibrated_cameras",
+                "message": (
+                    "All cameras must have a current valid calibration "
+                    "(status 'ok' or 'verified') before activation."
+                ),
+                "cameras": uncalibrated,
+            },
+        )
 
 
 async def _load_camera_data(session, store_id: str, camera_config_id: str) -> dict | None:
@@ -224,6 +266,10 @@ async def activate_version_now(
     Returns (started_camera_config_ids, stopped_camera_config_ids).
     Callers are responsible for updating mark_running / mark_stopped accordingly.
     """
+    # Calibration gate — must run before any state mutation.
+    async with AsyncSessionLocal() as _check_db:
+        await _check_all_cameras_calibrated(_check_db, new_version_id)
+
     # Step 1 — find cameras with open sessions for this store.
     async with AsyncSessionLocal() as session:
         result = await session.execute(

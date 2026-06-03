@@ -167,8 +167,26 @@ services:
     build:
       context: ./services/iep3_reconciliation
       dockerfile: Dockerfile
-    ports:
-      - "8003:8003"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
+      REDIS_URL: redis://redis:6379/0
+      STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
+      EXPECTED_CAMERAS: ${EXPECTED_CAMERAS:-}
+      COORDINATOR_TIMEOUT_S: ${COORDINATOR_TIMEOUT_S:-120}
+      REID_THRESHOLD: ${REID_THRESHOLD:-0.75}
+      MAX_SPEED_MPS: ${MAX_SPEED_MPS:-1.5}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-512}
+      SELECTION_WEIGHT_AREA: ${SELECTION_WEIGHT_AREA:-0.7}
+      SELECTION_WEIGHT_CONFIDENCE: ${SELECTION_WEIGHT_CONFIDENCE:-0.3}
+      GRACE_SECONDS: ${GRACE_SECONDS:-300.0}
+      DEFAULT_FRAME_WIDTH: ${DEFAULT_FRAME_WIDTH:-1920}
+      DEFAULT_FRAME_HEIGHT: ${DEFAULT_FRAME_HEIGHT:-1080}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: on-failure
 
   iep4_alerts:
     build:

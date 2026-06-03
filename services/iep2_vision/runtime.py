@@ -156,6 +156,23 @@ class IEP2Runtime:
             camera_id=camera_id,
         ) as persistence:
             projector = await _load_projector(persistence, self.settings.camera_config_id)
+
+            # Write stream resolution once before the processing loop starts.
+            # Open a brief cap solely to read dimensions — extract_frames owns its own cap.
+            _cap = cv2.VideoCapture(video_path)
+            if _cap.isOpened():
+                _w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                _h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                _cap.release()
+                if _w > 0 and _h > 0:
+                    await persistence.write_stream_resolution(camera_id, _w, _h)
+                else:
+                    log.warning(
+                        "Could not read stream resolution from source "
+                        "(width=%d height=%d) — stream_width/height not updated",
+                        _w, _h,
+                    )
+
             self._start_ms = start_ms
             yield self._stream_from_source(self._video_source(video_path), persistence, projector)
 
@@ -188,6 +205,70 @@ class IEP2Runtime:
         import time
         for frame in extract_frames(video_path):
             yield int(time.time() * 1000), None, frame
+
+    async def _flush_centroids(
+        self,
+        manager: "LocalIdentityManager",
+        persistence: "PostgresPersistence",
+        batch_number: int,
+    ) -> None:
+        """Collect active centroids and UPSERT to local_centroids.
+
+        Called once per batch window after all tracking_history rows are
+        written and before XACK fires. Safe to call when no tracks are active.
+        """
+        active = manager.get_active_centroids()
+        if not active:
+            return
+
+        records = [
+            {
+                "local_id":         str(uuid.UUID(int=local_id_int)),
+                "camera_id":        self.settings.camera_id,
+                "store_id":         self.settings.store_id,
+                "centroid":         centroid_array.astype(np.float32).tobytes(),
+                "updated_at_batch": batch_number,
+            }
+            for local_id_int, centroid_array in active.items()
+        ]
+
+        await persistence.upsert_local_centroids(records)
+        log.debug(
+            "Flushed %d centroids for batch %d camera %s",
+            len(records), batch_number, self.settings.camera_id,
+        )
+
+    async def _publish_batch_complete(
+        self,
+        redis_client,
+        batch_number: int,
+        window_start_ms: int,
+        window_end_ms: int,
+    ) -> None:
+        """XADD one batch_complete event to stream:iep2:batch_complete.
+
+        Called after centroid flush and before XACK. A failed XADD is logged
+        but does not prevent XACK — IEP3's coordinator timeout guard handles
+        cameras that fail to report.
+        """
+        fields = {
+            "camera_id":       self.settings.camera_id,
+            "store_id":        self.settings.store_id,
+            "batch_number":    str(batch_number),
+            "window_start_ms": str(window_start_ms),
+            "window_end_ms":   str(window_end_ms),
+        }
+        try:
+            await redis_client.xadd("stream:iep2:batch_complete", fields)
+            log.debug(
+                "Published batch_complete  camera=%s  batch=%d  window=[%d, %d]",
+                self.settings.camera_id, batch_number, window_start_ms, window_end_ms,
+            )
+        except Exception as exc:
+            log.error(
+                "Failed to publish batch_complete for batch %d camera %s: %s",
+                batch_number, self.settings.camera_id, exc,
+            )
 
     async def _run_frame_detections(
         self,
@@ -298,6 +379,7 @@ class IEP2Runtime:
         seen_ids: set  = set()
         frame_index    = 0
         db_rows_written = 0
+        _resolution_written = False  # write stream resolution once from first valid frame
 
         async for message_id, manifest in source.manifests():
             if manifest.get("status") == "offline":
@@ -315,6 +397,18 @@ class IEP2Runtime:
                 frame = _fetch_s3_frame(s3_client, s3_bucket, s3_key)
                 if frame is None:
                     continue
+
+                if not _resolution_written:
+                    _h, _w = frame.shape[:2]
+                    if _w > 0 and _h > 0:
+                        await persistence.write_stream_resolution(camera_id, _w, _h)
+                    else:
+                        log.warning(
+                            "Could not read stream resolution from source "
+                            "(width=%d height=%d) — stream_width/height not updated",
+                            _w, _h,
+                        )
+                    _resolution_written = True
 
                 detections = detect(self.yolo_model, frame)
                 tracks     = update(tracker, detections)
@@ -353,7 +447,16 @@ class IEP2Runtime:
                 )
                 frame_index += 1
 
-            # ACK after all frames in the manifest are processed and written to DB
+            # Strict batch-close order: tracking writes → centroids → batch_complete → XACK.
+            await self._flush_centroids(
+                manager, persistence, manifest.get("batch_number", 0)
+            )
+            await self._publish_batch_complete(
+                redis_client=source.redis_client,
+                batch_number=manifest.get("batch_number", 0),
+                window_start_ms=manifest.get("window_start_ms", 0),
+                window_end_ms=manifest.get("window_end_ms", 0),
+            )
             await source.ack(message_id)
 
         log.info(

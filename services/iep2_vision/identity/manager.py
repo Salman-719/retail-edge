@@ -201,6 +201,21 @@ class LocalIdentityManager:
 
         return enriched
 
+    def get_active_centroids(self) -> dict[int, np.ndarray]:
+        """Return {local_id_int: centroid_float32_array} for all currently active tracks.
+
+        Only active pool entries with a non-None centroid are included.
+        Lost pool is excluded — lost local_ids will not appear in the next
+        batch's tracking_history so IEP3 does not need their centroids.
+        Returns empty dict if no active tracks or no centroid yet available.
+        """
+        result = {}
+        for active_track in self._active.values():
+            centroid = active_track.gallery.snapshot_centroid()
+            if centroid is not None:
+                result[active_track.local_id] = centroid
+        return result
+
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _resolve_pending(self, pending: PendingTrack, new_pos=None):

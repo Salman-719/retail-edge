@@ -17,6 +17,14 @@ INSERT INTO tracking_history
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 """
 
+_STREAM_RESOLUTION_SQL = """
+UPDATE physical_cameras
+SET stream_width  = $1,
+    stream_height = $2,
+    updated_at    = now()
+WHERE id = $3::uuid
+"""
+
 
 def _redact(dsn: str) -> str:
     import re
@@ -45,6 +53,70 @@ class PostgresPersistence:
         if self._pool:
             await self._pool.close()
             log.info("DB pool closed  camera=%s", self._camera_id)
+
+    async def write_stream_resolution(
+        self,
+        physical_camera_id: str,
+        width: int,
+        height: int,
+    ) -> None:
+        """Write stream resolution to physical_cameras once at IEP2 startup.
+
+        Safe to call multiple times — idempotent UPDATE.
+        Logs a warning and continues if the camera row does not exist.
+        """
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                _STREAM_RESOLUTION_SQL,
+                width,
+                height,
+                physical_camera_id,
+            )
+        updated = int(result.split()[-1])  # 'UPDATE N' → N
+        if updated == 0:
+            log.warning(
+                "write_stream_resolution: no physical_cameras row found "
+                "for camera_id=%s — skipping",
+                physical_camera_id,
+            )
+
+    async def upsert_local_centroids(
+        self,
+        records: list[dict],
+    ) -> None:
+        """UPSERT appearance centroids for all active local_ids at batch close.
+
+        records: list of dicts with keys:
+            local_id (str UUID), camera_id (str), store_id (str UUID),
+            centroid (bytes), updated_at_batch (int)
+        UPSERT on local_id primary key — one row per local_id, always the latest centroid.
+        Safe to call with an empty list — returns immediately.
+        """
+        if not records:
+            return
+
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO local_centroids
+                    (local_id, camera_id, store_id, centroid, updated_at_batch, updated_at)
+                VALUES ($1::uuid, $2, $3::uuid, $4, $5, now())
+                ON CONFLICT (local_id) DO UPDATE
+                    SET centroid         = EXCLUDED.centroid,
+                        updated_at_batch = EXCLUDED.updated_at_batch,
+                        updated_at       = now()
+                """,
+                [
+                    (
+                        r["local_id"],
+                        r["camera_id"],
+                        r["store_id"],
+                        r["centroid"],
+                        r["updated_at_batch"],
+                    )
+                    for r in records
+                ],
+            )
 
     async def insert_detection(
         self,

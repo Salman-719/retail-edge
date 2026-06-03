@@ -108,6 +108,11 @@ class RedisStreamFrameSource:
                         continue
                     yield message_id, manifest
 
+    @property
+    def redis_client(self):
+        """Expose the underlying Redis client for callers that need to publish to other streams."""
+        return self._redis
+
     async def ack(self, message_id) -> None:
         """ACK a message after successful processing and DB write."""
         await self._redis.xack(self._stream_name, GROUP_NAME, message_id)
