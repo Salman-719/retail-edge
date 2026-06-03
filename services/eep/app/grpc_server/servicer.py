@@ -17,13 +17,15 @@ class AgentServiceServicer(agent_pb2_grpc.AgentServiceServicer):
 
     async def Connect(self, request_iterator, context):
         store_id = None
+        _registered = False  # True only after a successful online upsert
         try:
             first = await request_iterator.__anext__()
             if not first.HasField("heartbeat"):
-                await context.abort(
-                    grpc.StatusCode.INVALID_ARGUMENT,
-                    "First message must be Heartbeat",
-                )
+                # Wrap abort() — grpc.aio raises AbortError by design after setting status.
+                try:
+                    await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "First message must be Heartbeat")
+                except Exception:
+                    pass
                 return
 
             store_id = first.heartbeat.store_id
@@ -31,7 +33,17 @@ class AgentServiceServicer(agent_pb2_grpc.AgentServiceServicer):
             logger.info("Agent connected", extra={"store_id": store_id, "version": agent_version})
 
             queue = await registry.register(store_id)
-            await _upsert_agent(store_id, agent_version, status="online")
+            ok = await _upsert_agent(store_id, agent_version, status="online")
+            if not ok:
+                registry.deregister(store_id)
+                logger.warning("Agent rejected: store not found", extra={"store_id": store_id})
+                try:
+                    await context.abort(grpc.StatusCode.NOT_FOUND, f"Store {store_id} not found")
+                except Exception:
+                    pass
+                return
+
+            _registered = True
 
             reader_task = asyncio.create_task(_reader(request_iterator, store_id))
             writer_task = asyncio.create_task(_writer(queue, context))
@@ -52,7 +64,8 @@ class AgentServiceServicer(agent_pb2_grpc.AgentServiceServicer):
         finally:
             if store_id:
                 registry.deregister(store_id)
-                await _upsert_agent(store_id, status="offline")
+                if _registered:
+                    await _upsert_agent(store_id, status="offline")
                 logger.info("Agent disconnected", extra={"store_id": store_id})
 
 
@@ -88,19 +101,30 @@ async def _upsert_agent(
     store_id: str,
     agent_version: str | None = None,
     status: str = "online",
-) -> None:
+) -> bool:
+    """Returns False if the store doesn't exist (FK violation); True on success."""
+    from sqlalchemy.exc import IntegrityError
+
     now = datetime.now(timezone.utc)
-    async with AsyncSessionLocal() as session:
-        await session.execute(
-            text("""
-                INSERT INTO edge_agents (store_id, status, last_heartbeat_at, agent_version, updated_at)
-                VALUES (:store_id, :status, :now, :version, :now)
-                ON CONFLICT (store_id) DO UPDATE SET
-                    status            = EXCLUDED.status,
-                    last_heartbeat_at = EXCLUDED.last_heartbeat_at,
-                    agent_version     = COALESCE(EXCLUDED.agent_version, edge_agents.agent_version),
-                    updated_at        = EXCLUDED.updated_at
-            """),
-            {"store_id": uuid.UUID(store_id), "status": status, "now": now, "version": agent_version},
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text("""
+                    INSERT INTO edge_agents (store_id, status, last_heartbeat_at, agent_version, updated_at)
+                    VALUES (:store_id, :status, :now, :version, :now)
+                    ON CONFLICT (store_id) DO UPDATE SET
+                        status            = EXCLUDED.status,
+                        last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+                        agent_version     = COALESCE(EXCLUDED.agent_version, edge_agents.agent_version),
+                        updated_at        = EXCLUDED.updated_at
+                """),
+                {"store_id": uuid.UUID(store_id), "status": status, "now": now, "version": agent_version},
+            )
+            await session.commit()
+        return True
+    except IntegrityError:
+        logger.warning(
+            "edge_agents upsert: store not found, ignoring",
+            extra={"store_id": store_id},
         )
-        await session.commit()
+        return False
