@@ -1,8 +1,8 @@
 import uuid
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 # ─── Draft Version ────────────────────────────────────────────────────────────
@@ -321,6 +321,27 @@ class SectionResponse(BaseModel):
 class ActivateDraftRequest(BaseModel):
     countdown_sec: int = 30
     label: str | None = None
+
+
+class VersionActivateRequest(BaseModel):
+    mode: Literal["immediate", "scheduled"]
+    activate_at: datetime | None = None  # required if mode='scheduled', UTC
+
+    @model_validator(mode="after")
+    def validate_scheduled(self) -> "VersionActivateRequest":
+        if self.mode == "scheduled" and self.activate_at is None:
+            raise ValueError("activate_at required when mode is 'scheduled'")
+        if self.mode == "scheduled" and self.activate_at <= datetime.now(timezone.utc):
+            raise ValueError("activate_at must be in the future")
+        return self
+
+
+class VersionActivateResponse(BaseModel):
+    version_id: uuid.UUID
+    status: str                      # 'activating' | 'scheduled'
+    activate_at: datetime | None = None
+    cameras_restarted: list[uuid.UUID] = []   # physical_camera_ids — immediate only
+    cameras_pending: list[uuid.UUID] = []     # physical_camera_ids with open sessions
 
 
 class SyncEventResponse(BaseModel):

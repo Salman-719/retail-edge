@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
 from app.core.database import get_db
-from app.core import s3_client
+from app.core import s3_client, orchestrator
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
+from app.tasks.camera_scheduler import mark_running, mark_stopped
 from app.models.calibration import Calibration
 from app.models.camera_config import CameraConfig
 from app.models.floor_plan import FloorPlan
@@ -46,6 +47,8 @@ from app.schemas.draft import (
     SectionResponse,
     SyncEventResponse,
     UpdateCameraConfigRequest,
+    VersionActivateRequest,
+    VersionActivateResponse,
     WorldBoundsRequest,
     ZoneCreate,
     ZoneResponse,
@@ -1508,10 +1511,10 @@ async def delete_section(
 
 # ─── Activation ───────────────────────────────────────────────────────────────
 
-@router.post("/store/{slug}/versions/draft/activate", response_model=SyncEventResponse, status_code=201)
+@router.post("/store/{slug}/versions/draft/activate", response_model=VersionActivateResponse, status_code=202)
 async def activate_draft(
     slug: str,
-    body: ActivateDraftRequest,
+    body: VersionActivateRequest,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1519,7 +1522,7 @@ async def activate_draft(
     draft = await _require_draft(ctx.store_id, db)
     _require_draft_access(draft, ctx)
 
-    # Pre-activation checklist: at least one section must have a floor plan uploaded
+    # Pre-activation checklist: at least one section must have a floor plan uploaded.
     sections_result = await db.execute(
         select(Section).where(Section.store_id == ctx.store_id, Section.status == "active")
     )
@@ -1543,7 +1546,7 @@ async def activate_draft(
             detail={"error": "At least one floor plan must be uploaded", "code": "NO_FLOOR_PLAN"},
         )
 
-    # Checklist: at least one camera config must be verified
+    # Checklist: at least one camera config must be verified.
     verified_result = await db.execute(
         select(CameraConfig).where(
             CameraConfig.version_id == draft.id,
@@ -1553,39 +1556,78 @@ async def activate_draft(
     if not verified_result.scalar_one_or_none():
         raise HTTPException(
             status_code=422,
-            detail={"error": "At least one camera must be calibrated and verified before activation", "code": "NO_VERIFIED_CAMERA"},
+            detail={
+                "error": "At least one camera must be calibrated and verified before activation",
+                "code": "NO_VERIFIED_CAMERA",
+            },
         )
 
-    if body.label:
-        draft.label = body.label
-        draft.last_edited_at = datetime.now(timezone.utc)
+    # Informational: query cameras currently running for this store (never blocks activation).
+    from sqlalchemy import text as _text
+    running_result = await db.execute(
+        _text("""
+            SELECT physical_camera_id
+            FROM camera_runtime_sessions
+            WHERE store_id = :store_id AND stopped_at IS NULL
+        """),
+        {"store_id": ctx.store_id},
+    )
+    cameras_pending = [row[0] for row in running_result.fetchall()]
+
+    # Find the current active version (to archive it).
+    active_result = await db.execute(
+        select(StoreConfigVersion).where(
+            StoreConfigVersion.store_id == ctx.store_id,
+            StoreConfigVersion.status == "active",
+        )
+    )
+    active_version = active_result.scalar_one_or_none()
+    old_version_id = str(active_version.id) if active_version else None
 
     now = datetime.now(timezone.utc)
-    scheduled_at = now + timedelta(seconds=body.countdown_sec)
 
-    event = VersionSyncEvent(
-        store_id=ctx.store_id,
-        version_id=draft.id,
-        event_type="activation",
-        countdown_sec=body.countdown_sec,
-        initiated_by=ctx.user_id,
-        scheduled_at=scheduled_at,
-        status="pending",
-    )
-    db.add(event)
-    await db.commit()
-    await db.refresh(event)
+    if body.mode == "immediate":
+        started_ids, stopped_ids = await orchestrator.activate_version_now(
+            store_id=str(ctx.store_id),
+            new_version_id=str(draft.id),
+            old_version_id=old_version_id,
+        )
+        for cc_id in stopped_ids:
+            mark_stopped(str(ctx.store_id), cc_id)
+        for cc_id in started_ids:
+            mark_running(str(ctx.store_id), cc_id)
 
-    remaining = max(0.0, (event.scheduled_at - datetime.now(timezone.utc)).total_seconds())
-    return SyncEventResponse(
-        id=event.id,
-        store_id=event.store_id,
-        version_id=event.version_id,
-        status=event.status,
-        scheduled_at=event.scheduled_at,
-        executed_at=event.executed_at,
-        remaining_seconds=remaining,
-    )
+        await write_audit_log(
+            db, "version_activated",
+            store_id=ctx.store_id, user_id=ctx.user_id,
+            entity_type="store_config_version", entity_id=draft.id,
+        )
+        await db.commit()
+
+        return VersionActivateResponse(
+            version_id=draft.id,
+            status="activating",
+            activate_at=None,
+            cameras_restarted=[uuid.UUID(cid) for cid in started_ids],
+            cameras_pending=cameras_pending,
+        )
+
+    else:  # scheduled
+        # Archive old active version and set draft to pending_activation atomically.
+        if active_version:
+            active_version.status = "archived"
+            active_version.active_until = now
+        draft.status = "pending_activation"
+        draft.activate_at = body.activate_at
+        await db.commit()
+
+        return VersionActivateResponse(
+            version_id=draft.id,
+            status="scheduled",
+            activate_at=body.activate_at,
+            cameras_restarted=[],
+            cameras_pending=cameras_pending,
+        )
 
 
 @router.get("/store/{slug}/versions/sync/{event_id}", response_model=SyncEventResponse)

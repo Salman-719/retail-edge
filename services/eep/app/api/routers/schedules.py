@@ -152,6 +152,7 @@ async def trigger_schedule(
             await orchestrator.stop_camera_workers(
                 store_id=store_id_str,
                 camera_config_id=config_id_str,
+                stop_reason="manual",
             )
             mark_stopped(store_id_str, config_id_str)
 

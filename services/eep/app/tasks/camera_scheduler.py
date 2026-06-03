@@ -164,6 +164,7 @@ async def _on_camera_stop(row: dict) -> None:
         await orchestrator.stop_camera_workers(
             store_id=str(row["store_id"]),
             camera_config_id=str(row["camera_config_id"]),
+            stop_reason="schedule",
         )
     except Exception as exc:
         log.error(
@@ -174,6 +175,50 @@ async def _on_camera_stop(row: dict) -> None:
                 "camera_config_id": str(row["camera_config_id"]),
             },
         )
+
+
+async def _activate_pending_versions(now_utc: datetime) -> None:
+    """Fire any pending_activation versions whose activate_at has passed."""
+    try:
+        async with AsyncSessionLocal() as db:
+            rows_result = await db.execute(
+                text("""
+                    SELECT scv.id        AS version_id,
+                           scv.store_id,
+                           prev.id       AS old_version_id
+                    FROM store_config_versions scv
+                    LEFT JOIN store_config_versions prev
+                           ON prev.store_id = scv.store_id
+                          AND prev.status   = 'active'
+                    WHERE scv.status     = 'pending_activation'
+                      AND scv.activate_at <= :now
+                """),
+                {"now": now_utc},
+            )
+            pending = rows_result.fetchall()
+    except Exception:
+        log.exception("_activate_pending_versions: DB query failed, skipping")
+        return
+
+    for row in pending:
+        try:
+            started, stopped = await orchestrator.activate_version_now(
+                store_id=str(row.store_id),
+                new_version_id=str(row.version_id),
+                old_version_id=str(row.old_version_id) if row.old_version_id else None,
+            )
+            for cc_id in stopped:
+                mark_stopped(str(row.store_id), cc_id)
+            for cc_id in started:
+                mark_running(str(row.store_id), cc_id)
+            log.info(
+                "Scheduled activation executed  version=%s  started=%d  stopped=%d",
+                row.version_id, len(started), len(stopped),
+            )
+        except Exception:
+            log.exception(
+                "Pending activation failed for version %s", row.version_id
+            )
 
 
 async def evaluate_schedules() -> None:
@@ -207,3 +252,5 @@ async def evaluate_schedules() -> None:
                 "evaluate_schedules: error processing schedule_id=%s",
                 row.get("schedule_id"),
             )
+
+    await _activate_pending_versions(now_utc)

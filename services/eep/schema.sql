@@ -734,3 +734,45 @@ CREATE TABLE IF NOT EXISTS edge_agents (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ============================================================================
+-- SCHEMA MIGRATIONS — Spec D: pending_activation state & camera_runtime_sessions
+-- Idempotent: safe to run against both fresh and existing databases.
+-- ============================================================================
+
+-- D1: Extend store_config_versions.status to include 'pending_activation'.
+-- PostgreSQL auto-names the inline CHECK as store_config_versions_status_check.
+ALTER TABLE store_config_versions
+    DROP CONSTRAINT IF EXISTS store_config_versions_status_check;
+ALTER TABLE store_config_versions
+    ADD CONSTRAINT store_config_versions_status_check
+    CHECK (status IN ('draft', 'active', 'archived', 'pending_activation'));
+
+-- D2: Scheduled activation timestamp — NULL unless status='pending_activation'.
+ALTER TABLE store_config_versions
+    ADD COLUMN IF NOT EXISTS activate_at TIMESTAMPTZ;
+
+-- D3: camera_runtime_sessions — append-only camera start/stop event log.
+-- FK cascade semantics: store deletion purges history (CASCADE); hardware or
+-- config deletion preserves history (SET NULL).
+CREATE TABLE IF NOT EXISTS camera_runtime_sessions (
+    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id            UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    physical_camera_id  UUID        REFERENCES physical_cameras(id) ON DELETE SET NULL,
+    camera_config_id    UUID        REFERENCES camera_configs(id)   ON DELETE SET NULL,
+    version_id          UUID        REFERENCES store_config_versions(id) ON DELETE SET NULL,
+    started_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    stopped_at          TIMESTAMPTZ,
+    stop_reason         TEXT        CHECK (stop_reason IN (
+                            'schedule', 'manual', 'version_activation', 'crash', 'unknown'
+                        ))
+);
+
+-- Crash-recovery query path: find open sessions for a store.
+CREATE INDEX IF NOT EXISTS idx_crs_store_open
+    ON camera_runtime_sessions(store_id)
+    WHERE stopped_at IS NULL;
+
+-- Per-camera historical timeline.
+CREATE INDEX IF NOT EXISTS idx_crs_camera_history
+    ON camera_runtime_sessions(physical_camera_id, started_at);

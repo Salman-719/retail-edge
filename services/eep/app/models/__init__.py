@@ -23,6 +23,7 @@ from app.models.shift_instance import ShiftInstance, ShiftAssignment, BreakRecor
 from app.models.password_reset_token import PasswordResetToken
 from app.models.camera_schedule import CameraSchedule
 from app.models.edge_agent import EdgeAgent
+from app.models.camera_runtime_session import CameraRuntimeSession
 
 __all__ = [
     "Base",
@@ -55,4 +56,5 @@ __all__ = [
     "PasswordResetToken",
     "CameraSchedule",
     "EdgeAgent",
+    "CameraRuntimeSession",
 ]
