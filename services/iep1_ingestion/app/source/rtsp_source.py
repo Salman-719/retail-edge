@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import Iterator, Tuple
 
@@ -7,9 +8,15 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-RECONNECT_ATTEMPTS = 5
-RECONNECT_DELAY_SECONDS = 3.0
-READ_TIMEOUT_SECONDS = 10.0
+RECONNECT_INITIAL_DELAY_S = 5.0
+RECONNECT_MAX_DELAY_S     = 60.0
+READ_TIMEOUT_SECONDS      = 10.0
+
+RTSP_MAX_RETRY_MINUTES = int(os.environ.get("RTSP_MAX_RETRY_MINUTES", "10"))
+
+
+class RtspSourceExhausted(RuntimeError):
+    """Raised when RTSP reconnection exceeds RTSP_MAX_RETRY_MINUTES."""
 
 
 class RtspSource:
@@ -54,33 +61,44 @@ class RtspSource:
             ret, frame = self._cap.read()
 
             if not ret:
-                # Attempt reconnect
-                reconnected = False
-                for attempt in range(1, RECONNECT_ATTEMPTS + 1):
+                if self._cap is not None:
+                    self._cap.release()
+                self._cap = None
+                self._available = False
+
+                deadline = time.monotonic() + RTSP_MAX_RETRY_MINUTES * 60
+                delay = RECONNECT_INITIAL_DELAY_S
+                attempt = 0
+
+                while time.monotonic() < deadline:
+                    attempt += 1
+                    remaining = max(0.0, deadline - time.monotonic())
+                    sleep_s = min(delay, remaining)
                     logger.warning(
-                        "camera_id=%s: read failed, reconnect attempt %d/%d",
-                        self.camera_id,
-                        attempt,
-                        RECONNECT_ATTEMPTS,
+                        "camera_id=%s: read failed, reconnect attempt %d "
+                        "(wait=%.0fs, %.0fs remaining in retry window)",
+                        self.camera_id, attempt, sleep_s, remaining,
                     )
-                    if self._cap is not None:
-                        self._cap.release()
-                    self._cap = None
-                    self._available = False
-                    time.sleep(RECONNECT_DELAY_SECONDS)
+                    time.sleep(sleep_s)
                     if self._open():
                         n = self._decimation_ratio()
                         frame_index = 0
-                        reconnected = True
+                        logger.info(
+                            "camera_id=%s: reconnected on attempt %d",
+                            self.camera_id, attempt,
+                        )
                         break
-
-                if not reconnected:
+                    delay = min(delay * 2, RECONNECT_MAX_DELAY_S)
+                else:
                     logger.error(
-                        "camera_id=%s: all %d reconnect attempts exhausted, stopping",
-                        self.camera_id,
-                        RECONNECT_ATTEMPTS,
+                        "camera_id=%s: RTSP reconnect deadline exceeded "
+                        "(%d min), stopping — Docker will restart",
+                        self.camera_id, RTSP_MAX_RETRY_MINUTES,
                     )
-                    return
+                    raise RtspSourceExhausted(
+                        f"camera_id={self.camera_id}: RTSP reconnect failed "
+                        f"after {RTSP_MAX_RETRY_MINUTES} min"
+                    )
 
                 continue
 

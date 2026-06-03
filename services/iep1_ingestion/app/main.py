@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import sys
 import time
 
 from dotenv import load_dotenv
@@ -40,7 +41,7 @@ def main():
     args = _parse_args()
 
     from services.iep1_ingestion.app.runtime import Iep1Settings, Iep1Runtime
-    from services.iep1_ingestion.app.source.rtsp_source import RtspSource
+    from services.iep1_ingestion.app.source.rtsp_source import RtspSource, RtspSourceExhausted
     from services.iep1_ingestion.app.source.video_source import VideoFileSource
 
     settings = Iep1Settings(
@@ -65,7 +66,11 @@ def main():
             camera_id=args.camera_id,
         )
 
-    Iep1Runtime(settings, source=source).run()
+    try:
+        Iep1Runtime(settings, source=source).run()
+    except RtspSourceExhausted as exc:
+        logging.getLogger(__name__).error("RTSP permanently lost: %s", exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
