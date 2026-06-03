@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS tracking_history (
     y1          INTEGER NOT NULL,
     x2          INTEGER NOT NULL,
     y2          INTEGER NOT NULL,
-    confidence  REAL NOT NULL
+    confidence  REAL NOT NULL,
+    CONSTRAINT tracking_history_unique_event UNIQUE (camera_id, local_id, frame_index)
 );
 """
 
@@ -30,7 +31,8 @@ _INSERT_SQL = """
 INSERT INTO tracking_history
     (local_id, track_id, camera_id, frame_index, x1, y1, x2, y2, confidence)
 VALUES
-    (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+    (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT ON CONSTRAINT tracking_history_unique_event DO NOTHING;
 """
 
 
