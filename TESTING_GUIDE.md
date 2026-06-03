@@ -1067,6 +1067,180 @@ Expected: `status=offline`
 
 ---
 
+---
+
+## Group O — IEP3 Unit Tests
+
+No database or Redis required. Tests run inside the `iep3_reconciliation` container using fake repositories.
+
+**O1 — Build the IEP3 image (once)**
+```powershell
+docker compose build iep3_reconciliation
+```
+Expected: build completes without pip errors.
+
+**O2 — Confirm all modules import cleanly**
+```powershell
+docker compose run --rm iep3_reconciliation python -c "
+from app.main import main
+from app.coordinator import BatchCoordinator
+from app.reconciler import Reconciler
+from app.reader import BatchReader
+from app.reid.gates import cross_camera_gate
+from app.reid.matcher import ReidMatcher
+from app.selection import PositionSelector
+from app.state import StateManager
+from app.repository import Iep3Repository
+from app.db import create_pool, close_pool, get_pool
+from app.settings import get_settings
+print('all imports ok')
+"
+```
+Expected: `all imports ok`. No import errors.
+
+**O3 — Run gate tests (pure function, 8 cases)**
+```powershell
+docker compose run --rm `
+  -v "${PWD}:/workspace" `
+  -w /workspace `
+  iep3_reconciliation `
+  pytest tests/unit/iep3/test_gate.py -v
+```
+Expected: 8 passed.
+
+**O4 — Run matcher tests (6 cases)**
+```powershell
+docker compose run --rm `
+  -v "${PWD}:/workspace" `
+  -w /workspace `
+  iep3_reconciliation `
+  pytest tests/unit/iep3/test_matcher.py -v
+```
+Expected: 6 passed. No DB or Redis connection attempts.
+
+**O5 — Run selector tests (5 cases)**
+```powershell
+docker compose run --rm `
+  -v "${PWD}:/workspace" `
+  -w /workspace `
+  iep3_reconciliation `
+  pytest tests/unit/iep3/test_selector.py -v
+```
+Expected: 5 passed, including `test_resolution_cache_hit_skips_db_query`.
+
+**O6 — Run state machine tests (6 cases)**
+```powershell
+docker compose run --rm `
+  -v "${PWD}:/workspace" `
+  -w /workspace `
+  iep3_reconciliation `
+  pytest tests/unit/iep3/test_state.py -v
+```
+Expected: 6 passed, including `test_deactivate_before_delete_order`.
+
+**O7 — Run full unit suite (25 cases)**
+```powershell
+docker compose run --rm `
+  -v "${PWD}:/workspace" `
+  -w /workspace `
+  iep3_reconciliation `
+  pytest tests/unit/iep3/ -v
+```
+Expected: 25 passed. 0 failures. No connection refused errors.
+
+**O8 — No stubs or placeholders remain in IEP3 source**
+```powershell
+Get-ChildItem -Recurse -Path "services/iep3_reconciliation/app" -File | `
+  Select-String "placeholder|# C3:|# C4:|# C5:|# C6:|# C7:|# C8:"
+```
+Expected: no output.
+
+---
+
+## Group P — IEP3 Integration Test
+
+Tests the full reconciliation pipeline against a live PostgreSQL instance.
+No Redis, IEP1, IEP2, or EEP needed. Test data is seeded and cleaned up automatically.
+
+Prerequisite: PostgreSQL running and A1 schema applied.
+
+```powershell
+docker compose up -d postgres
+Start-Sleep 10
+```
+
+**P1 — Run both integration tests**
+```powershell
+docker compose run --rm `
+  --network retail-edge_default `
+  -v "${PWD}:/workspace" `
+  -w /workspace `
+  -e DATABASE_URL="postgresql://retailvision:retailvision_dev@postgres:5432/retailvision" `
+  iep3_reconciliation `
+  pytest tests/e2e/test_iep3_reconciler.py -v -s
+```
+Expected:
+```
+tests/e2e/test_iep3_reconciler.py::test_three_camera_reconciliation PASSED
+All invariants verified. Stats: {'known_locals': 0, 'new_locals': 3,
+  'new_globals_created': 2, 'positions_written': 2, 'newly_lost': 0, ...}
+
+tests/e2e/test_iep3_reconciler.py::test_lost_then_exited_transitions PASSED
+State machine transitions verified: ACTIVE→LOST→EXITED
+
+2 passed in X.XXs
+```
+
+**P2 — Verify no test artifacts remain in DB**
+```powershell
+docker compose exec postgres psql -U retailvision -d retailvision `
+  -c "SELECT count(*) FROM global_identities; SELECT count(*) FROM global_tracking_history; SELECT count(*) FROM local_centroids;"
+```
+Expected: counts reflect only real pipeline data. The test store cascade-deleted all seeded rows on teardown.
+
+**P3 — Confirm IEP3 tables exist (prerequisite check)**
+```powershell
+docker compose exec postgres psql -U retailvision -d retailvision `
+  -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'global_%' ORDER BY table_name;"
+```
+Expected:
+```
+ table_name
+---------------------------
+ global_embeddings
+ global_identities
+ global_local_mapping
+ global_tracking_history
+```
+
+**P4 — Start IEP3 and verify it connects to infrastructure**
+
+Set `EXPECTED_CAMERAS` to any UUID value for the smoke test:
+```powershell
+$env:EXPECTED_CAMERAS = $CAMERA_ID
+$env:STORE_ID         = $STORE_ID
+
+docker compose up -d iep3_reconciliation
+Start-Sleep 5
+docker compose logs iep3_reconciliation | Select-String "IEP3 ready|DB verified|Redis verified"
+```
+Expected: three log lines in order: DB verified, Redis verified, IEP3 ready.
+
+**P5 — IEP3 exposes no port**
+```powershell
+docker compose ps iep3_reconciliation
+```
+Expected: state `Up`, no port column or empty ports. IEP3 is a daemon with no HTTP exposure.
+
+**P6 — Graceful shutdown**
+```powershell
+docker compose stop iep3_reconciliation
+docker compose logs iep3_reconciliation | Select-String "Shutdown signal|shutdown complete"
+```
+Expected: `Shutdown signal received` followed by `IEP3 shutdown complete.` Exit code 0.
+
+---
+
 ## Architecture Reference
 
 | Component | Responsibility |
@@ -1079,3 +1253,7 @@ Expected: `status=offline`
 | `_running_cameras` | In-memory set in `camera_scheduler.py`; resets on EEP restart. Prevents double-starts. |
 | Draft version | Sufficient for Groups A–M. Group N requires activation for zone loading in IEP2's floor projector. |
 | E2E test runner | Built from `tests/Dockerfile`; mounts project root at `/workspace`; connects via `retail-edge_default` network. |
+| IEP3 unit tests | Run inside `iep3_reconciliation` container; workspace mounted at `/workspace`; no DB or Redis needed. |
+| IEP3 integration tests | Run inside `iep3_reconciliation` container; `DATABASE_URL` set to `postgres` service; seeds and cascades own test data. |
+| `stream:iep2:batch_complete` | IEP2 publishes here after each batch (after `_flush_centroids`, before XACK of IEP1 stream). Consumer group: `iep3-{store_id}`. |
+| IEP3 `EXPECTED_CAMERAS` | Required env var. Comma-separated `physical_cameras.id` UUIDs. IEP3 fails fast at startup if not set. |

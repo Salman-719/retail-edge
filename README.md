@@ -30,8 +30,14 @@ An intelligent retail analytics platform that uses multi-camera computer vision 
 │                                                                         │
 │  PostgreSQL :5432    Redis :6379    MinIO :9000/:9001                   │
 │                                                                         │
-│  IEP3 Reconciliation · IEP4 Alerts · IEP5 Analytics · IEP6 AI Agent   │
-│  (skeleton services — not yet implemented)                              │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  iep3_reconciliation  IEP3 Reconciliation (daemon, no port)     │   │
+│  │  XREADGROUP iep3-{store_id} ← stream:iep2:batch_complete        │   │
+│  │  BatchCoordinator → Reconciler (ReID, selector, state machine)  │   │
+│  │  → global_identities / global_tracking_history                  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  IEP4 Alerts · IEP5 Analytics · IEP6 AI Agent (skeleton services)     │
 └───────────────────────────┬─────────────────────────────────────────────┘
                             │ gRPC bidirectional stream
                             │ (edge dials out to :50051, stream stays open)
@@ -116,14 +122,35 @@ retail-edge/
 │   │       ├── agent.py            # run_agent, heartbeat loop, control handler
 │   │       ├── docker_manager.py   # start/stop/status IEP1 containers
 │   │       └── main.py             # Reads EEP_GRPC_URL, STORE_ID from env
-│   ├── iep3_reconciliation/        # Skeleton — not yet implemented
+│   ├── iep3_reconciliation/        # Cross-camera reconciliation daemon (fully implemented)
+│   │   ├── app/
+│   │   │   ├── main.py             # Daemon entry point (no HTTP server)
+│   │   │   ├── settings.py         # Iep3Settings frozen dataclass
+│   │   │   ├── db.py               # asyncpg pool (module-level singleton)
+│   │   │   ├── repository.py       # All SQL — no ORM
+│   │   │   ├── coordinator.py      # BatchCoordinator (Redis XREADGROUP + timeout)
+│   │   │   ├── reader.py           # BatchReader (classify known vs new LocalIDs)
+│   │   │   ├── reid/
+│   │   │   │   ├── gates.py        # cross_camera_gate (pure function)
+│   │   │   │   └── matcher.py      # ReidMatcher (cosine similarity, GlobalID linking)
+│   │   │   ├── selection.py        # PositionSelector (canonical position per GlobalID)
+│   │   │   ├── state.py            # StateManager (ACTIVE→LOST→EXITED transitions)
+│   │   │   └── reconciler.py       # Reconciler (single transaction, orchestrates all)
+│   │   └── requirements.txt        # asyncpg, redis[asyncio], numpy, python-dotenv
 │   ├── iep4_alerts/                # Skeleton — not yet implemented
 │   ├── iep5_analytics/             # Skeleton — not yet implemented
 │   └── iep6_agent/                 # Skeleton — not yet implemented
 ├── tests/
-│   ├── unit/                       # Existing unit tests
+│   ├── unit/
+│   │   └── iep3/                   # IEP3 unit tests (no DB/Redis required)
+│   │       ├── conftest.py         # FakeRepo, fixtures, shared helpers
+│   │       ├── test_gate.py        # cross_camera_gate (8 pure function cases)
+│   │       ├── test_matcher.py     # ReidMatcher (6 cases)
+│   │       ├── test_selector.py    # PositionSelector scoring (5 cases)
+│   │       └── test_state.py       # StateManager transitions (6 cases)
 │   └── e2e/
-│       └── test_full_pipeline.py   # End-to-end integration test (Phase 8)
+│       ├── test_full_pipeline.py   # End-to-end integration test (Phase 8)
+│       └── test_iep3_reconciler.py # IEP3 3-camera reconciliation test (requires PostgreSQL)
 └── frontend/                       # React application
 ```
 
@@ -402,11 +429,27 @@ docker compose exec postgres psql -U retailvision -d retailvision \
 
 All tests run inside Docker. No local Python environment is required.
 
-### Unit tests
+### IEP3 unit tests (no DB or Redis required)
+
+The IEP3 unit tests run in isolation using fake repositories — no live services needed.
 
 ```bash
-docker compose run --rm eep pytest tests/unit/ -v
+docker compose run --rm iep3_reconciliation pytest tests/unit/iep3/ -v
 ```
+
+Expected: 25 tests pass (`test_gate`: 8, `test_matcher`: 6, `test_selector`: 5, `test_state`: 6).
+
+### IEP3 integration test (requires PostgreSQL)
+
+Tests the full 3-camera reconciliation scenario against a live database. No Redis, IEP1, IEP2, or EEP needed.
+
+```bash
+docker compose run --rm \
+  -e DATABASE_URL=postgresql://retailvision:retailvision_dev@postgres:5432/retailvision \
+  iep3_reconciliation pytest tests/e2e/test_iep3_reconciler.py -v -s
+```
+
+Expected: 2 tests pass. All IEP3 invariants verified. Test data is cleaned up automatically via CASCADE delete.
 
 ### End-to-end integration test (Phase 8)
 
@@ -543,6 +586,24 @@ All variables have working defaults in `docker-compose.yml` for local developmen
 | `S3_ENDPOINT_URL / ACCESS_KEY / SECRET_KEY / BUCKET` | — | Frame download |
 | `LIVE_STREAM_ENABLED` | — | Enables LivePublisher (Redis pub/sub for browser live view) |
 
+### IEP3
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `DATABASE_URL` | yes | — | `postgresql://...` (plain, no `+asyncpg`) |
+| `REDIS_URL` | — | `redis://redis:6379/0` | |
+| `STORE_ID` | yes | — | UUID of the store this IEP3 instance serves |
+| `EXPECTED_CAMERAS` | yes | — | Comma-separated camera UUIDs |
+| `COORDINATOR_TIMEOUT_S` | — | `120` | Partial-reconciliation timeout |
+| `REID_THRESHOLD` | — | `0.75` | Cosine similarity threshold |
+| `MAX_SPEED_MPS` | — | `1.5` | Spatial gate |
+| `EMBEDDING_DIM` | — | `512` | OSNet output dimension |
+| `SELECTION_WEIGHT_AREA` | — | `0.7` | Position scoring area weight |
+| `SELECTION_WEIGHT_CONFIDENCE` | — | `0.3` | Position scoring confidence weight |
+| `GRACE_SECONDS` | — | `300.0` | LOST → EXITED grace period (seconds) |
+| `DEFAULT_FRAME_WIDTH` | — | `1920` | Fallback frame width |
+| `DEFAULT_FRAME_HEIGHT` | — | `1080` | Fallback frame height |
+
 ### Frontend (dev only)
 
 | Variable | Default | Description |
@@ -591,9 +652,16 @@ Camera (RTSP / video file)
                  ├─ Phase A (crash recovery): drain un-ACKed messages at startup
                  ├─ Phase B (normal): block-read new messages (2 s timeout)
                  ├─ per frame: S3 fetch → YOLOv8 → ByteTrack → ReID → homography → shapely
-                 └─ INSERT tracking_history (store_id, camera_id, local_id UUID,
-                      timestamp_ms, floor_x, floor_y, zone_id, bbox_confidence, bbox_area)
-                 └─ XACK after all frames in manifest written to DB
+                 ├─ INSERT tracking_history + UPSERT local_centroids
+                 ├─ XADD stream:iep2:batch_complete (after DB writes)
+                 └─ XACK stream:iep1:{camera_id} (after batch_complete published)
+                      └─ IEP3: XREADGROUP iep3-{store_id} ← stream:iep2:batch_complete
+                           ├─ BatchCoordinator: wait for all expected cameras (or timeout)
+                           └─ Reconciler (one asyncpg transaction per batch):
+                                ├─ BatchReader: classify known vs new LocalIDs
+                                ├─ ReidMatcher: cross-camera cosine ReID → link/create GlobalIDs
+                                ├─ PositionSelector: score cameras → INSERT global_tracking_history
+                                └─ StateManager: ACTIVE→LOST→EXITED transitions
 ```
 
 `local_id` is stored as a UUID derived deterministically from the integer assigned by `LocalIdentityManager`: `uuid.UUID(int=local_id)`. The same person always maps to the same UUID within a single IEP2 process.
@@ -604,13 +672,25 @@ Camera (RTSP / video file)
 
 ## Schema Overview
 
+### IEP1 / IEP2 tables
+
 | Table | Key Columns |
 |---|---|
 | `tracking_history` | `camera_id TEXT`, `local_id UUID`, `timestamp_ms BIGINT`, `floor_x`, `floor_y`, `zone_id`, `bbox_confidence REAL`, `bbox_area INTEGER` |
+| `local_centroids` | `local_id UUID PK`, `camera_id TEXT`, `store_id UUID`, `centroid BYTEA` (float32[512]), `updated_at_batch INT` |
 | `camera_schedules` | `store_id`, `camera_config_id`, `days_of_week INTEGER[]`, `start_time TIME`, `end_time TIME`, `is_active BOOLEAN` |
 | `edge_agents` | `store_id UNIQUE`, `status` (online/offline), `last_heartbeat_at`, `agent_version` |
 | `store_config_versions` | `status` (draft/pending_activation/active/archived), `activate_at TIMESTAMPTZ` (set when scheduled), `active_from`, `active_until` |
-| `camera_runtime_sessions` | Append-only. `store_id`, `physical_camera_id`, `camera_config_id`, `version_id`, `started_at`, `stopped_at`, `stop_reason` (schedule/manual/version_activation/crash/unknown). FKs: `store_id` → CASCADE; others → SET NULL so history survives hardware/config deletion. |
+| `camera_runtime_sessions` | Append-only. `store_id`, `physical_camera_id`, `camera_config_id`, `version_id`, `started_at`, `stopped_at`, `stop_reason` (schedule/manual/version_activation/crash/unknown). |
+
+### IEP3 tables (cross-camera identity)
+
+| Table | Key Columns |
+|---|---|
+| `global_identities` | `global_id UUID PK`, `store_id UUID`, `state` (active/lost/exited), `first_seen_ts BIGINT`, `last_seen_ts BIGINT`, `last_floor_x/y`, `lost_since_ts BIGINT`, `entry_zone_id`, `exit_zone_id` |
+| `global_local_mapping` | `global_id UUID`, `camera_id TEXT`, `local_id UUID`, `is_active BOOLEAN`, `linked_at_ts`, `last_seen_ts`. Partial unique index: one active `(global_id, camera_id)` pair. |
+| `global_embeddings` | `(global_id, camera_id) PK`, `centroid BYTEA` (float32[512]), `updated_at_ts BIGINT` |
+| `global_tracking_history` | `global_id UUID`, `store_id UUID`, `batch_number INT`, `timestamp_ms BIGINT`, `floor_x/y NOT NULL`, `source_camera TEXT`, `source_local_id UUID`, `selection_score FLOAT4` |
 
 All pre-existing tables (stores, physical_cameras, camera_configs, calibrations, zones, store_settings, …) are unchanged from the prior schema.
 
@@ -667,18 +747,72 @@ Browse uploaded frames and floor plans at **http://localhost:9001**
 
 ---
 
-## IEP3 – IEP6 (Skeleton Services)
+## IEP3 — Reconciliation Service
 
-Four additional pipeline stages exist as Docker skeleton services. They build and start, but contain no implementation logic.
+IEP3 is a fully implemented long-running daemon (no HTTP port). It consumes `stream:iep2:batch_complete` events from Redis and runs cross-camera identity reconciliation once per 60-second batch.
+
+### Starting IEP3
+
+```bash
+docker compose up -d postgres redis iep3_reconciliation
+```
+
+IEP3 requires `EXPECTED_CAMERAS` to be set — a comma-separated list of `physical_cameras.id` UUIDs for the store:
+
+```bash
+EXPECTED_CAMERAS="<cam-uuid-1>,<cam-uuid-2>" docker compose up iep3_reconciliation
+```
+
+### Verifying IEP3
+
+Check logs for the startup sequence:
+```bash
+docker compose logs iep3_reconciliation
+```
+
+Expected:
+```
+IEP3 starting — store_id=... expected_cameras=[...]
+DB verified — all required tables present.
+Redis verified.
+IEP3 ready — listening on stream:iep2:batch_complete
+```
+
+After at least one reconciled batch:
+```bash
+docker compose exec postgres psql -U retailvision -d retailvision -c "
+SELECT
+    (SELECT count(*) FROM global_identities WHERE state='active')    AS active_globals,
+    (SELECT count(*) FROM global_local_mapping WHERE is_active=TRUE) AS active_links,
+    (SELECT count(*) FROM global_tracking_history)                    AS canonical_positions;"
+```
+
+### IEP3 Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `EXPECTED_CAMERAS` | — | **Required.** Comma-separated camera UUIDs for this store |
+| `COORDINATOR_TIMEOUT_S` | `120` | Seconds to wait for all cameras before partial reconciliation |
+| `REID_THRESHOLD` | `0.75` | Cosine similarity threshold for cross-camera matching |
+| `MAX_SPEED_MPS` | `1.5` | Spatial gate maximum walking speed (m/s) |
+| `EMBEDDING_DIM` | `512` | OSNet embedding dimension |
+| `SELECTION_WEIGHT_AREA` | `0.7` | Bbox area weight for canonical position scoring |
+| `SELECTION_WEIGHT_CONFIDENCE` | `0.3` | Detection confidence weight |
+| `GRACE_SECONDS` | `300.0` | Seconds before LOST GlobalID transitions to EXITED |
+| `DEFAULT_FRAME_WIDTH` | `1920` | Fallback resolution for scoring when camera config not found |
+| `DEFAULT_FRAME_HEIGHT` | `1080` | Fallback resolution for scoring when camera config not found |
+
+## IEP4 – IEP6 (Skeleton Services)
+
+Three additional pipeline stages exist as Docker skeleton services. They build and start, but contain no implementation logic.
 
 | Service | Port | Planned Function |
 |---|---|---|
-| `iep3_reconciliation` | 8003 | Cross-camera identity merging |
 | `iep4_alerts` | 8004 | Zone occupancy thresholds, dwell-time alerts |
 | `iep5_analytics` | 8005 | Aggregated heatmaps, path analysis |
 | `iep6_agent` | 8006 | LLM-powered natural language insights |
 
-Start all skeletons alongside the live services:
+Start all services alongside the live services:
 
 ```bash
 docker compose up -d

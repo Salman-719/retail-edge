@@ -1,6 +1,6 @@
 # RetailVision Codebase Audit
-**Date:** 2026-06-02  
-**Scope:** EEP, IEP1, IEP2, Edge Agent — post Phase 1–8 implementation  
+**Date:** 2026-06-03  
+**Scope:** EEP, IEP1, IEP2, IEP3, Edge Agent — post Phase 1–8 + IEP3 reconciliation implementation  
 **Architecture:** Edge-cloud hybrid. EEP (server) orchestrates; IEP1 runs on the edge device (managed by the Edge Agent); IEP2 runs on the server alongside EEP (managed by EEP via the local Docker socket); Edge Agent brokers cloud→edge commands.
 
 ---
@@ -17,7 +17,8 @@
 8. [Cross-Service Data Flows](#8-cross-service-data-flows)
 9. [Environment Variables Reference](#9-environment-variables-reference)
 10. [Dependency Versions](#10-dependency-versions)
-11. [Known Gaps & Next Steps](#11-known-gaps--next-steps)
+11. [IEP3 — Reconciliation Pipeline](#11-iep3--reconciliation-pipeline)
+12. [Known Gaps & Next Steps](#12-known-gaps--next-steps)
 
 ---
 
@@ -52,6 +53,15 @@
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  PostgreSQL :5432     Redis :6379     MinIO S3 :9000                    │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  iep3_reconciliation  (daemon, no port)                          │   │
+│  │  XREADGROUP iep3-{store_id} ← stream:iep2:batch_complete         │   │
+│  │  BatchCoordinator → Reconciler (one asyncpg transaction/batch):  │   │
+│  │    BatchReader → ReidMatcher → PositionSelector → StateManager   │   │
+│  │  Writes: global_identities, global_local_mapping,                │   │
+│  │          global_embeddings, global_tracking_history              │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────┬────────────────────────────────────────┘
                                   │ gRPC bidirectional stream :50051
                                   │ (edge dials out, stream stays open)
@@ -101,6 +111,7 @@
 | `eep` | ./services/eep | 8000 (HTTP), 50051 (gRPC) | Docker socket mounted, DEBUG_MODE=true |
 | `iep1_ingestion` | ./services/iep1_ingestion | — | started by Edge Agent on demand |
 | `iep2_vision` | ./services/iep2_vision | — | started by EEP orchestrator on demand |
+| `iep3_reconciliation` | ./services/iep3_reconciliation | — (no port) | daemon; depends_on postgres+redis service_healthy; restart: on-failure |
 
 EEP mounts `/var/run/docker.sock` to manage IEP2 containers. `IEP2_IMAGE` and `DOCKER_NETWORK` are env vars.
 
@@ -157,7 +168,84 @@ CREATE TABLE IF NOT EXISTS edge_agents (
 
 `UNIQUE` on `store_id` is the conflict target for the UPSERT in `_upsert_agent()`.
 
+### 2.4 IEP3 Schema Additions
+
+**`local_centroids`** — written by IEP2, read by IEP3:
+```sql
+CREATE TABLE local_centroids (
+    local_id         UUID  PRIMARY KEY,
+    camera_id        TEXT  NOT NULL,
+    store_id         UUID  NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    centroid         BYTEA NOT NULL,          -- float32[512] raw bytes (.tobytes())
+    updated_at_batch INT   NOT NULL
+);
+```
+
+**`global_identities`** — one row per store-wide person:
+```sql
+CREATE TABLE global_identities (
+    global_id      UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id       UUID         NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    first_seen_ts  BIGINT       NOT NULL,
+    last_seen_ts   BIGINT       NOT NULL,
+    last_floor_x   DOUBLE PRECISION,
+    last_floor_y   DOUBLE PRECISION,
+    state          VARCHAR(16)  NOT NULL DEFAULT 'active' CHECK (state IN ('active','lost','exited')),
+    lost_since_ts  BIGINT,
+    entry_zone_id  UUID         REFERENCES zones(id) ON DELETE SET NULL,
+    exit_zone_id   UUID         REFERENCES zones(id) ON DELETE SET NULL
+);
+```
+
+**`global_local_mapping`** — maps per-camera LocalIDs to GlobalIDs:
+```sql
+CREATE TABLE global_local_mapping (
+    id             BIGSERIAL PRIMARY KEY,
+    global_id      UUID    NOT NULL REFERENCES global_identities(global_id) ON DELETE CASCADE,
+    camera_id      TEXT    NOT NULL,
+    local_id       UUID    NOT NULL,
+    is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+    linked_at_ts   BIGINT  NOT NULL,
+    last_seen_ts   BIGINT  NOT NULL,
+    unlinked_at_ts BIGINT
+);
+-- Partial unique index: one active LocalID per (global_id, camera_id)
+CREATE UNIQUE INDEX idx_glm_one_active_per_camera ON global_local_mapping(global_id, camera_id)
+    WHERE is_active = TRUE;
+```
+
+**`global_embeddings`** — per-camera appearance centroid per GlobalID:
+```sql
+CREATE TABLE global_embeddings (
+    global_id     UUID   NOT NULL REFERENCES global_identities(global_id) ON DELETE CASCADE,
+    camera_id     TEXT   NOT NULL,
+    centroid      BYTEA  NOT NULL,    -- float32[512]
+    updated_at_ts BIGINT NOT NULL,
+    PRIMARY KEY (global_id, camera_id)
+);
+```
+
+**`global_tracking_history`** — canonical store-wide position per GlobalID per batch:
+```sql
+CREATE TABLE global_tracking_history (
+    id              BIGSERIAL        PRIMARY KEY,
+    global_id       UUID             NOT NULL REFERENCES global_identities(global_id) ON DELETE CASCADE,
+    store_id        UUID             NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    version_id      UUID             REFERENCES store_config_versions(id) ON DELETE SET NULL,
+    batch_number    INT              NOT NULL,
+    timestamp_ms    BIGINT           NOT NULL,
+    floor_x         DOUBLE PRECISION NOT NULL,    -- NOT NULL: calibration required for activation
+    floor_y         DOUBLE PRECISION NOT NULL,
+    zone_id         UUID             REFERENCES zones(id) ON DELETE SET NULL,
+    source_camera   TEXT             NOT NULL,
+    source_local_id UUID             NOT NULL,
+    selection_score FLOAT4           NOT NULL
+);
+```
+
 ### 2.3 Redis Streams
+
+#### IEP1 → IEP2
 
 **Stream name:** `stream:iep1:{camera_id}`  
 **Consumer group:** `iep2_workers`  
@@ -182,7 +270,25 @@ IEP2 uses two-phase delivery:
 - **Phase A** (crash recovery): XREADGROUP with `ID="0"` drains un-ACKed messages from before restart.
 - **Phase B** (normal): XREADGROUP with `ID=">"` reads new messages, blocking 2 s per call.
 
-XACK fires at manifest level — after all frames in the manifest have been processed and written to the DB.
+XACK fires at manifest level — after all frames in the manifest have been processed and written to the DB, and after the `batch_complete` event has been published to the IEP2→IEP3 stream.
+
+#### IEP2 → IEP3
+
+**Stream name:** `stream:iep2:batch_complete`  
+**Consumer group:** `iep3-{store_id}` (one group per store; multiple IEP3 instances on different stores share the stream but each reads independently via its own group)  
+**Consumer name:** `iep3-{store_id}-worker`
+
+Each message payload (fields):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `camera_id` | bytes | Physical camera UUID (text) |
+| `store_id` | bytes | Store UUID |
+| `batch_number` | bytes | Integer batch counter |
+| `window_start_ms` | bytes | Batch window start (epoch ms) |
+| `window_end_ms` | bytes | Batch window end (epoch ms) |
+
+IEP2 publishes to this stream **after** `_flush_centroids` completes and **before** XACK of the IEP1 stream. This ordering guarantees that when IEP3 reads a `batch_complete`, all `tracking_history` and `local_centroids` rows for that batch are already committed to PostgreSQL.
 
 ### 2.4 S3 Object Layout
 
@@ -757,8 +863,17 @@ async for message_id, manifest in source.manifests():
         # detect → track → identify → project → insert
         ...
 
-    await source.ack(message_id)   # ACK after all frames written to DB
+    await self._flush_centroids(manager, persistence, batch_number)
+    await self._publish_batch_complete(
+        redis_client=source.redis_client,   # exposed by RedisStreamFrameSource
+        batch_number=batch_number,
+        window_start_ms=manifest.get("window_start_ms", 0),
+        window_end_ms=manifest.get("window_end_ms", 0),
+    )
+    await source.ack(message_id)   # ACK after batch_complete published
 ```
+
+Ordering invariant: `tracking_history` writes → `local_centroids` UPSERTs → `stream:iep2:batch_complete` XADD → `stream:iep1:{cam}` XACK.
 
 XACK is manifest-scoped, not frame-scoped. A crash mid-manifest replays the entire manifest on restart (Phase A recovery).
 
@@ -1055,7 +1170,58 @@ POST /api/store/{slug}/schedules/{id}/trigger {action: "start"}
     XACK stream:iep1:{cam} iep2_workers message_id
 ```
 
-### 8.4 Agent Heartbeat → DB
+### 8.4 IEP2 → IEP3 Reconciliation
+
+```
+[SERVER] IEP2 (per batch, after all frames processed):
+  _flush_centroids() → UPSERT local_centroids (appearance centroids)
+  _publish_batch_complete() → XADD stream:iep2:batch_complete
+    {camera_id, store_id, batch_number, window_start_ms, window_end_ms}
+  source.ack(message_id)  ← XACK stream:iep1:{cam} only after batch_complete published
+
+[SERVER] IEP3 (per store, running continuously):
+  BatchCoordinator.run():
+    XREADGROUP iep3-{store_id} ← stream:iep2:batch_complete (BLOCK 5000 ms)
+    XACK immediately on receipt → message not redelivered if reconciliation crashes
+    Collect batch_complete events per (store_id, batch_number)
+    Wait until all EXPECTED_CAMERAS report (or COORDINATOR_TIMEOUT_S elapses)
+    on_ready(batch_number, window, reporting_cameras) → Reconciler.process_batch()
+
+  Reconciler.process_batch():
+    async with pool.acquire() as conn:
+      async with conn.transaction():
+        BatchReader.classify(conn, window_start_ms, window_end_ms)
+          → read_batch_observations: SELECT tracking_history WHERE store_id + window
+          → get_active_mappings_bulk: SELECT global_local_mapping WHERE is_active=TRUE
+          → touch_links_bulk: UPDATE last_seen_ts for known LocalIDs (unnest)
+          → returns (known: list[LocalObservation], new: list[LocalObservation])
+
+        ReidMatcher.link_new_locals(conn, store_id, new, batch_number, window_end_ms)
+          → get_candidate_globals: SELECT global_identities state IN ('active','lost')
+          → get_embeddings_bulk: SELECT global_embeddings for all candidates
+          → per new LocalID (first_seen_ts ASC order):
+              load_local_centroid → cross-camera filter → spatial gate → cosine similarity
+              if match: link_local or reactivate_global
+              if no match: create_global_identity + link_local + upsert_embedding
+          → mutates in-memory candidates pool for within-batch linking
+
+        PositionSelector.write_canonical_positions(conn, store_id, batch_number, window)
+          → get_positions_for_selection: JOIN tracking_history × global_local_mapping
+          → get_camera_batch_info_bulk (standalone, outside transaction): camera_config_id
+          → per camera: get_camera_resolution (standalone, outside transaction)
+          → score: 0.7*(bbox_area/frame_px) + 0.3*bbox_confidence; winner per GlobalID
+          → write_global_position: INSERT global_tracking_history
+          → update_global_last_seen: UPDATE global_identities last_floor_x/y/ts
+
+        StateManager.run_cleanup(conn, store_id, window_start_ms, window_end_ms)
+          → transition_active_to_lost: ACTIVE → LOST if no active link seen since window_start
+          → transition_lost_to_exited: LOST → EXITED if lost_since_ts + grace_ms < window_end
+          → deactivate_mappings_for_globals: UPDATE global_local_mapping is_active=FALSE
+          → delete_centroids_for_globals: DELETE local_centroids via mapping table
+      ← COMMIT
+```
+
+### 8.5 Agent Heartbeat → DB
 
 ```
 Edge Agent (every 30 s):
@@ -1185,6 +1351,15 @@ grpcio-tools==1.64.0
 docker==7.1.0
 ```
 
+### IEP3 (`services/iep3_reconciliation/requirements.txt`)
+
+```
+asyncpg==0.29.0
+redis[asyncio]==5.0.4
+numpy==1.26.4
+python-dotenv==1.0.1
+```
+
 ### Test (`tests/e2e/`)
 
 ```
@@ -1199,7 +1374,114 @@ boto3
 
 ---
 
-## 11. Known Gaps & Next Steps
+## 11. IEP3 — Reconciliation Pipeline
+
+**Location:** `services/iep3_reconciliation/`  
+**Runtime:** Python 3.11, asyncio, long-running daemon, no HTTP server, no exposed port  
+**Entry point:** `python -m app.main`  
+**Trigger:** `SIGTERM`/`SIGINT` for graceful shutdown
+
+### 11.1 Configuration (`app/settings.py`)
+
+`Iep3Settings` is a frozen dataclass built by `get_settings()` from environment variables. All fields have safe defaults except `DATABASE_URL`, `STORE_ID`, and `EXPECTED_CAMERAS` — those raise `ValueError` at startup if missing. `DATABASE_URL` must use plain `postgresql://` (not `postgresql+asyncpg://`).
+
+### 11.2 DB Layer (`app/db.py`)
+
+Module-level `asyncpg.Pool` singleton. `create_pool(url)` initialises it (min=2, max=10, command_timeout=30). `get_pool()` raises `RuntimeError` if called before `create_pool`. Pool is created once at startup and shared across all sub-components including standalone repository methods.
+
+### 11.3 Repository (`app/repository.py`)
+
+No ORM. All SQL is positional asyncpg `$1…$N`. Six dataclasses: `LocalObservation`, `MappingRow`, `GlobalCandidate`, `PositionRow`, `ResolutionResult`, `CameraBatchInfo`.
+
+Two classes of methods:
+
+**Standalone** (acquire own connection — called outside the batch transaction):
+- `get_camera_resolution(camera_id)` — resolution fallback chain: `physical_cameras.stream_width/height` → `camera_configs.video_width/height` → `calibrations.image_width/height`
+- `get_camera_batch_info_bulk(camera_ids)` — open `camera_runtime_sessions` → `camera_config_id` + `version_id`
+- `orphan_sweep()` — startup cleanup: remove GlobalIDs with `last_seen_ts == first_seen_ts` and no `global_tracking_history` row (crash between process 1 and 2)
+
+**Transaction** (receive `conn` from Reconciler — never call `pool.acquire()` internally):
+`read_batch_observations`, `get_active_mappings_bulk`, `touch_links_bulk` (unnest), `load_local_centroid`, `get_candidate_globals`, `get_embeddings_bulk`, `create_global_identity`, `link_local`, `deactivate_mapping`, `upsert_embedding`, `reactivate_global`, `get_positions_for_selection`, `write_global_position`, `update_global_last_seen`, `transition_active_to_lost`, `transition_lost_to_exited`, `deactivate_mappings_for_globals`, `delete_centroids_for_globals`
+
+**`transition_active_to_lost` uses `window_start_ms` as the activity threshold** — not `window_end_ms - 60_000`. The correct parameter is:
+```sql
+WHERE glm.last_seen_ts >= $3   -- $3 = window_start_ms (exact, not approximated)
+```
+
+### 11.4 BatchCoordinator (`app/coordinator.py`)
+
+Consumer group `iep3-{store_id}`. XREADGROUP block=5000 ms, count=100. XACK fires **before** calling `on_ready` — message is not redelivered even if reconciliation fails. State cleanup (dict pops) before `on_ready` call. `_check_timeouts()` iterates a defensive copy of `_first_received.items()`.
+
+On timeout: fires `on_ready` with the cameras that reported (partial reconciliation). Logged as WARNING.
+
+### 11.5 BatchReader (`app/reader.py`)
+
+`classify(conn, window_start_ms, window_end_ms)` → `(known, new)`.  
+Exactly 3 queries: `read_batch_observations` + `get_active_mappings_bulk` + `touch_links_bulk`.  
+`new` list is sorted by `first_seen_ts ASC` from DB — never re-sorted. Empty window returns `([], [])`.
+
+### 11.6 ReID Gates (`app/reid/gates.py`)
+
+`cross_camera_gate(new_x, new_y, new_ts, last_x, last_y, last_ts, max_speed_mps=1.5) → bool`
+
+Pure function. Returns `True` (passes) when `elapsed_s ≤ 0` (simultaneous observations) or `distance_m / elapsed_s ≤ max_speed_mps`.
+
+### 11.7 ReidMatcher (`app/reid/matcher.py`)
+
+Operates inside the Reconciler's transaction. Loads all candidate globals and embeddings **once** before the per-LocalID loop. Mutates `candidates` and `embedding_map` in-place so GlobalIDs created for `local_id_i` are immediately available as candidates for `local_id_{i+1}`.
+
+Per-observation pipeline:
+1. Load appearance centroid (`local_centroids`)
+2. Cross-camera filter: exclude candidates with an active link on `obs.camera_id`
+3. Spatial-temporal gate: `cross_camera_gate` per survivor
+4. Cosine similarity: `dot(_l2_normalize(centroid), _representative_centroid(cam_centroids))`
+5. If `best_score ≥ threshold`: link (or reactivate if `state='lost'`) → `returns False` (no new GlobalID)
+6. Else: `create_global_identity` + `link_local` + `upsert_embedding` → `returns True`
+
+`_l2_normalize` guards `norm < 1e-8` (returns vector unchanged — near-zero centroids score ~0, below threshold).
+
+### 11.8 PositionSelector (`app/selection.py`)
+
+`_selection_score(bbox_area, bbox_confidence, frame_width, frame_height, weight_area, weight_confidence)`  
+= `weight_area * min(bbox_area/frame_px, 1.0) + weight_confidence * bbox_confidence`
+
+`write_canonical_positions` flow:
+1. `get_positions_for_selection` (inside transaction) — all active GlobalID positions
+2. `get_camera_batch_info_bulk` (**standalone**, outside transaction) — `camera_config_id`
+3. `_resolve_resolutions` — `(camera_id, camera_config_id)` cache, falls back to `get_camera_resolution` (standalone), then env var defaults
+4. Group by `global_id` in Python
+5. Score + select winner per GlobalID
+6. `write_global_position` + `update_global_last_seen` (inside transaction)
+
+Resolution cache key: `(camera_id, camera_config_id)`. Natural invalidation on version activation — new `camera_config_id` → cache miss → fresh DB query.
+
+### 11.9 StateManager (`app/state.py`)
+
+`run_cleanup(conn, store_id, window_start_ms, window_end_ms)` — strict order:
+1. `transition_active_to_lost` — GlobalIDs with no active link seen since `window_start_ms`
+2. `transition_lost_to_exited` — GlobalIDs where `lost_since_ts + grace_seconds*1000 < window_end_ms`
+3. `deactivate_mappings_for_globals` — must run before step 4 (centroid deletion reads mapping)
+4. `delete_centroids_for_globals` — DELETE `local_centroids` for LocalIDs linked to exited GlobalIDs
+
+Newly LOST GlobalIDs (set in this batch) will not exit in the same batch: `window_end_ms - window_end_ms = 0 < grace_ms`.
+
+LOST → ACTIVE reactivation is handled exclusively by `ReidMatcher.reactivate_global()` — StateManager never sets a GlobalID back to active.
+
+### 11.10 Reconciler (`app/reconciler.py`)
+
+Owns the single `pool.acquire()` / `conn.transaction()` block per batch. Constructs all four sub-components once at `__init__` and reuses them across all batches. `PositionSelector._resolution_cache` is intentionally long-lived.
+
+`process_batch(batch_number, window, reporting_cameras) → dict` returns stats including `known_locals`, `new_locals`, `new_globals_created`, `positions_written`, `newly_lost`, `newly_exited`. Exceptions propagate to `BatchCoordinator._fire()` which catches, logs, and continues — a failed batch is skipped and orphan sweep on restart handles any partial state.
+
+### 11.11 Tests
+
+**Unit tests** (`tests/unit/iep3/`): 25 cases, no DB/Redis. All run inside the `iep3_reconciliation` container with workspace mounted. `conftest.py` adds `services/iep3_reconciliation/` to `sys.path`. `FakeRepo` is stateful (not just AsyncMock) to simulate in-memory candidate pool mutations in the matcher.
+
+**Integration test** (`tests/e2e/test_iep3_reconciler.py`): 2 tests against live PostgreSQL. Seeds 4 `tracking_history` rows + 3 `local_centroids` for a 3-camera scenario (2 cameras see same person A with identical centroid, 1 camera sees person B with orthogonal centroid). Verifies all 5 Architecture Spec §10 invariants. Cleans up via `DELETE FROM stores WHERE id=$1` (CASCADE).
+
+---
+
+## 12. Known Gaps & Next Steps
 
 ### In-scope gaps (not yet implemented)
 
@@ -1216,10 +1498,18 @@ boto3
 | `IEP2_IMAGE` tag `latest` | `docker-compose.yml` | `latest` is mutable. Pin to a digest or semver tag for reproducible deployments. |
 | Window seconds mismatch risk | `orchestrator.py` | `window_seconds=60.0` is hardcoded. IEP1's default `--window 60.0` and IEP2's 60 s batch window must all match. No runtime validation. |
 
+### IEP3-specific gaps
+
+| Gap | Location | Impact |
+|-----|----------|--------|
+| XACK before `on_ready` — no retry on reconciliation failure | `coordinator.py` | A reconciliation crash leaves partial DB state. Orphan sweep on the next IEP3 restart cleans up `global_identities` that were created but never received a `global_tracking_history` row. For mapping-level partial state, no automated cleanup exists — accepted trade-off for simplicity. |
+| `_pool` module singleton is not thread-safe for multi-store | `db.py` | IEP3 is designed as one-process-per-store. Running multiple stores in one process would share the pool — not the intended deployment model. |
+| Resolution cache never expires | `selection.py` | On camera config version change, the old `(camera_id, camera_config_id)` key becomes unreachable (natural invalidation). But the old entry is never garbage-collected from the dict. In practice the dict grows by at most one entry per version activation, so memory impact is negligible. |
+| No Prometheus metrics | All IEP3 modules | Reconciliation latency, ReID match rate, partial batch rate are not exported. Add `prometheus_client` counters/histograms to `reconciler.py` when observability is needed. |
+
 ### Out-of-scope (future phases)
 
-- IEP3: Reconciliation — cross-camera identity merging
 - IEP4: Alerts — zone occupancy thresholds, dwell time alerts
 - IEP5: Analytics — aggregated heatmaps, path analysis
 - IEP6: Embedded agent — Jetson/RPi optimised inference
-- Production hardening: TLS, gRPC auth, K8s deployment, observability (Prometheus metrics from EEP, IEP1, IEP2)
+- Production hardening: TLS, gRPC auth, K8s deployment, observability (Prometheus metrics from EEP, IEP1, IEP2, IEP3)
