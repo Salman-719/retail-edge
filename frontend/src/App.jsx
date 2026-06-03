@@ -1,5 +1,10 @@
-import React from 'react'
+import React, { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
+
+// Loaded only in dev builds — dynamic import is dead code in `vite build`.
+const VisionDebugConsole = import.meta.env.DEV
+  ? lazy(() => import('./pages/VisionDebugConsole'))
+  : null
 import { AuthProvider } from './store'
 import PrivateRoute from './components/PrivateRoute'
 import StoreLayout from './components/StoreLayout'
@@ -56,6 +61,14 @@ export default function App() {
 
         {/* Store invite acceptance */}
         <Route path="/store/:slug/accept-invite" element={<AcceptInvite />} />
+
+        {/* Dev-only: Vision Debug Console. Remove route + VisionDebugConsole.jsx before shipping. */}
+        {import.meta.env.DEV && VisionDebugConsole && (
+          <Route
+            path="/dev/vision"
+            element={<Suspense fallback={null}><VisionDebugConsole /></Suspense>}
+          />
+        )}
 
         {/* Default */}
         <Route path="/" element={<Navigate to="/login" replace />} />

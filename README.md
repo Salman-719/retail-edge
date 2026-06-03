@@ -86,9 +86,9 @@ retail-edge/
 │   │       ├── core/               # database, config, scheduler, orchestrator, iep2_docker
 │   │       ├── grpc_server/        # registry, servicer, server (grpc.aio)
 │   │       ├── grpc_generated/     # agent_pb2.py, agent_pb2_grpc.py (committed)
-│   │       ├── models/             # SQLAlchemy ORM (Mapped[] style)
+│   │       ├── models/             # SQLAlchemy ORM (Mapped[] style) — incl. CameraRuntimeSession
 │   │       ├── schemas/            # Pydantic v2 request/response schemas
-│   │       └── tasks/              # camera_scheduler.py (APScheduler job)
+│   │       └── tasks/              # camera_scheduler.py (APScheduler job + pending_activation)
 │   ├── iep1_ingestion/             # Ingestion worker (fully implemented)
 │   │   └── app/
 │   │       ├── source/             # RtspSource, VideoFileSource
@@ -105,6 +105,8 @@ retail-edge/
 │   │   ├── persistence/            # PostgresPersistence (asyncpg)
 │   │   ├── projection/             # FloorProjector (homography + shapely)
 │   │   ├── ingest/                 # RedisStreamFrameSource (XREADGROUP)
+│   │   ├── app/
+│   │   │   └── main.py             # FastAPI dev server: /upload, /ws, /clear-tmp (dev only, not in Compose)
 │   │   ├── runtime.py              # IEP2Runtime (asynccontextmanager)
 │   │   └── main.py                 # CLI entry (--source video|redis)
 │   ├── edge_agent/                 # Edge Agent daemon (fully implemented)
@@ -308,6 +310,46 @@ Returns `202 Accepted` — workers start asynchronously in Docker.
 
 ---
 
+## Version Activation
+
+`StoreConfigVersion` follows a four-state lifecycle:
+
+```
+draft → pending_activation → active → archived
+```
+
+| State | Meaning |
+|---|---|
+| `draft` | Being edited — not deployed |
+| `pending_activation` | Scheduled for future activation (`activate_at` is set) |
+| `active` | Currently deployed — cameras run against this version |
+| `archived` | Superseded — kept for history |
+
+### Activate a draft version (API)
+
+```bash
+curl -s -X POST http://localhost:8000/api/store/<slug>/versions/draft/activate \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "immediate"}'
+```
+
+**Immediate activation** (`mode: "immediate"`): stops cameras running on the old version, atomically archives it and activates the new one, restarts cameras with the new config. Returns `status: "activating"` with `cameras_restarted`.
+
+**Scheduled activation** (`mode: "scheduled"`): archives the old version immediately, sets the draft to `pending_activation` with the given timestamp.
+
+```bash
+  -d '{"mode": "scheduled", "activate_at": "2026-06-04T09:00:00Z"}'
+```
+
+Returns `status: "scheduled"`. The EEP scheduler fires the activation automatically when `activate_at` passes (checked every 60 seconds). The `activate_at` timestamp must be in the future.
+
+### Crash recovery on EEP restart
+
+On startup, EEP queries `camera_runtime_sessions` for any sessions with `stopped_at IS NULL` — these represent cameras whose IEP2 container died while EEP was down. EEP attempts to restart IEP2 for each and re-adopts the existing session row. If restart fails the session is closed with `stop_reason = 'crash'` so history stays complete.
+
+---
+
 ## Monitoring & Logs
 
 ### Service logs
@@ -501,6 +543,14 @@ All variables have working defaults in `docker-compose.yml` for local developmen
 | `S3_ENDPOINT_URL / ACCESS_KEY / SECRET_KEY / BUCKET` | — | Frame download |
 | `LIVE_STREAM_ENABLED` | — | Enables LivePublisher (Redis pub/sub for browser live view) |
 
+### Frontend (dev only)
+
+| Variable | Default | Description |
+|---|---|---|
+| `VITE_API_URL` | `http://localhost:8000` | EEP REST base URL |
+| `VITE_LIVE_BRIDGE_URL` | `ws://localhost:8010` | Live bridge WebSocket |
+| `VITE_IEP2_DEV_API_URL` | `http://localhost:8002` | Vision Debug Console — IEP2 FastAPI dev server. Only used in dev builds; remove with `VisionDebugConsole.jsx` before shipping. |
+
 ---
 
 ## gRPC Protocol
@@ -552,15 +602,57 @@ Camera (RTSP / video file)
 
 ---
 
-## Schema Overview (Domain 9 — new tables)
+## Schema Overview
 
 | Table | Key Columns |
 |---|---|
 | `tracking_history` | `camera_id TEXT`, `local_id UUID`, `timestamp_ms BIGINT`, `floor_x`, `floor_y`, `zone_id`, `bbox_confidence REAL`, `bbox_area INTEGER` |
 | `camera_schedules` | `store_id`, `camera_config_id`, `days_of_week INTEGER[]`, `start_time TIME`, `end_time TIME`, `is_active BOOLEAN` |
 | `edge_agents` | `store_id UNIQUE`, `status` (online/offline), `last_heartbeat_at`, `agent_version` |
+| `store_config_versions` | `status` (draft/pending_activation/active/archived), `activate_at TIMESTAMPTZ` (set when scheduled), `active_from`, `active_until` |
+| `camera_runtime_sessions` | Append-only. `store_id`, `physical_camera_id`, `camera_config_id`, `version_id`, `started_at`, `stopped_at`, `stop_reason` (schedule/manual/version_activation/crash/unknown). FKs: `store_id` → CASCADE; others → SET NULL so history survives hardware/config deletion. |
 
 All pre-existing tables (stores, physical_cameras, camera_configs, calibrations, zones, store_settings, …) are unchanged from the prior schema.
+
+---
+
+## Vision Debug Console (dev only)
+
+A temporary React page for uploading a video, watching live bbox overlays as IEP2 processes it, and scrubbing annotated frames in a playback timeline. Includes a live DB log panel showing `tracking_history` inserts in real time.
+
+**This page is removed before shipping.** To remove it: delete `frontend/src/pages/VisionDebugConsole.jsx` and the corresponding `Route` block in `frontend/src/App.jsx`.
+
+### Running the IEP2 dev server
+
+The FastAPI upload/WebSocket server (`services/iep2_vision/app/main.py`) is intentionally **not** in `docker-compose.yml`. Run it separately alongside the stack:
+
+```bash
+# From retail-edge/
+uvicorn services.iep2_vision.app.main:app --port 8002 --reload
+```
+
+Requires `DATABASE_URL` in the environment (or a local `.env` file in `services/iep2_vision/`):
+
+```bash
+DATABASE_URL=postgresql://retailvision:retailvision_dev@localhost:5432/retailvision \
+  uvicorn services.iep2_vision.app.main:app --port 8002 --reload
+```
+
+### Accessing the page
+
+Start the frontend in dev mode (`npm run dev` in `frontend/`), then open:
+
+**http://localhost:5173/dev/vision**
+
+The page does not appear in any navigation menu — access it directly by URL. It is excluded from production builds (`vite build`) via a conditional dynamic import on `import.meta.env.DEV`.
+
+### Env var
+
+Add to `frontend/.env` (already in `.env.example`):
+
+```
+VITE_IEP2_DEV_API_URL=http://localhost:8002
+```
 
 ---
 
@@ -595,6 +687,10 @@ docker compose up -d
 ---
 
 ## Troubleshooting
+
+**Edge Agent logs `NOT_FOUND` and keeps reconnecting after a fresh DB**
+
+After `docker compose down -v`, the database is wiped but the Edge Agent's `STORE_ID` in `.env` still refers to the deleted store. EEP rejects the gRPC connection with `NOT_FOUND` until the store is recreated via the API. The agent retries with exponential backoff (1 s → 60 s cap) and reconnects automatically within 60 seconds of store creation — no manual restart needed.
 
 **EEP can't reach Docker socket**
 

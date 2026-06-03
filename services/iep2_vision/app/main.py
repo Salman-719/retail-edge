@@ -13,6 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
+import asyncpg
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
@@ -31,6 +32,38 @@ STATE = {
     "total_frames": 0,
     "events":       queue.Queue(),
 }
+
+_SNAPSHOT_SQL = """
+    SELECT local_id, timestamp_ms, floor_x, floor_y, zone_id,
+           bbox_confidence, bbox_area
+    FROM tracking_history
+    WHERE camera_id = $1
+    ORDER BY timestamp_ms DESC
+    LIMIT 50
+"""
+
+_COUNT_SQL = "SELECT COUNT(*) FROM tracking_history WHERE camera_id = $1"
+
+
+async def _query_snapshot(pool: asyncpg.Pool, camera_id: str) -> dict:
+    rows = await pool.fetch(_SNAPSHOT_SQL, camera_id)
+    total = await pool.fetchval(_COUNT_SQL, camera_id)
+    return {
+        "type": "db_snapshot",
+        "total_rows": total or 0,
+        "rows": [
+            {
+                "local_id":        str(r["local_id"])  if r["local_id"]  is not None else None,
+                "timestamp_ms":    r["timestamp_ms"],
+                "floor_x":         r["floor_x"],
+                "floor_y":         r["floor_y"],
+                "zone_id":         str(r["zone_id"]) if r["zone_id"] is not None else None,
+                "bbox_confidence": r["bbox_confidence"],
+                "bbox_area":       r["bbox_area"],
+            }
+            for r in rows
+        ],
+    }
 
 
 @asynccontextmanager
@@ -68,23 +101,48 @@ async def upload(
     STATE["frames"] = []
     STATE["status"] = "processing"
 
+    db_url = os.getenv("DATABASE_URL", "")
+
     def pipeline_thread():
-        log.info("Pipeline started  camera=%s  file=%s", camera_id, file.filename)
-        runtime = IEP2Runtime(Iep2Settings(
-            store_id="default",
-            camera_id=camera_id,
-            database_url=os.getenv("DATABASE_URL", ""),
-        ))
-        with runtime.run(dest) as stream:
-            for result in stream:
-                record = asdict(result)
-                STATE["frames"].append(record)
-                STATE["events"].put(record)
-        total = len(STATE["frames"])
-        STATE["total_frames"] = total
-        STATE["status"] = "done"
-        STATE["events"].put({"status": "done", "total_frames": total})
-        log.info("Pipeline done  camera=%s  frames=%d", camera_id, total)
+        async def _run():
+            pool = None
+            if db_url:
+                try:
+                    pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
+                except Exception:
+                    log.exception("DB pool creation failed — snapshots disabled")
+
+            try:
+                runtime = IEP2Runtime(Iep2Settings(
+                    store_id="default",
+                    camera_id=camera_id,
+                    database_url=db_url,
+                ))
+                frame_count = 0
+                async with runtime.run(dest) as stream:
+                    async for result in stream:
+                        record = asdict(result)
+                        record["type"] = "frame"
+                        STATE["frames"].append(record)
+                        STATE["events"].put(record)
+                        frame_count += 1
+                        if pool and frame_count % 25 == 0:
+                            STATE["events"].put(await _query_snapshot(pool, camera_id))
+
+                total = len(STATE["frames"])
+                STATE["total_frames"] = total
+                STATE["status"] = "done"
+
+                if pool:
+                    STATE["events"].put(await _query_snapshot(pool, camera_id))
+
+                STATE["events"].put({"type": "done", "status": "done", "total_frames": total})
+                log.info("Pipeline done  camera=%s  frames=%d", camera_id, total)
+            finally:
+                if pool:
+                    await pool.close()
+
+        asyncio.run(_run())
 
     threading.Thread(target=pipeline_thread, daemon=True).start()
 
@@ -103,7 +161,7 @@ async def ws(websocket: WebSocket):
                 continue
 
             await websocket.send_json(msg)
-            if isinstance(msg, dict) and msg.get("status") == "done":
+            if isinstance(msg, dict) and msg.get("type") == "done":
                 break
     except WebSocketDisconnect:
         pass
