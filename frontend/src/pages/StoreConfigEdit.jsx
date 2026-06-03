@@ -5,7 +5,7 @@ import {
   activateDraft, computeHomography, createCamera, createDraft, createObstacle, createZone,
   deleteCameraConfig, deleteCamera, deleteDraft, deleteObstacle, deleteZone,
   getActiveVersion, getDraft, getDraftCameraConfigs, getDraftFloorPlan, getDraftObstacles,
-  getDraftZones, getCalibrations, getSyncEvent, listSections, patchCamera, placeCameraConfig,
+  getDraftZones, getCalibrations, listSections, patchCamera, placeCameraConfig,
   setFloorPlanScale, updateCameraConfig, uploadCameraFrame, uploadFloorPlan, verifyCalibration,
 } from '../api'
 
@@ -28,7 +28,6 @@ const ZONE_COLORS = {
   staff_only: '#ef4444', general: '#8b5cf6',
 }
 
-const ACTIVATION_COUNTDOWN = 30
 
 // ─── Hooks ────────────────────────────────────────────────────────────────────
 
@@ -492,7 +491,6 @@ export default function StoreConfigEdit() {
   const [pendingZoneType, setPendingZoneType] = useState('general')
 
   // Step 9 — activation
-  const [activationLabel, setActivationLabel] = useState('')
   const [syncEvent, setSyncEvent] = useState(null)
   const pollRef = useRef(null)
 
@@ -515,7 +513,7 @@ export default function StoreConfigEdit() {
       case 7: return cameraConfigs.length > 0 &&
         cameraConfigs.every(cc => cc.status === 'verified')
       case 8: return zones.length > 0 || obstacles.length > 0 || step8Skipped
-      case 9: return syncEvent?.status === 'executed'
+      case 9: return syncEvent?.status === 'activating' || syncEvent?.status === 'scheduled'
       default: return false
     }
   }
@@ -991,19 +989,9 @@ export default function StoreConfigEdit() {
   async function handleActivate() {
     setSaving(true)
     try {
-      const event = await activateDraft(slug, {
-        countdown_sec: ACTIVATION_COUNTDOWN,
-        label: activationLabel || null,
-      })
+      const event = await activateDraft(slug, { mode: 'immediate' })
       setSyncEvent(event)
       navigate(`/store/${slug}/config`)
-      pollRef.current = setInterval(async () => {
-        const updated = await getSyncEvent(slug, event.id)
-        setSyncEvent(updated)
-        if (updated.status !== 'pending') {
-          clearInterval(pollRef.current)
-        }
-      }, 2000)
     } catch (err) {
       const detail = err?.response?.data?.detail
       const msg = (typeof detail === 'object' ? detail?.error : detail) || err?.response?.data?.error || err.message
@@ -1972,7 +1960,7 @@ export default function StoreConfigEdit() {
               <p className="text-sm text-gray-500">
                 {mode === 'editing'
                   ? 'Review your changes. Save and exit to keep as draft, or activate to deploy immediately.'
-                  : `Review the summary, then activate. The new configuration will go live after a ${ACTIVATION_COUNTDOWN}-second sync countdown.`
+                  : 'Review the summary, then activate. The new configuration will go live immediately.'
                 }
               </p>
             </div>
@@ -2005,62 +1993,29 @@ export default function StoreConfigEdit() {
                   <span className="font-medium">{floorPlan.pixels_per_meter?.toFixed(2)} px/m</span>
                 </div>
               )}
-              <div className="flex justify-between border-t border-gray-200 pt-2 mt-2">
-                <span className="text-gray-600">Sync countdown</span>
-                <span className="font-medium">{ACTIVATION_COUNTDOWN}s</span>
-              </div>
             </div>
 
             {!syncEvent ? (
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm text-gray-700 mb-1">Version label (optional)</label>
-                  <input
-                    value={activationLabel}
-                    onChange={e => setActivationLabel(e.target.value)}
-                    placeholder="e.g. Initial setup"
-                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex gap-3 flex-wrap">
-                  <button
-                    onClick={() => navigate(`/store/${slug}/config`)}
-                    className="px-6 py-2.5 bg-gray-200 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-300"
-                  >
-                    Save Draft &amp; Exit
-                  </button>
-                  <button
-                    onClick={handleActivate}
-                    disabled={saving}
-                    className="px-6 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 disabled:opacity-50"
-                  >
-                    {saving ? 'Scheduling…' : `Activate (${ACTIVATION_COUNTDOWN}s countdown)`}
-                  </button>
-                </div>
+              <div className="flex gap-3 flex-wrap">
+                <button
+                  onClick={() => navigate(`/store/${slug}/config`)}
+                  className="px-6 py-2.5 bg-gray-200 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-300"
+                >
+                  Save Draft &amp; Exit
+                </button>
+                <button
+                  onClick={handleActivate}
+                  disabled={saving}
+                  className="px-6 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 disabled:opacity-50"
+                >
+                  {saving ? 'Activating…' : 'Activate Now'}
+                </button>
               </div>
             ) : (
-              <div>
-                {syncEvent.status === 'pending' && (
-                  <div className="py-4 space-y-2">
-                    <p className="text-sm text-gray-500">Configuration activating…</p>
-                    <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-blue-500 rounded-full transition-all"
-                        style={{
-                          width: `${Math.min(100, 100 - ((syncEvent.remaining_seconds ?? 0) / ACTIVATION_COUNTDOWN) * 100)}%`,
-                          transitionDuration: '2000ms',
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
-                {syncEvent.status === 'executed' && (
-                  <div className="text-center py-6">
-                    <p className="text-3xl">🎉</p>
-                    <p className="text-lg font-semibold text-green-700 mt-2">Configuration activated!</p>
-                    <p className="text-sm text-gray-500 mt-1">Redirecting…</p>
-                  </div>
-                )}
+              <div className="text-center py-6">
+                <p className="text-3xl">🎉</p>
+                <p className="text-lg font-semibold text-green-700 mt-2">Configuration activated!</p>
+                <p className="text-sm text-gray-500 mt-1">Redirecting…</p>
               </div>
             )}
           </div>

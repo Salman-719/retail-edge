@@ -624,18 +624,18 @@ A temporary React page for uploading a video, watching live bbox overlays as IEP
 
 ### Running the IEP2 dev server
 
-The FastAPI upload/WebSocket server (`services/iep2_vision/app/main.py`) is intentionally **not** in `docker-compose.yml`. Run it separately alongside the stack:
+The FastAPI upload/WebSocket server uses the existing `iep2_vision` Docker image but with the default `CMD` (FastAPI on port 8002). It is in `docker-compose.yml` under the `dev` profile so it never starts with the main stack by default.
+
+Start it alongside the main stack:
 
 ```bash
-# From retail-edge/
-uvicorn services.iep2_vision.app.main:app --port 8002 --reload
+docker compose --profile dev up -d iep2_dev
 ```
 
-Requires `DATABASE_URL` in the environment (or a local `.env` file in `services/iep2_vision/`):
+Stop it when done:
 
 ```bash
-DATABASE_URL=postgresql://retailvision:retailvision_dev@localhost:5432/retailvision \
-  uvicorn services.iep2_vision.app.main:app --port 8002 --reload
+docker compose --profile dev stop iep2_dev
 ```
 
 ### Accessing the page

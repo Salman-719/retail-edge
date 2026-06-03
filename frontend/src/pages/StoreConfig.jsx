@@ -4,7 +4,7 @@ import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-kon
 import { Plus, Pencil, Trash2, Check, X, Warehouse } from 'lucide-react'
 import {
   getDraft, getActiveVersion, listSections, listVersions, reactivateVersion,
-  createSection, patchSection, deleteSection, getSyncEvent,
+  createSection, patchSection, deleteSection,
   patchCamera, updateCameraConfig,
 } from '../api'
 import { usePageTitle } from '../components/PageMeta'
@@ -353,8 +353,6 @@ export default function StoreConfig() {
   const [selectedSectionId, setSelectedSectionId] = useState(null)
   const [draft, setDraft] = useState(null)
   const [restoring, setRestoring] = useState(null)
-  const [pendingSyncEvent, setPendingSyncEvent] = useState(null)
-  const syncPollRef = useRef(null)
   const startAddingSectionRef = useRef(null)
   const [editingCameraId, setEditingCameraId] = useState(null)
   const [editCameraForm, setEditCameraForm] = useState({ height_meters: '', stream_url: '' })
@@ -387,25 +385,6 @@ export default function StoreConfig() {
 
   useEffect(() => { reload() }, [slug])
 
-  // Poll pending sync event for the draft version (shows progress bar in version history)
-  useEffect(() => {
-    clearInterval(syncPollRef.current)
-    const draftVersion = versions.find(v => v.status === 'draft')
-    if (!draftVersion?.pending_sync_event_id) { setPendingSyncEvent(null); return }
-    const eventId = draftVersion.pending_sync_event_id
-    getSyncEvent(slug, eventId).then(setPendingSyncEvent).catch(() => {})
-    syncPollRef.current = setInterval(async () => {
-      try {
-        const ev = await getSyncEvent(slug, eventId)
-        setPendingSyncEvent(ev)
-        if (ev.status !== 'pending') {
-          clearInterval(syncPollRef.current)
-          if (ev.status === 'executed') reload()
-        }
-      } catch { clearInterval(syncPollRef.current) }
-    }, 2000)
-    return () => clearInterval(syncPollRef.current)
-  }, [versions, slug])
 
   // Called by SectionsPanel after create/rename/delete
   function handleSectionsChanged(updated, deletedId) {
@@ -771,44 +750,38 @@ export default function StoreConfig() {
               </div>
             )}
             <div className="divide-y divide-gray-100">
-              {versions.map(v => {
-                const isPending = v.status === 'draft' && pendingSyncEvent?.status === 'pending' && v.pending_sync_event_id
-                const countdown = isPending ? (pendingSyncEvent?.remaining_seconds ?? 0) : null
-                const totalSec = isPending ? (pendingSyncEvent?.countdown_sec ?? 30) : 30
-                const progress = isPending ? Math.min(100, 100 - (Math.max(0, countdown) / totalSec) * 100) : 0
-                return (
-                <div key={v.id} className="py-2.5 space-y-1.5">
+              {versions.map(v => (
+                <div key={v.id} className="py-2.5">
                   <div className="flex items-center gap-3 text-sm">
-                  <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ${
-                    v.status === 'active' ? 'bg-green-100 text-green-700' :
-                    isPending ? 'bg-yellow-100 text-yellow-700' :
-                    v.status === 'draft' ? 'bg-blue-100 text-blue-700' :
-                    'bg-gray-100 text-gray-500'
-                  }`}>{isPending ? 'Pending' : v.status}</span>
-                  <span className="text-gray-700 font-medium truncate">{v.label || '(unlabeled)'}</span>
-                  <span className="text-gray-400 text-xs ml-auto flex-shrink-0">
-                    {v.active_from ? new Date(v.active_from).toLocaleDateString() : new Date(v.created_at).toLocaleDateString()}
-                  </span>
-                  {v.status === 'archived' && (
-                    <button
-                      onClick={() => handleRestore(v.id)}
-                      disabled={restoring === v.id}
-                      className="text-xs text-blue-600 hover:text-blue-800 flex-shrink-0 disabled:opacity-50 font-medium"
-                    >
-                      {restoring === v.id ? 'Restoring…' : 'Restore'}
-                    </button>
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ${
+                      v.status === 'active'             ? 'bg-green-100 text-green-700'  :
+                      v.status === 'pending_activation' ? 'bg-yellow-100 text-yellow-700' :
+                      v.status === 'draft'              ? 'bg-blue-100 text-blue-700'    :
+                      'bg-gray-100 text-gray-500'
+                    }`}>
+                      {v.status === 'pending_activation' ? 'Scheduled' : v.status}
+                    </span>
+                    <span className="text-gray-700 font-medium truncate">{v.label || '(unlabeled)'}</span>
+                    <span className="text-gray-400 text-xs ml-auto flex-shrink-0">
+                      {v.active_from ? new Date(v.active_from).toLocaleDateString() : new Date(v.created_at).toLocaleDateString()}
+                    </span>
+                    {v.status === 'archived' && (
+                      <button
+                        onClick={() => handleRestore(v.id)}
+                        disabled={restoring === v.id}
+                        className="text-xs text-blue-600 hover:text-blue-800 flex-shrink-0 disabled:opacity-50 font-medium"
+                      >
+                        {restoring === v.id ? 'Restoring…' : 'Restore'}
+                      </button>
+                    )}
+                  </div>
+                  {v.status === 'pending_activation' && v.activate_at && (
+                    <p className="text-xs text-yellow-600 mt-1 pl-0.5">
+                      Activates {new Date(v.activate_at).toLocaleString()}
+                    </p>
                   )}
                 </div>
-                  {isPending && (
-                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-yellow-400 rounded-full transition-all"
-                        style={{ width: `${progress}%`, transitionDuration: '2000ms' }}
-                      />
-                    </div>
-                  )}
-                </div>
-                )
+              ))
               })}
             </div>
           </div>

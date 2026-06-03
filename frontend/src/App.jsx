@@ -57,18 +57,17 @@ export default function App() {
           <Route path="members" element={<Members />} />
           <Route path="audit" element={<Audit />} />
           <Route path="settings" element={<Settings />} />
+          {/* Dev-only: Vision Debug Console. Remove this Route + VisionDebugConsole.jsx before shipping. */}
+          {import.meta.env.DEV && VisionDebugConsole && (
+            <Route
+              path="dev/vision"
+              element={<Suspense fallback={null}><VisionDebugConsole /></Suspense>}
+            />
+          )}
         </Route>
 
         {/* Store invite acceptance */}
         <Route path="/store/:slug/accept-invite" element={<AcceptInvite />} />
-
-        {/* Dev-only: Vision Debug Console. Remove route + VisionDebugConsole.jsx before shipping. */}
-        {import.meta.env.DEV && VisionDebugConsole && (
-          <Route
-            path="/dev/vision"
-            element={<Suspense fallback={null}><VisionDebugConsole /></Suspense>}
-          />
-        )}
 
         {/* Default */}
         <Route path="/" element={<Navigate to="/login" replace />} />

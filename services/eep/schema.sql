@@ -493,9 +493,6 @@ CREATE TABLE calibrations (
     computation_error      TEXT,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT one_current_per_camera_config
-        UNIQUE (camera_config_id, is_current)
-        DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT verified_requires_computation
         CHECK (
             status != 'verified' OR
@@ -667,6 +664,9 @@ CREATE INDEX idx_alerts_employee          ON alerts(employee_id) WHERE employee_
 
 -- Domain 6
 CREATE INDEX idx_calibrations_camera_config ON calibrations(camera_config_id);
+-- Partial unique index: only one current calibration per camera config; non-current rows are unlimited (history).
+CREATE UNIQUE INDEX IF NOT EXISTS one_current_per_camera_config
+    ON calibrations(camera_config_id) WHERE is_current = TRUE;
 CREATE INDEX idx_calibrations_current       ON calibrations(camera_config_id, is_current) WHERE is_current = TRUE;
 CREATE INDEX idx_calibrations_status        ON calibrations(status);
 CREATE INDEX idx_calibrations_method        ON calibrations(method, status);
@@ -776,3 +776,14 @@ CREATE INDEX IF NOT EXISTS idx_crs_store_open
 -- Per-camera historical timeline.
 CREATE INDEX IF NOT EXISTS idx_crs_camera_history
     ON camera_runtime_sessions(physical_camera_id, started_at);
+
+-- Fix: replace the broken two-column unique constraint on calibrations with a
+-- partial unique index. The original UNIQUE(camera_config_id, is_current) only
+-- allowed one non-current calibration ever, breaking re-calibration workflows.
+-- The correct intent is: only one is_current=TRUE per camera config; history is
+-- unlimited.
+ALTER TABLE calibrations
+    DROP CONSTRAINT IF EXISTS one_current_per_camera_config;
+DROP INDEX IF EXISTS one_current_per_camera_config;
+CREATE UNIQUE INDEX IF NOT EXISTS one_current_per_camera_config
+    ON calibrations(camera_config_id) WHERE is_current = TRUE;

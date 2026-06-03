@@ -6,6 +6,8 @@
  *   - frontend/.env.example                       (VITE_IEP2_DEV_API_URL)
  */
 import React, { useRef, useState, useEffect } from 'react'
+import { useParams } from 'react-router-dom'
+import { getStore, listCameras } from '../api'
 
 const IEP2_URL = import.meta.env.VITE_IEP2_DEV_API_URL || 'http://localhost:8002'
 const WS_URL   = IEP2_URL.replace(/^http/, 'ws') + '/ws'
@@ -56,22 +58,42 @@ function drawRecord(ctx, canvas, record) {
 }
 
 export default function VisionDebugConsole() {
+  const { slug } = useParams()
+
   const framesRef         = useRef([])
   const liveCanvasRef     = useRef(null)
   const playbackCanvasRef = useRef(null)
   const socketRef         = useRef(null)
   const flashTimersRef    = useRef({})   // local_id → timer id
 
-  const [playbackIdx,   setPlaybackIdx]   = useState(0)
-  const [totalFrames,   setTotalFrames]   = useState(0)
-  const [isDone,        setIsDone]        = useState(false)
-  const [uploadStatus,  setUploadStatus]  = useState('')
-  const [persons,       setPersons]       = useState(new Map())   // local_id → label
-  const [newPersonIds,  setNewPersonIds]  = useState(new Set())   // flashing green
-  const [dbRows,        setDbRows]        = useState([])
-  const [dbTotal,       setDbTotal]       = useState(0)
-  const [cameraId,      setCameraId]      = useState('')
-  const [file,          setFile]          = useState(null)
+  const [storeId,          setStoreId]          = useState(null)
+  const [cameras,          setCameras]          = useState([])
+  const [selectedCameraId, setSelectedCameraId] = useState('')
+  const [playbackIdx,      setPlaybackIdx]      = useState(0)
+  const [totalFrames,      setTotalFrames]      = useState(0)
+  const [isDone,           setIsDone]           = useState(false)
+  const [isProcessing,     setIsProcessing]     = useState(false)
+  const [uploadStatus,     setUploadStatus]     = useState('')
+  const [persons,          setPersons]          = useState(new Map())
+  const [newPersonIds,     setNewPersonIds]     = useState(new Set())
+  const [dbRows,           setDbRows]           = useState([])
+  const [dbTotal,          setDbTotal]          = useState(0)
+  const [file,             setFile]             = useState(null)
+
+  // Resolve store UUID and fetch registered cameras on mount.
+  useEffect(() => {
+    getStore(slug)
+      .then(s => {
+        setStoreId(s.id)
+        return listCameras(slug)
+      })
+      .then(cams => {
+        const active = (cams || []).filter(c => c.is_active)
+        setCameras(active)
+        if (active.length === 1) setSelectedCameraId(active[0].id)
+      })
+      .catch(() => setUploadStatus('Could not load store cameras — check API connection.'))
+  }, [slug])
 
   // Close WS on unmount to avoid lingering connections on navigation.
   useEffect(() => {
@@ -139,15 +161,16 @@ export default function VisionDebugConsole() {
 
       if (msg.type === 'done') {
         setTotalFrames(framesRef.current.length)
+        setIsProcessing(false)
         setIsDone(true)
-        // final db_snapshot arrives immediately after in a separate message
       }
     }
   }
 
-  async function handleUpload() {
-    if (!cameraId.trim()) { setUploadStatus('Camera ID is required.'); return }
-    if (!file)            { setUploadStatus('Pick a video first.');      return }
+  async function handleUpload(usePhysicalLayer = true) {
+    if (!storeId)          { setUploadStatus('Store not loaded yet — try again.'); return }
+    if (!selectedCameraId) { setUploadStatus('Select a camera first.');            return }
+    if (!file)             { setUploadStatus('Pick a video first.');               return }
 
     // Reset all state for a fresh run.
     framesRef.current = []
@@ -158,13 +181,16 @@ export default function VisionDebugConsole() {
     setIsDone(false)
     setPlaybackIdx(0)
     setTotalFrames(0)
+    setIsProcessing(true)
     setUploadStatus('Uploading…')
 
     openSocket()
 
     const form = new FormData()
-    form.append('file',      file)
-    form.append('camera_id', cameraId.trim())
+    form.append('file',               file)
+    form.append('physical_camera_id', selectedCameraId)
+    form.append('store_id',           storeId)
+    form.append('use_physical_layer', usePhysicalLayer ? 'true' : 'false')
 
     try {
       const res  = await fetch(`${IEP2_URL}/upload`, { method: 'POST', body: form })
@@ -175,8 +201,17 @@ export default function VisionDebugConsole() {
     }
   }
 
+  async function handleStop() {
+    try {
+      await fetch(`${IEP2_URL}/stop`, { method: 'POST' })
+      setUploadStatus('Stopping…')
+    } catch (err) {
+      setUploadStatus(`Stop failed: ${err.message}`)
+    }
+  }
+
   return (
-    <div className="min-h-screen bg-[#111] text-gray-200 flex flex-col" style={{ fontFamily: 'system-ui, sans-serif' }}>
+    <div className="flex-1 flex flex-col bg-[#111] text-gray-200 overflow-hidden" style={{ fontFamily: 'system-ui, sans-serif' }}>
 
       {/* Header */}
       <header className="px-6 py-4 border-b border-gray-700 shrink-0">
@@ -186,16 +221,27 @@ export default function VisionDebugConsole() {
 
       {/* Upload bar */}
       <div className="px-6 py-3 border-b border-gray-800 flex items-center gap-4 flex-wrap shrink-0">
-        <label className="text-sm text-gray-400 flex items-center gap-2">
-          Camera ID
-          <input
-            type="text"
-            value={cameraId}
-            onChange={e => setCameraId(e.target.value)}
-            placeholder="e.g. cam-01"
-            className="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-sm text-gray-200 w-28 focus:outline-none focus:border-blue-500"
-          />
-        </label>
+        {cameras.length === 0 ? (
+          <span className="text-xs text-amber-400">
+            {storeId ? 'No active cameras registered for this store.' : 'Loading cameras…'}
+          </span>
+        ) : (
+          <label className="text-sm text-gray-400 flex items-center gap-2">
+            Camera
+            <select
+              value={selectedCameraId}
+              onChange={e => setSelectedCameraId(e.target.value)}
+              className="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-sm text-gray-200 focus:outline-none focus:border-blue-500"
+            >
+              <option value="">— select —</option>
+              {cameras.map(c => (
+                <option key={c.id} value={c.id}>
+                  {c.name}{c.brand ? ` (${c.brand})` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <input
           type="file"
           accept="video/*"
@@ -203,11 +249,29 @@ export default function VisionDebugConsole() {
           className="text-sm text-gray-400"
         />
         <button
-          onClick={handleUpload}
-          className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded"
+          onClick={() => handleUpload(true)}
+          disabled={cameras.length === 0 || !selectedCameraId || isProcessing}
+          className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm rounded"
+          title="Run with homography + floor projection + zone detection"
         >
-          Upload &amp; Process
+          Run — Physical Layer
         </button>
+        <button
+          onClick={() => handleUpload(false)}
+          disabled={cameras.length === 0 || !selectedCameraId || isProcessing}
+          className="px-4 py-1.5 bg-gray-600 hover:bg-gray-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm rounded"
+          title="Run ReID-only, no homography or floor projection"
+        >
+          Run — ReID Only
+        </button>
+        {isProcessing && (
+          <button
+            onClick={handleStop}
+            className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white text-sm rounded"
+          >
+            Stop
+          </button>
+        )}
         {uploadStatus && <span className="text-xs text-gray-400">{uploadStatus}</span>}
       </div>
 

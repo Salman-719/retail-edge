@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { NavLink, useNavigate, useParams } from 'react-router-dom'
 import {
   Store, Radio, BarChart2, Bot, Users, Calendar,
-  UserCheck, ClipboardList, SlidersHorizontal, ChevronLeft, Video,
+  UserCheck, ClipboardList, SlidersHorizontal, ChevronLeft, Video, Bug,
 } from 'lucide-react'
 import { useAuth } from '../store'
 import { logout, getActiveAlerts, getActiveVersion } from '../api'
@@ -114,6 +114,28 @@ export default function Sidebar() {
           </div>
         ))}
       </nav>
+
+      {/* Dev-only nav — remove with VisionDebugConsole.jsx before shipping */}
+      {import.meta.env.DEV && (
+        <div className="px-2 pb-1">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-amber-500/60 px-4 pt-4 pb-1">
+            Dev
+          </p>
+          <NavLink
+            to={`/store/${slug}/dev/vision`}
+            className={({ isActive }) =>
+              `nav-item flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all duration-150 border-l-2 pl-[10px] ${
+                isActive
+                  ? 'bg-amber-600/20 text-amber-300 font-semibold border-amber-500 active'
+                  : 'text-amber-400/60 hover:bg-amber-500/10 hover:text-amber-300 border-transparent'
+              }`
+            }
+          >
+            <Bug size={15} className="nav-icon shrink-0" />
+            <span className="flex-1 truncate">Vision Debug</span>
+          </NavLink>
+        </div>
+      )}
 
       {/* Bottom actions */}
       <div className="px-2 py-3 border-t border-white/10 flex flex-col gap-0.5">
