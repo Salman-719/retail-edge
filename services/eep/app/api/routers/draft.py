@@ -57,6 +57,7 @@ from app.schemas.draft import (
 from app.utils.homography import compute_homography
 from app.utils.calibration_xml import parse_intrinsic_xml, parse_extrinsic_xml
 from app.utils.shapely_utils import clamp_to_polygon, polygons_overlap
+from app.core.redis_client import get_redis
 
 router = APIRouter(tags=["draft"])
 
@@ -1246,6 +1247,7 @@ async def compute_homography_calibration(
     body: HomographyRequest,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
 ):
     draft = await _require_draft(ctx.store_id, db)
     _require_draft_access(draft, ctx)
@@ -1308,6 +1310,16 @@ async def compute_homography_calibration(
 
     await db.commit()
     await db.refresh(cal)
+
+    # R5 (M5-S1): signal IEP2 to reload homography without pod restart
+    try:
+        await redis.publish(f"iep2:reload:{config_id}", "homography")
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            "Failed to publish homography reload signal  config_id=%s: %s", config_id, exc
+        )
+
     return cal
 
 
@@ -1323,6 +1335,7 @@ async def upload_calibration_files(
     extrinsic: UploadFile | None = File(None),
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
 ):
     draft = await _require_draft(ctx.store_id, db)
     _require_draft_access(draft, ctx)
@@ -1392,6 +1405,16 @@ async def upload_calibration_files(
 
     await db.commit()
     await db.refresh(cal)
+
+    # R5 (M5-S1): signal IEP2 to reload homography without pod restart
+    try:
+        await redis.publish(f"iep2:reload:{config_id}", "homography")
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            "Failed to publish homography reload signal  config_id=%s: %s", config_id, exc
+        )
+
     return cal
 
 

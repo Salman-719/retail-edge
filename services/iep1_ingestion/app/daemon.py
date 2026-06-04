@@ -27,7 +27,7 @@ IEP1_CONTROL_SOCK = os.environ.get(
 IEP1_HEALTH_SOCK  = os.environ.get(
     "IEP1_HEALTH_SOCK", "unix:///tmp/iep1-sockets/iep1_health.sock"
 )
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+LOCAL_REDIS_URL = os.environ.get("LOCAL_REDIS_URL", "redis://127.0.0.1:6379/0")
 
 
 class _Iep1ControlServicer(_grpc.Iep1ControlServicer):
@@ -77,7 +77,7 @@ class _Iep1ControlServicer(_grpc.Iep1ControlServicer):
 
 
 async def run_daemon() -> None:
-    redis_client = aioredis.Redis.from_url(REDIS_URL)
+    redis_client = aioredis.Redis.from_url(LOCAL_REDIS_URL)
 
     servicer = _Iep1ControlServicer()
     servicer.set_redis(redis_client)

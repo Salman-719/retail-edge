@@ -23,8 +23,8 @@ class Iep3Settings(BaseSettings):
             )
         return v
 
-    # ── Redis (server-side, not local Jetson Redis) ───────────────────────────
-    redis_url: str = Field(default="redis://redis:6379/0")
+    # ── Redis — server-side only (env: SERVER_REDIS_URL) ─────────────────────
+    server_redis_url: str = Field(default="redis://redis:6379/0")
 
     # ── ReID parameters — every threshold configurable without code change ───
     reid_threshold:     float = Field(default=0.75, ge=0.0, le=1.0)

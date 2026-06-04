@@ -18,7 +18,7 @@ from .s3_presign import generate_presigned_url
 
 log = logging.getLogger("live_bridge")
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+SERVER_REDIS_URL = os.environ.get("SERVER_REDIS_URL", "redis://redis:6379/0")
 PRESIGNED_URL_EXPIRY = int(os.environ.get("PRESIGNED_URL_EXPIRY", "30"))
 
 # camera_id -> set[asyncio.Queue]  (one Queue per connected client)
@@ -77,7 +77,7 @@ async def _reader_task(camera_id: str) -> None:
     async def on_message(payload: dict):
         await _on_frame(camera_id, payload)
 
-    await read_camera_stream(camera_id, REDIS_URL, on_message)
+    await read_camera_stream(camera_id, SERVER_REDIS_URL, on_message)
 
 
 @app.websocket("/ws/live/{camera_id}")

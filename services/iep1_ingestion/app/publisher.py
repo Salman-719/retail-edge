@@ -31,7 +31,12 @@ class WindowPublisher:
         return json.dumps(dataclasses.asdict(manifest))
 
     def _xadd(self, manifest: WindowManifest) -> None:
-        self._client.xadd(self._stream_name(), {"manifest": self._serialize(manifest)})
+        self._client.xadd(
+            self._stream_name(),
+            {"manifest": self._serialize(manifest)},
+            maxlen=1000,
+            approximate=True,
+        )
 
     def publish(self, manifest: WindowManifest) -> bool:
         try:

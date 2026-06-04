@@ -114,7 +114,13 @@ class RedisStreamFrameSource:
         return self._redis
 
     async def ack(self, message_id) -> None:
-        """ACK a message after successful processing and DB write."""
+        """ACK a message after successful processing and DB write.
+
+        XACK fires after centroids + batch_complete are written but before
+        tmpfs cleanup. If IEP2 crashes between XACK and cleanup, the batch
+        will not be redelivered. Orphan sweep on IEP3 is the compensating
+        control for any partial state. See M4-S3 R7 for full trade-off rationale.
+        """
         await self._redis.xack(self._stream_name, GROUP_NAME, message_id)
 
     async def close(self) -> None:

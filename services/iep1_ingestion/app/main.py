@@ -17,7 +17,7 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info(
         "IEP1 daemon starting  redis=%s  control_sock=%s",
-        os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        os.environ.get("LOCAL_REDIS_URL", "redis://127.0.0.1:6379/0"),
         os.environ.get("IEP1_CONTROL_SOCK", "unix:///tmp/iep1-sockets/iep1_control.sock"),
     )
 

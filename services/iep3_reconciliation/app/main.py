@@ -76,7 +76,7 @@ async def _main() -> None:
         settings.store_id,
         settings.window_seconds,
         settings.database_url_server.split("@")[-1].split("/")[0],
-        settings.redis_url,
+        settings.server_redis_url,
     )
 
     # ── Infrastructure ────────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ async def _main() -> None:
     await _verify_db(pool)
 
     redis_client = aioredis.from_url(
-        settings.redis_url,
+        settings.server_redis_url,
         decode_responses=False,
     )
     await _verify_redis(redis_client)

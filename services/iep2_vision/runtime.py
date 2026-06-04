@@ -509,6 +509,8 @@ def _make_settings_class():
             tmpfs_frame_root:    str   = _Field(default="/dev/shm/frames")
             target_fps:          float = _Field(default=5.0, gt=0)
             health_sock:         str   = _Field(default="")
+            # R7: CA cert for TLS verification of server Redis (shares CA with gRPC)
+            redis_ca_cert_path:  str   = _Field(default="/etc/retailvision/certs/ca.crt")
 
             class Config:
                 env_file = ".env"
@@ -591,6 +593,51 @@ async def _run_health_service(settings) -> None:
         log.error("Health service failed  camera=%s: %s", settings.camera_id, exc)
 
 
+async def _watch_reload_signals(
+    camera_config_id: str,
+    projector: "FloorProjector",
+    pool,
+    server_redis,
+) -> None:
+    """R5 (M5-S1): Subscribe to EEP homography reload signals via server Redis pub/sub.
+
+    EEP publishes `iep2:reload:{camera_config_id}` → 'homography' when a new
+    calibration is written. IEP2 reloads the floor projector without restarting.
+    Runs as a background task alongside the main manifest consumer loop.
+    """
+    import uuid as _uuid
+    channel = f"iep2:reload:{camera_config_id}"
+    while True:
+        try:
+            pubsub = server_redis.pubsub()
+            await pubsub.subscribe(channel)
+            log.info("Subscribed to reload channel  channel=%s", channel)
+            async for message in pubsub.listen():
+                if message["type"] == "message" and message["data"] == b"homography":
+                    log.info(
+                        "Homography reload signal received  camera_config_id=%s",
+                        camera_config_id,
+                    )
+                    try:
+                        await projector.load(pool, _uuid.UUID(camera_config_id))
+                        log.info("Homography reloaded  camera_config_id=%s", camera_config_id)
+                    except Exception as exc:
+                        log.error(
+                            "Homography reload failed  camera_config_id=%s: %s",
+                            camera_config_id, exc,
+                        )
+        except asyncio.CancelledError:
+            try:
+                await pubsub.unsubscribe(channel)
+                await pubsub.aclose()
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            log.warning("Reload watcher error  channel=%s: %s — retrying in 5s", channel, exc)
+            await asyncio.sleep(5)
+
+
 async def _grpc_health_ping(addr: str) -> bool:
     """Return True if the gRPC health endpoint reports SERVING."""
     try:
@@ -644,10 +691,16 @@ async def run_daemon(settings) -> None:
     )
 
     # ── Connections ───────────────────────────────────────────────────────────
-    local_redis  = aioredis.Redis.from_url(settings.local_redis_url, decode_responses=False)
-    server_redis = aioredis.Redis.from_url(settings.server_redis_url, decode_responses=False)
+    local_redis = aioredis.Redis.from_url(settings.local_redis_url, decode_responses=False)
+
+    # R7: server Redis connection uses TLS (rediss:// scheme required in SERVER_REDIS_URL)
+    _server_redis_kwargs = dict(decode_responses=False, socket_connect_timeout=5, socket_timeout=10, retry_on_timeout=True)
+    if settings.server_redis_url.startswith("rediss://"):
+        _server_redis_kwargs["ssl_ca_certs"] = settings.redis_ca_cert_path
+    server_redis = aioredis.Redis.from_url(settings.server_redis_url, **_server_redis_kwargs)
+
     # Sync Redis client for LocalIdentityManager counter persistence
-    sync_redis   = _sync_redis.Redis.from_url(settings.local_redis_url, decode_responses=True)
+    sync_redis = _sync_redis.Redis.from_url(settings.local_redis_url, decode_responses=True)
 
     async with PostgresPersistence(
         database_url=settings.database_url_server,
@@ -674,6 +727,12 @@ async def run_daemon(settings) -> None:
 
         # ── Health service background task ────────────────────────────────────
         health_task = asyncio.create_task(_run_health_service(settings))
+
+        # ── R5: homography reload subscription (server Redis pub/sub) ─────────
+        reload_task = asyncio.create_task(
+            _watch_reload_signals(settings.camera_config_id, projector, persistence.pool, server_redis),
+            name=f"reload-watch-{settings.camera_id}",
+        ) if settings.camera_config_id else None
 
         # ── Manifest consumer (local Redis, IEP1 stream) ──────────────────────
         consumer = RedisStreamFrameSource(
@@ -752,6 +811,9 @@ async def run_daemon(settings) -> None:
                     maxlen=500,
                     approximate=True,
                 )
+                # XACK fires after centroids + batch_complete are written.
+                # Trade-off: IEP3 orphan sweep is the compensating control for
+                # any partial state if IEP2 crashes post-XACK. See M4-S3 R7.
                 await consumer.ack(message_id)
                 await _cleanup_frames(manifest)
 
@@ -764,11 +826,13 @@ async def run_daemon(settings) -> None:
             log.info("IEP2 daemon cancelled  camera=%s", settings.camera_id)
             raise
         finally:
-            health_task.cancel()
-            try:
-                await health_task
-            except asyncio.CancelledError:
-                pass
+            for task in (health_task, reload_task):
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
             await yolo_client.close()
             await osnet_client.close()
             await consumer.close()
