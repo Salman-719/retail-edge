@@ -457,7 +457,11 @@ async def _request_generator():
 
 # ── EEP connection ─────────────────────────────────────────────────────────────
 
-def _load_channel_credentials() -> grpc.ChannelCredentials:
+def _load_channel_credentials() -> grpc.ChannelCredentials | None:
+    """Load CA cert for TLS. Returns None in dev mode (cert file absent or unset)."""
+    import os as _os
+    if not GRPC_CA_CERT_PATH or not _os.path.exists(GRPC_CA_CERT_PATH):
+        return None
     with open(GRPC_CA_CERT_PATH, "rb") as f:
         ca_cert = f.read()
     return grpc.ssl_channel_credentials(root_certificates=ca_cert)
@@ -473,9 +477,18 @@ _CHANNEL_OPTIONS = [
 
 async def _connect_to_eep(grpc_url: str, store_id: str, agent_version: str) -> None:
     credentials = _load_channel_credentials()
-    async with grpc.aio.secure_channel(grpc_url, credentials, options=_CHANNEL_OPTIONS) as channel:
+    if credentials:
+        channel_ctx = grpc.aio.secure_channel(grpc_url, credentials, options=_CHANNEL_OPTIONS)
+    else:
+        logger.warning(
+            "gRPC TLS disabled — GRPC_CA_CERT_PATH=%s not found (dev mode)",
+            GRPC_CA_CERT_PATH,
+        )
+        channel_ctx = grpc.aio.insecure_channel(grpc_url, options=_CHANNEL_OPTIONS)
+
+    async with channel_ctx as channel:
         stub     = AgentServiceStub(channel)
-        metadata = (("x-agent-token", AGENT_SECRET),)
+        metadata = (("x-agent-token", AGENT_SECRET),) if AGENT_SECRET else ()
         hb_task  = asyncio.create_task(_heartbeat_loop(store_id, agent_version))
         wt_task  = asyncio.create_task(_iep1_health_watcher())
         try:

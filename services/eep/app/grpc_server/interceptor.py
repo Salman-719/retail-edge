@@ -25,6 +25,10 @@ class AgentAuthInterceptor(grpc.aio.ServerInterceptor):
         continuation: Callable,
         handler_call_details: grpc.HandlerCallDetails,
     ):
+        # Dev mode: if no shared secret configured, bypass auth entirely.
+        if not _AGENT_SECRET:
+            return await continuation(handler_call_details)
+
         metadata = dict(handler_call_details.invocation_metadata)
         token = metadata.get("x-agent-token", "")
 

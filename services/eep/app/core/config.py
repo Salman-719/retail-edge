@@ -50,9 +50,11 @@ class Settings(BaseSettings):
 
     # ── gRPC TLS / Auth ──────────────────────────────────────────────────────
     GRPC_PORT: int = Field(default=50051)
-    GRPC_SERVER_CERT_PATH: str = Field(...)   # path to PEM server certificate
-    GRPC_SERVER_KEY_PATH:  str = Field(...)   # path to PEM server private key
-    AGENT_SECRET: str = Field(...)            # shared secret; edge agents present via x-agent-token
+    # Empty string = dev mode: gRPC runs insecure, auth is disabled.
+    # Must be set to real cert paths in staging/production.
+    GRPC_SERVER_CERT_PATH: str = Field(default="")
+    GRPC_SERVER_KEY_PATH:  str = Field(default="")
+    AGENT_SECRET: str = Field(default="")  # empty = dev mode (no auth check)
 
     # ── Feature flags ────────────────────────────────────────────────────────
     # Explicit false default — never rely on absence of this var.

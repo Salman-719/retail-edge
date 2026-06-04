@@ -4,7 +4,9 @@
 x-shared-config: &shared-config
   WINDOW_SECONDS: "${WINDOW_SECONDS:-60}"
   DATABASE_URL_SERVER: "postgresql://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@pgbouncer:5432/${POSTGRES_DB:-retailvision}"
-  REDIS_URL: "redis://redis:6379/0"
+  # Server Redis URL — used by IEP3, live_bridge, and edge_agent (for IEP2 ConfigMaps).
+  # IEP1 uses LOCAL_REDIS_URL instead. EEP uses REDIS_URL (unchanged).
+  SERVER_REDIS_URL: "redis://redis:6379/0"
 
 services:
   # ─── Infrastructure ───────────────────────────────────────────────────────────
@@ -127,6 +129,11 @@ services:
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
       S3_BUCKET: ${S3_BUCKET:-retailvision}
+      # EEP reads REDIS_URL (not SERVER_REDIS_URL) — keep explicit
+      REDIS_URL: "redis://redis:6379/0"
+      # gRPC — empty cert paths enable insecure dev mode (no TLS, no auth check).
+      # Set to real cert paths + a strong secret in staging/production.
+      AGENT_SECRET: "${AGENT_SECRET:-dev-agent-secret}"
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
       SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -164,7 +171,8 @@ services:
       context: ./services/iep1_ingestion
       dockerfile: Dockerfile
     environment:
-      REDIS_URL: "redis://redis:6379/0"
+      # IEP1 writes to edge-local Redis; in compose both are the same instance
+      LOCAL_REDIS_URL: "redis://redis:6379/0"
       IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
       IEP1_HEALTH_SOCK: "unix:///tmp/iep1-sockets/iep1_health.sock"
       TMPFS_FRAME_ROOT: /dev/shm/frames
@@ -265,16 +273,19 @@ services:
     environment:
       <<: *shared-config
       STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
-      EXPECTED_CAMERAS: ${EXPECTED_CAMERAS:-}
+      # EXPECTED_CAMERAS removed — IEP3 now reads expected camera count from DB
       COORDINATOR_TIMEOUT_S: ${COORDINATOR_TIMEOUT_S:-120}
       REID_THRESHOLD: ${REID_THRESHOLD:-0.75}
       MAX_SPEED_MPS: ${MAX_SPEED_MPS:-1.5}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-512}
-      SELECTION_WEIGHT_AREA: ${SELECTION_WEIGHT_AREA:-0.7}
-      SELECTION_WEIGHT_CONFIDENCE: ${SELECTION_WEIGHT_CONFIDENCE:-0.3}
+      CENTROID_EMA_ALPHA: ${CENTROID_EMA_ALPHA:-0.3}
+      POSITION_WEIGHT_AREA: ${POSITION_WEIGHT_AREA:-0.7}
+      POSITION_WEIGHT_CONF: ${POSITION_WEIGHT_CONF:-0.3}
       GRACE_SECONDS: ${GRACE_SECONDS:-300.0}
       DEFAULT_FRAME_WIDTH: ${DEFAULT_FRAME_WIDTH:-1920}
       DEFAULT_FRAME_HEIGHT: ${DEFAULT_FRAME_HEIGHT:-1080}
+      EXPECTED_CAMERAS_REFRESH_BATCHES: ${EXPECTED_CAMERAS_REFRESH_BATCHES:-10}
+      ORPHAN_SWEEP_INTERVAL_BATCHES: ${ORPHAN_SWEEP_INTERVAL_BATCHES:-50}
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -309,7 +320,7 @@ services:
     ports:
       - "8010:8010"
     environment:
-      REDIS_URL: redis://redis:6379/0
+      SERVER_REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT_URL: http://minio:9000
       S3_PUBLIC_URL: ${S3_PUBLIC_URL:-http://localhost:9000}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
@@ -364,6 +375,7 @@ services:
       EEP_GRPC_URL: eep:50051
       STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
       AGENT_VERSION: ${AGENT_VERSION:-0.1.0}
+      AGENT_SECRET: "${AGENT_SECRET:-dev-agent-secret}"
       IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
       IEP1_HEALTH_SOCK: "unix:///tmp/iep1-sockets/iep1_health.sock"
     volumes:

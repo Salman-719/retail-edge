@@ -1,61 +1,50 @@
-# RetailVision AI
+# RetailVision
 
-An intelligent retail analytics platform that uses multi-camera computer vision to track customer movement, measure zone occupancy, and generate actionable insights for store managers.
+Multi-camera retail analytics platform. Tracks customers across cameras in real-time, measures zone occupancy, and produces canonical per-person trajectories for analytics.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  SERVER HOST  (Docker Compose / cloud)                                  │
-│                                                                         │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │  React Frontend  :3000  (Vite · React Router · Konva · Zustand)  │  │
-│  └─────────────────────────────┬─────────────────────────────────────┘  │
-│                                │ HTTP REST                              │
-│  ┌─────────────────────────────▼─────────────────────────────────────┐  │
-│  │  EEP  :8000 (REST) + :50051 (gRPC)                                │  │
-│  │  FastAPI · SQLAlchemy asyncpg · APScheduler · grpc.aio            │  │
-│  │  REST API · gRPC server · evaluate_schedules() every 60 s         │  │
-│  │  Orchestrator → starts IEP2 via local Docker socket               │  │
-│  └────────┬─────────────────────────────────────────────────────────┘  │
-│            │ /var/run/docker.sock                                       │
-│  ┌─────────▼───────────────────────────────────────────────────────┐   │
-│  │  iep2_{store}_{cam}   IEP2 Vision                               │   │
-│  │  XREADGROUP iep2_workers → S3 fetch → YOLOv8 → ByteTrack        │   │
-│  │  → LocalIdentityManager (ReID) → FloorProjector (homography)    │   │
-│  │  → INSERT tracking_history                                       │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                                                         │
-│  PostgreSQL :5432    Redis :6379    MinIO :9000/:9001                   │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  iep3_reconciliation  IEP3 Reconciliation (daemon, no port)     │   │
-│  │  XREADGROUP iep3-{store_id} ← stream:iep2:batch_complete        │   │
-│  │  BatchCoordinator → Reconciler (ReID, selector, state machine)  │   │
-│  │  → global_identities / global_tracking_history                  │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                                                         │
-│  IEP4 Alerts · IEP5 Analytics · IEP6 AI Agent (skeleton services)     │
-└───────────────────────────┬─────────────────────────────────────────────┘
-                            │ gRPC bidirectional stream
-                            │ (edge dials out to :50051, stream stays open)
-                            │ IEP1 pushes frames → MinIO S3 (reachable from server)
-                            │ IEP1 publishes manifests → Redis (reachable from server)
-┌───────────────────────────▼─────────────────────────────────────────────┐
-│  EDGE DEVICE                                                            │
-│                                                                         │
-│  Edge Agent  (Python daemon, no HTTP server)                            │
-│    grpc.aio client · 30 s heartbeat · exponential-backoff reconnect     │
-│    _handle_control() → docker_manager.start/stop_iep1()                 │
-│            │ /var/run/docker.sock (edge host)                           │
-│  ┌─────────▼───────────────────────────────────────────────────────┐   │
-│  │  iep1_{store}_{cam}   IEP1 Ingestion                            │   │
-│  │  Camera (RTSP or video file) → JPEG frames → MinIO S3           │   │
-│  │  60 s window → manifest → Redis XADD stream:iep1:{camera_id}    │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────┘
+CLOUD (Kubernetes / Docker Compose)
+┌──────────────────────────────────────────────────────────────────────┐
+│  React Frontend :3000                                                │
+│         │ HTTP REST                                                  │
+│  EEP  :8000 (REST) + :50051 (gRPC TLS)                              │
+│  FastAPI · SQLAlchemy asyncpg · APScheduler · grpc.aio              │
+│  Sends StartCamera/StopCamera to Edge Agent over gRPC stream        │
+│                                                                      │
+│  IEP3 Reconciliation (daemon, no port)                               │
+│  Consumes stream:iep2:batch_complete → cross-camera ReID            │
+│  → global_identities / global_tracking_history                      │
+│                                                                      │
+│  Live Bridge :8010  WebSocket → presigned S3 URLs                   │
+│  PostgreSQL + PgBouncer · Server Redis · MinIO (S3)                  │
+└──────────────────────┬───────────────────────────────────────────────┘
+                       │ gRPC TLS :50051 (edge dials out, stream stays open)
+┌──────────────────────▼───────────────────────────────────────────────┐
+│  EDGE DEVICE (k3s / Jetson)                                          │
+│                                                                      │
+│  Edge Agent (systemd · thin gRPC relay)                              │
+│    Translates StartCamera/StopCamera → k3s kubectl apply            │
+│    Manages per-camera IEP2 Deployments + ConfigMaps                 │
+│                                                                      │
+│  IEP1 daemon (k3s pod, one process for all cameras)                 │
+│    RTSP/video → JPEG frames → tmpfs → Redis XADD stream:iep1:{cam}  │
+│    60-second window manifests → edge-local Redis                    │
+│                                                                      │
+│  IEP2 vision (one k3s Deployment per camera, created by Edge Agent)  │
+│    XREADGROUP iep1-frames → YOLO → ByteTrack → ReID → homography    │
+│    → INSERT tracking_history → XADD stream:iep2:batch_complete      │
+│                                                                      │
+│  YOLO service + OSNet service (GPU, unix socket IPC)                 │
+│  Edge-local Redis (loopback-only, ephemeral)                         │
+└──────────────────────────────────────────────────────────────────────┘
+
+Redis topology
+  Edge-local Redis  127.0.0.1:6379   stream:iep1:{camera_id}   (ephemeral)
+  Server Redis      redis:6379        stream:iep2:batch_complete (persistent)
 ```
 
 ---
@@ -66,13 +55,14 @@ An intelligent retail analytics platform that uses multi-camera computer vision 
 |---|---|
 | Frontend | React 18, Vite, React Router v6, Konva.js, Zustand, Tailwind CSS |
 | API Gateway (EEP) | FastAPI 0.115, SQLAlchemy 2 async, Pydantic v2, APScheduler 3.10 |
-| Edge-Cloud Comms | gRPC (grpcio 1.64, bidirectional streaming) |
-| Computer Vision | YOLOv8 (Ultralytics), ByteTrack (boxmot), OpenCV |
+| Edge-Cloud Comms | gRPC (grpcio 1.64, TLS + shared-secret auth, bidirectional streaming) |
+| Computer Vision | YOLOv8 (Ultralytics), ByteTrack (boxmot), OSNet ReID |
 | Floor Projection | NumPy homography, Shapely polygons |
-| Database | PostgreSQL 15, asyncpg 0.29 |
-| Cache / Streams | Redis 7 (XREADGROUP consumer groups) |
+| Database | PostgreSQL 16 + PgBouncer 1.22, asyncpg 0.29 |
+| Cache / Streams | Redis 7.2 (XREADGROUP consumer groups, topology-split) |
 | Object Storage | MinIO (S3-compatible), boto3 |
-| Container Control | docker-py 7.1 (EEP starts IEP2; Edge Agent starts IEP1) |
+| Edge Orchestration | k3s 1.29, kubernetes Python client |
+| Cloud Deployment | Helm 3.14, cert-manager, external-secrets |
 | Containerisation | Docker, Docker Compose |
 
 ---
@@ -81,391 +71,456 @@ An intelligent retail analytics platform that uses multi-camera computer vision 
 
 ```
 retail-edge/
-├── docker-compose.yml              # All services: infra + EEP + IEPs + edge_agent
-├── pyproject.toml                  # pytest config (asyncio_mode=auto)
-├── codebase_audit.md               # Full technical spec for all services
+├── docker-compose.yml           # Full local dev stack
+├── docker-compose.dev.yml       # Dev overrides (DEBUG_MODE=true)
+├── charts/retailvision/         # Server-side Helm chart
+├── infra/
+│   ├── edge/base/               # k3s edge manifests (namespace, RBAC, inference services)
+│   ├── pgbouncer/               # PgBouncer config
+│   └── redis-local.conf         # Edge-local Redis config (loopback, ephemeral)
+├── scripts/
+│   ├── gen_dev_certs.sh         # Generate dev TLS certs (CA + EEP server cert)
+│   └── bootstrap-edge-k3s.sh   # Bootstrap a Jetson device with k3s
+├── docs/
+│   ├── decisions/               # Architecture Decision Records
+│   └── operations/              # Operational runbooks
 ├── services/
-│   ├── eep/                        # Enterprise Endpoint Processor (fully implemented)
-│   │   ├── proto/agent.proto       # gRPC contract (canonical)
-│   │   └── app/
-│   │       ├── api/routers/        # auth, stores, config, schedules, debug, …
-│   │       ├── core/               # database, config, scheduler, orchestrator, iep2_docker
-│   │       ├── grpc_server/        # registry, servicer, server (grpc.aio)
-│   │       ├── grpc_generated/     # agent_pb2.py, agent_pb2_grpc.py (committed)
-│   │       ├── models/             # SQLAlchemy ORM (Mapped[] style) — incl. CameraRuntimeSession
-│   │       ├── schemas/            # Pydantic v2 request/response schemas
-│   │       └── tasks/              # camera_scheduler.py (APScheduler job + pending_activation)
-│   ├── iep1_ingestion/             # Ingestion worker (fully implemented)
-│   │   └── app/
-│   │       ├── source/             # RtspSource, VideoFileSource
-│   │       ├── uploader.py         # S3Uploader
-│   │       ├── window.py           # WindowAccumulator
-│   │       ├── publisher.py        # WindowPublisher (Redis XADD)
-│   │       ├── runtime.py          # Iep1Runtime
-│   │       └── main.py             # CLI entry (--rtsp or --video)
-│   ├── iep2_vision/                # Vision worker (fully implemented)
-│   │   ├── detector/               # YOLOv8 wrapper
-│   │   ├── tracker/                # ByteTrack wrapper
-│   │   ├── reid/                   # ReID model (osnet_x1_0)
-│   │   ├── identity/               # LocalIdentityManager
-│   │   ├── persistence/            # PostgresPersistence (asyncpg)
-│   │   ├── projection/             # FloorProjector (homography + shapely)
-│   │   ├── ingest/                 # RedisStreamFrameSource (XREADGROUP)
-│   │   ├── app/
-│   │   │   └── main.py             # FastAPI dev server: /upload, /ws, /clear-tmp (dev only, not in Compose)
-│   │   ├── runtime.py              # IEP2Runtime (asynccontextmanager)
-│   │   └── main.py                 # CLI entry (--source video|redis)
-│   ├── edge_agent/                 # Edge Agent daemon (fully implemented)
-│   │   ├── proto/agent.proto       # Copy of EEP proto (must stay in sync)
-│   │   └── app/
-│   │       ├── grpc_generated/     # agent_pb2.py, agent_pb2_grpc.py (committed)
-│   │       ├── agent.py            # run_agent, heartbeat loop, control handler
-│   │       ├── docker_manager.py   # start/stop/status IEP1 containers
-│   │       └── main.py             # Reads EEP_GRPC_URL, STORE_ID from env
-│   ├── iep3_reconciliation/        # Cross-camera reconciliation daemon (fully implemented)
-│   │   ├── app/
-│   │   │   ├── main.py             # Daemon entry point (no HTTP server)
-│   │   │   ├── settings.py         # Iep3Settings frozen dataclass
-│   │   │   ├── db.py               # asyncpg pool (module-level singleton)
-│   │   │   ├── repository.py       # All SQL — no ORM
-│   │   │   ├── coordinator.py      # BatchCoordinator (Redis XREADGROUP + timeout)
-│   │   │   ├── reader.py           # BatchReader (classify known vs new LocalIDs)
-│   │   │   ├── reid/
-│   │   │   │   ├── gates.py        # cross_camera_gate (pure function)
-│   │   │   │   └── matcher.py      # ReidMatcher (cosine similarity, GlobalID linking)
-│   │   │   ├── selection.py        # PositionSelector (canonical position per GlobalID)
-│   │   │   ├── state.py            # StateManager (ACTIVE→LOST→EXITED transitions)
-│   │   │   └── reconciler.py       # Reconciler (single transaction, orchestrates all)
-│   │   └── requirements.txt        # asyncpg, redis[asyncio], numpy, python-dotenv
-│   ├── iep4_alerts/                # Skeleton — not yet implemented
-│   ├── iep5_analytics/             # Skeleton — not yet implemented
-│   └── iep6_agent/                 # Skeleton — not yet implemented
-├── tests/
-│   ├── unit/
-│   │   └── iep3/                   # IEP3 unit tests (no DB/Redis required)
-│   │       ├── conftest.py         # FakeRepo, fixtures, shared helpers
-│   │       ├── test_gate.py        # cross_camera_gate (8 pure function cases)
-│   │       ├── test_matcher.py     # ReidMatcher (6 cases)
-│   │       ├── test_selector.py    # PositionSelector scoring (5 cases)
-│   │       └── test_state.py       # StateManager transitions (6 cases)
-│   └── e2e/
-│       ├── test_full_pipeline.py   # End-to-end integration test (Phase 8)
-│       └── test_iep3_reconciler.py # IEP3 3-camera reconciliation test (requires PostgreSQL)
-└── frontend/                       # React application
+│   ├── eep/                     # EEP: REST API + gRPC server + scheduler
+│   ├── edge_agent/              # Thin gRPC relay → k3s API
+│   ├── iep1_ingestion/          # Camera ingestion daemon
+│   ├── iep2_vision/             # Per-camera YOLO+ByteTrack+ReID worker
+│   ├── iep3_reconciliation/     # Cross-camera identity reconciliation daemon
+│   ├── live_bridge/             # WebSocket live frame relay
+│   ├── yolo_service/            # YOLO gRPC inference service (GPU)
+│   └── osnet_service/           # OSNet ReID embedding service (GPU)
+└── tests/
+    ├── unit/iep3/               # IEP3 pure-logic unit tests (no infrastructure)
+    └── e2e/                     # Integration + end-to-end tests
 ```
 
 ---
 
 ## Prerequisites
 
-- **Docker Desktop** (includes Docker Compose v2) — required for everything  
-  Download: [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
+- **Docker Desktop** (includes Docker Compose v2)
 - **Git**
+- **bash** (for the cert-generation script — Git Bash on Windows)
 
-No local Python or Node.js install is required. All services run inside Docker.
+No local Python or Node.js install required. All services run inside Docker.
 
-> **Docker socket access (Linux only):** EEP needs to manage IEP2 containers via the Docker socket. On Linux, add your user to the `docker` group: `sudo usermod -aG docker $USER`, then log out and back in.
+> **Linux Docker socket:** On Linux add your user to the `docker` group: `sudo usermod -aG docker $USER`, then log out and back in.
 
 ---
 
-## Quick Start (Full Stack)
+## Quick Start — Local Dev Stack
 
-### 1. Clone and configure
+### 1. Clone
 
 ```bash
 git clone <repo-url>
 cd retail-edge
 ```
 
-Copy the environment file. The defaults work out of the box for local development — no edits needed.
+### 2. Configure environment
 
-**macOS / Linux:**
 ```bash
+# macOS/Linux
 cp .env.example .env
-```
 
-**Windows (PowerShell):**
-```powershell
+# Windows PowerShell
 Copy-Item .env.example .env
 ```
 
-### 2. Build images
+The defaults in `.env` work for local development — no edits needed. All services run in **dev mode** (gRPC TLS disabled, no auth check) unless you generate certs (see [Generating Dev TLS Certs](#generating-dev-tls-certs) below).
+
+### 3. Build images
 
 ```bash
 docker compose build
 ```
 
-The first build takes several minutes (YOLOv8, OpenCV, grpcio).
+First build takes several minutes (YOLO, OpenCV, grpcio, k8s client).
 
-### 3. Start the full stack
+### 4. Start infrastructure + server services
 
 ```bash
-docker compose up -d postgres redis minio eep
+docker compose up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge
 ```
 
-Wait for all services to be healthy:
+Wait for healthy status:
 
 ```bash
 docker compose ps
 ```
 
-EEP is ready when you see it running. First startup automatically:
-- Runs schema migrations (creates all tables)
-- Creates the MinIO `retailvision` bucket
+EEP first startup automatically runs schema migrations and creates the MinIO bucket.
 
-### 4. Start the frontend
+### 5. Start the edge stack (dev mode — same machine)
 
 ```bash
-cd frontend
-npm install
-npm run dev
+docker compose --profile edge up -d iep1-daemon yolo-service osnet-service edge_agent_dev
 ```
 
-Open **http://localhost:5173**.
+### 6. Start the frontend
 
-Interactive API docs: **http://localhost:8000/docs**
+```bash
+cd frontend && npm install && npm run dev
+```
+
+Open **http://localhost:5173**. API docs at **http://localhost:8000/docs**.
 
 ---
 
-## Running the Full Pipeline (Scheduled or Manual)
+## Generating Dev TLS Certs
 
-The pipeline activates cameras through two paths: a time-based schedule, or a manual trigger from the API.
-
-### What "starting a camera" means
-
-1. EEP pushes a `StartCamera` gRPC message to the Edge Agent → Edge Agent starts an **IEP1** container **on the edge device** (reads RTSP, uploads frames to MinIO S3, publishes manifests to Redis).
-2. EEP starts an **IEP2** container **on the server host** via its local Docker socket (reads Redis manifests, runs YOLO+ByteTrack+ReID, writes `tracking_history` to PostgreSQL).
-
-### Step 1 — Start infrastructure and EEP
+For local dev, gRPC runs **insecure** by default (no certs needed). For testing TLS locally:
 
 ```bash
-docker compose up -d postgres redis minio eep
+bash scripts/gen_dev_certs.sh
 ```
 
-### Step 2 — Start the Edge Agent
+This creates under `certs/`:
+```
+certs/ca.crt          CA certificate
+certs/eep.crt         EEP server certificate (SAN: localhost, 127.0.0.1)
+certs/eep.key         EEP server private key
+```
 
-In production the Edge Agent runs on the physical edge device and connects to EEP over the network. For local development it runs on the same machine using the `edge` Docker Compose profile:
+Then set in your `.env` (or override in `docker-compose.dev.yml`):
+
+```
+GRPC_SERVER_CERT_PATH=/certs/eep.crt
+GRPC_SERVER_KEY_PATH=/certs/eep.key
+AGENT_SECRET=your-shared-secret-here
+GRPC_CA_CERT_PATH=/certs/ca.crt
+```
+
+Mount the `certs/` directory into the `eep` and `edge_agent_dev` containers:
+```yaml
+# docker-compose.dev.yml
+services:
+  eep:
+    volumes:
+      - ./certs:/certs:ro
+  edge_agent_dev:
+    volumes:
+      - ./certs:/certs:ro
+    environment:
+      GRPC_CA_CERT_PATH: /certs/ca.crt
+```
+
+---
+
+## Running Each Service Standalone
+
+Each service can be run in isolation for development and testing. All commands assume infrastructure (Postgres, Redis, MinIO) is running.
+
+### Start infrastructure only
 
 ```bash
-docker compose --profile edge up -d edge_agent
+docker compose up -d postgres pgbouncer redis minio
 ```
 
-The `edge` profile is intentionally excluded from the default `docker compose up` so the edge agent does not start automatically as part of the server stack.
+---
 
-Verify it connected:
+### EEP (Enterprise Event Processor)
 
+**What it does:** REST API + gRPC server. Manages stores, cameras, schedules, calibrations. Sends `StartCamera`/`StopCamera` to edge agents.
+
+**Start with Compose:**
+```bash
+docker compose up eep
+```
+
+**Run locally (outside Docker):**
+```bash
+cd services/eep
+pip install -e .[dev]
+
+WINDOW_SECONDS=60 \
+DATABASE_URL_EEP=postgresql+asyncpg://retailvision:retailvision_dev@localhost:5433/retailvision \
+REDIS_URL=redis://localhost:6379/0 \
+S3_ACCESS_KEY=retailvision \
+S3_SECRET_KEY=retailvision_dev \
+JWT_SECRET=dev-secret \
+AGENT_SECRET=dev-agent-secret \
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+**Smoke test:**
+```bash
+curl http://localhost:8000/health
+# {"service":"eep","status":"ok"}
+```
+
+**gRPC port check:**
+```bash
+docker compose exec eep python -c "
+import socket
+s = socket.create_connection(('localhost', 50051), 2)
+print('gRPC port reachable')
+s.close()
+"
+```
+
+**Run EEP unit/API tests:**
+```bash
+docker compose run --rm eep pytest services/eep/tests/ -v
+```
+
+---
+
+### IEP1 Ingestion Daemon
+
+**What it does:** Single daemon process managing all cameras on the edge device. Reads RTSP/video frames, uploads JPEGs to tmpfs, publishes 60-second window manifests to edge-local Redis.
+
+**Start with Compose:**
+```bash
+docker compose up iep1-daemon
+```
+
+**Process a local video file directly (CLI mode):**
+```bash
+docker compose run --rm \
+  -e LOCAL_REDIS_URL=redis://redis:6379/0 \
+  -e STORE_ID=00000000-0000-0000-0000-000000000001 \
+  -v $(pwd)/testing-data:/testing-data:ro \
+  iep1-daemon \
+  python -m services.iep1_ingestion.app.main \
+    --source video \
+    --file /testing-data/sample.mp4 \
+    --camera-id 00000000-0000-0000-0000-000000000002
+```
+
+**Verify Redis stream after one window (60 s):**
+```bash
+docker compose exec redis redis-cli XLEN stream:iep1:00000000-0000-0000-0000-000000000002
+# > 1 (one batch manifest)
+```
+
+**Logs:**
+```bash
+docker compose logs -f iep1-daemon
+```
+
+---
+
+### IEP2 Vision Worker
+
+**What it does:** Per-camera YOLO → ByteTrack → OSNet ReID → homography → `tracking_history`. One Deployment per active camera (created by Edge Agent on k3s; one compose service in dev).
+
+**Start with Compose (requires `CAMERA_ID`):**
+```bash
+CAMERA_ID=<physical_camera_uuid> docker compose up iep2_vision
+```
+
+**Process a local video file (daemon mode reading from Redis):**
+```bash
+docker compose run --rm \
+  -e CAMERA_ID=00000000-0000-0000-0000-000000000002 \
+  -e STORE_ID=00000000-0000-0000-0000-000000000001 \
+  -e LOCAL_REDIS_URL=redis://redis:6379/0 \
+  -e SERVER_REDIS_URL=redis://redis:6379/0 \
+  -e DATABASE_URL_SERVER=postgresql://retailvision:retailvision_dev@pgbouncer:5432/retailvision \
+  iep2_vision
+```
+
+**Verify tracking rows after one batch:**
 ```bash
 docker compose exec postgres psql -U retailvision -d retailvision \
-  -c "SELECT store_id, status, last_heartbeat_at FROM edge_agents;"
+  -c "SELECT COUNT(*), MIN(timestamp_ms), MAX(timestamp_ms) FROM tracking_history;"
 ```
 
-Expected: one row with `status = online`.
+**IEP2 Dev Console (video upload + live bbox overlay):**
+```bash
+docker compose --profile dev up -d iep2_dev
+# Then open http://localhost:5173/dev/vision
+```
 
-### Step 3 — Create a store and schedule via the API
+**Logs:**
+```bash
+docker compose logs -f iep2_vision
+```
 
-Use the frontend onboarding wizard (Steps 1–9) or the API directly. See **http://localhost:8000/docs**.
+---
 
-### Step 4 — Trigger a camera manually (debug endpoint)
+### IEP3 Reconciliation
 
-With `DEBUG_MODE=true` (the default in `docker-compose.yml`), a debug endpoint lets you push commands without waiting for a schedule:
+**What it does:** Cross-camera identity reconciliation daemon. Consumes `stream:iep2:batch_complete`, runs ReID matching, maintains `global_identities` and `global_tracking_history`. No HTTP port.
+
+**Start with Compose:**
+```bash
+STORE_ID=<store_uuid> docker compose up iep3_reconciliation
+```
+
+IEP3 reads the expected camera count from the database — no `EXPECTED_CAMERAS` env var needed.
+
+**Verify startup:**
+```bash
+docker compose logs iep3_reconciliation | head -20
+# Expected:
+# IEP3 starting  store_id=...  window_seconds=60.0
+# DB verified — all required tables present.
+# Redis verified.
+# Orphan sweep clean  {"store_id": "...", "deleted_globals": 0, "deleted_centroids": 0}
+# PEL health: 0 pending entries for group iep3-...
+# IEP3 ready — listening on stream:iep2:batch_complete
+```
+
+**After batches are reconciled:**
+```bash
+docker compose exec postgres psql -U retailvision -d retailvision -c "
+SELECT
+  (SELECT count(*) FROM global_identities WHERE state='active')    AS active_globals,
+  (SELECT count(*) FROM global_local_mapping WHERE is_active=TRUE) AS active_links,
+  (SELECT count(*) FROM global_tracking_history)                    AS canonical_positions;"
+```
+
+**Run IEP3 unit tests (no DB/Redis required):**
+```bash
+docker compose run --rm iep3_reconciliation pytest tests/unit/iep3/ -v
+# Expected: 25 tests pass (gate: 8, matcher: 6, selector: 5, state: 6)
+```
+
+**Run IEP3 integration test (requires Postgres):**
+```bash
+docker compose run --rm \
+  -e DATABASE_URL_SERVER=postgresql://retailvision:retailvision_dev@pgbouncer:5432/retailvision \
+  iep3_reconciliation pytest tests/e2e/test_iep3_reconciler.py -v -s
+# Expected: 2 tests pass — full 3-camera reconciliation scenario
+```
+
+---
+
+### Live Bridge
+
+**What it does:** Bridges `stream:iep2:live:{camera_id}` (server Redis) to WebSocket clients. Presigns S3 frame URLs. One background task per camera, starts on first client connection.
+
+**Start with Compose:**
+```bash
+docker compose up live_bridge
+```
+
+**Smoke test:**
+```bash
+curl http://localhost:8010/health
+# {"status":"ok"}
+```
+
+**WebSocket test (requires a running camera):**
+```bash
+# Connect to the live feed for a camera
+websocat ws://localhost:8010/ws/live/<physical_camera_uuid>
+# Should receive JSON frames: {"camera_id":..., "frame_url":..., "detections":[...]}
+```
+
+---
+
+### Edge Agent (dev mode)
+
+**What it does:** Thin gRPC relay. Translates `StartCamera`/`StopCamera` commands from EEP into `k3s kubectl apply` operations. In dev mode, runs alongside the main stack and uses Docker/Compose instead of real k3s.
+
+**Start with Compose:**
+```bash
+docker compose --profile edge up edge_agent_dev
+```
+
+**Verify connection:**
+```bash
+docker compose exec postgres psql -U retailvision -d retailvision \
+  -c "SELECT store_id, status, last_heartbeat_at, agent_version FROM edge_agents;"
+# Expected: one row with status = online
+```
+
+**Logs:**
+```bash
+docker compose logs -f edge_agent_dev
+# Expected every 30 s: heartbeat sent  store_id=...
+```
+
+---
+
+## Running the Full Local Pipeline
+
+### Step 1 — Start everything
 
 ```bash
-docker compose exec eep curl -s -X POST http://localhost:8000/api/debug/agent/command \
-  -H "Content-Type: application/json" \
-  -d '{"store_id":"<store_uuid>","camera_id":"<physical_camera_uuid>","action":"start","rtsp_url":"rtsp://test/stream"}'
+docker compose up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge
+docker compose --profile edge up -d iep1-daemon yolo-service osnet-service edge_agent_dev
 ```
 
-Or from your host machine:
+### Step 2 — Create a store, add cameras, configure schedules
+
+Use the frontend at **http://localhost:5173** (onboarding wizard steps 1–9) or the API at **http://localhost:8000/docs**.
+
+### Step 3 — Trigger a camera manually
 
 ```bash
 curl -s -X POST http://localhost:8000/api/debug/agent/command \
   -H "Content-Type: application/json" \
-  -d '{"store_id":"<store_uuid>","camera_id":"<physical_camera_uuid>","action":"start","rtsp_url":"rtsp://test/stream"}'
-```
-
-### Step 5 — Verify both containers started
-
-```bash
-docker ps --filter "name=iep1_" --format "table {{.Names}}\t{{.Status}}"
-docker ps --filter "name=iep2_" --format "table {{.Names}}\t{{.Status}}"
-```
-
-Expected: one `iep1_*` container and one `iep2_*` container both Running.
-
-### Step 6 — Check tracking rows
-
-After 60+ seconds (one batch window):
-
-```bash
-docker compose exec postgres psql -U retailvision -d retailvision \
-  -c "SELECT camera_id, COUNT(*), MIN(floor_x IS NOT NULL) FROM tracking_history GROUP BY camera_id;"
-```
-
----
-
-## Camera Schedules
-
-Schedules automate the start/stop cycle. The EEP scheduler fires every 60 seconds and evaluates all active schedules against the store's local timezone.
-
-### Create a schedule (API)
-
-```bash
-curl -s -X POST http://localhost:8000/api/store/<slug>/schedules \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
   -d '{
-    "camera_config_id": "<config_uuid>",
-    "days_of_week": [0,1,2,3,4],
-    "start_time": "09:00:00",
-    "end_time": "21:00:00",
-    "is_active": true
+    "store_id":   "<store_uuid>",
+    "camera_id":  "<physical_camera_uuid>",
+    "action":     "start",
+    "rtsp_url":   "rtsp://your-camera/stream"
   }'
 ```
 
-`days_of_week` values: `0` = Monday … `6` = Sunday (Python `weekday()` convention).
+> Requires `DEBUG_MODE=true` — enabled in `docker-compose.dev.yml`.
 
-### Manual trigger via schedule endpoint
-
-```bash
-curl -s -X POST http://localhost:8000/api/store/<slug>/schedules/<schedule_id>/trigger \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"action": "start"}'
-```
-
-Returns `202 Accepted` — workers start asynchronously in Docker.
-
----
-
-## Version Activation
-
-`StoreConfigVersion` follows a four-state lifecycle:
-
-```
-draft → pending_activation → active → archived
-```
-
-| State | Meaning |
-|---|---|
-| `draft` | Being edited — not deployed |
-| `pending_activation` | Scheduled for future activation (`activate_at` is set) |
-| `active` | Currently deployed — cameras run against this version |
-| `archived` | Superseded — kept for history |
-
-### Activate a draft version (API)
+### Step 4 — Verify the pipeline
 
 ```bash
-curl -s -X POST http://localhost:8000/api/store/<slug>/versions/draft/activate \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"mode": "immediate"}'
-```
+# IEP1: check manifest published
+docker compose exec redis redis-cli XLEN stream:iep1:<camera_uuid>
 
-**Immediate activation** (`mode: "immediate"`): stops cameras running on the old version, atomically archives it and activates the new one, restarts cameras with the new config. Returns `status: "activating"` with `cameras_restarted`.
-
-**Scheduled activation** (`mode: "scheduled"`): archives the old version immediately, sets the draft to `pending_activation` with the given timestamp.
-
-```bash
-  -d '{"mode": "scheduled", "activate_at": "2026-06-04T09:00:00Z"}'
-```
-
-Returns `status: "scheduled"`. The EEP scheduler fires the activation automatically when `activate_at` passes (checked every 60 seconds). The `activate_at` timestamp must be in the future.
-
-### Crash recovery on EEP restart
-
-On startup, EEP queries `camera_runtime_sessions` for any sessions with `stopped_at IS NULL` — these represent cameras whose IEP2 container died while EEP was down. EEP attempts to restart IEP2 for each and re-adopts the existing session row. If restart fails the session is closed with `stop_reason = 'crash'` so history stays complete.
-
----
-
-## Monitoring & Logs
-
-### Service logs
-
-```bash
-docker compose logs -f eep            # EEP + gRPC server + scheduler
-docker compose logs -f edge_agent     # heartbeats + container events
-docker compose logs -f iep1_ingestion # frame upload + batch windows
-docker compose logs -f iep2_vision    # detections + DB writes
-```
-
-### Verify edge agent connection
-
-```bash
+# IEP2: check tracking rows (after ~60 s)
 docker compose exec postgres psql -U retailvision -d retailvision \
-  -c "SELECT store_id, status, last_heartbeat_at, agent_version FROM edge_agents;"
-```
+  -c "SELECT COUNT(*) FROM tracking_history WHERE camera_id='<camera_uuid>';"
 
-### Check Redis consumer group state
-
-```bash
-# List pending messages (should be 0 after IEP2 processes them)
-docker compose exec redis redis-cli XPENDING stream:iep1:<camera_id> iep2_workers
-
-# Count messages in stream
-docker compose exec redis redis-cli XLEN stream:iep1:<camera_id>
-```
-
-### Check frames in MinIO
-
-```bash
-docker compose exec minio mc ls local/retailvision/frames/<camera_id>/
-```
-
-Or open the MinIO console: **http://localhost:9001** (user: `retailvision`, password: `retailvision_dev`).
-
-### Check tracking data
-
-```bash
+# IEP3: check global identities (after IEP2 fires batch_complete)
 docker compose exec postgres psql -U retailvision -d retailvision \
-  -c "SELECT local_id, timestamp_ms, floor_x, floor_y, zone_id, bbox_confidence \
-      FROM tracking_history \
-      WHERE camera_id = '<camera_id>' \
-      ORDER BY timestamp_ms DESC LIMIT 10;"
+  -c "SELECT count(*), state FROM global_identities GROUP BY state;"
 ```
 
 ---
 
-## Running Tests
+## Testing
 
-All tests run inside Docker. No local Python environment is required.
-
-### IEP3 unit tests (no DB or Redis required)
-
-The IEP3 unit tests run in isolation using fake repositories — no live services needed.
+### Unit tests — IEP3 (no infrastructure)
 
 ```bash
 docker compose run --rm iep3_reconciliation pytest tests/unit/iep3/ -v
 ```
 
-Expected: 25 tests pass (`test_gate`: 8, `test_matcher`: 6, `test_selector`: 5, `test_state`: 6).
+| Test file | What it tests | Count |
+|---|---|---|
+| `test_gate.py` | `cross_camera_gate` pure function (speed, NULL coords) | 8 |
+| `test_matcher.py` | `ReidMatcher` cosine similarity + GlobalID linking | 6 |
+| `test_selector.py` | `PositionSelector` scoring + canonical position | 5 |
+| `test_state.py` | `StateManager` ACTIVE→LOST→EXITED transitions | 6 |
 
-### IEP3 integration test (requires PostgreSQL)
-
-Tests the full 3-camera reconciliation scenario against a live database. No Redis, IEP1, IEP2, or EEP needed.
+### Integration test — IEP3 3-camera reconciliation (requires Postgres)
 
 ```bash
+docker compose up -d postgres pgbouncer
 docker compose run --rm \
-  -e DATABASE_URL=postgresql://retailvision:retailvision_dev@postgres:5432/retailvision \
+  -e DATABASE_URL_SERVER=postgresql://retailvision:retailvision_dev@pgbouncer:5432/retailvision \
   iep3_reconciliation pytest tests/e2e/test_iep3_reconciler.py -v -s
 ```
 
-Expected: 2 tests pass. All IEP3 invariants verified. Test data is cleaned up automatically via CASCADE delete.
+No Redis, IEP1, IEP2, or EEP needed. Test data is cleaned up via CASCADE delete.
 
-### End-to-end integration test (Phase 8)
-
-The e2e test verifies the complete pipeline: schedule trigger → IEP1 → Redis → IEP2 → `tracking_history`. It requires the full stack to be running and a camera to have processed at least 60 seconds of video.
+### End-to-end test — full pipeline (requires running stack)
 
 **Prerequisites:**
-- `docker compose up -d postgres redis minio eep` — all healthy
-- Edge Agent running and status = online in `edge_agents`
-- A camera triggered (see Running the Full Pipeline above)
-- At least 60 seconds elapsed since trigger
-
-**Run the test:**
+- Full stack running (step 1 of full pipeline above)
+- Edge Agent online (`status = online` in `edge_agents`)
+- A camera triggered and running for at least 60 seconds
 
 ```bash
 docker compose run --rm \
-  -e DATABASE_URL=postgresql+asyncpg://retailvision:retailvision_dev@postgres:5432/retailvision \
+  -e DATABASE_URL=postgresql+asyncpg://retailvision:retailvision_dev@pgbouncer:5432/retailvision \
   -e REDIS_URL=redis://redis:6379/0 \
   -e S3_ENDPOINT_URL=http://minio:9000 \
   -e S3_ACCESS_KEY=retailvision \
@@ -476,158 +531,300 @@ docker compose run --rm \
   eep pytest tests/e2e/test_full_pipeline.py -v
 ```
 
-> `E2E_CAMERA_ID` is `physical_cameras.id` — **not** `camera_configs.id`. These are different UUIDs.
+> `E2E_CAMERA_ID` is `physical_cameras.id` — not `camera_configs.id`. These are different UUIDs.
 
-**Expected output:**
-
-```
-tests/e2e/test_full_pipeline.py::test_rows_exist              PASSED
-tests/e2e/test_full_pipeline.py::test_local_id_is_uuid        PASSED
-tests/e2e/test_full_pipeline.py::test_store_id_matches        PASSED
-tests/e2e/test_full_pipeline.py::test_timestamp_ms_populated  PASSED
-tests/e2e/test_full_pipeline.py::test_floor_coords_populated  PASSED
-tests/e2e/test_full_pipeline.py::test_bbox_area_positive      PASSED
-tests/e2e/test_full_pipeline.py::test_bbox_confidence_range   PASSED
-tests/e2e/test_full_pipeline.py::test_consumer_group_exists   PASSED
-tests/e2e/test_full_pipeline.py::test_no_pending_messages     PASSED
-tests/e2e/test_full_pipeline.py::test_frames_uploaded_to_s3   PASSED
-10 passed in ...
-```
-
-### Smoke-test individual services
-
-**EEP health:**
-```bash
-docker compose exec eep curl -s http://localhost:8000/health
-# {"service":"eep","status":"ok"}
-```
-
-**gRPC port reachable:**
-
-macOS / Linux:
-```bash
-docker compose exec eep bash -c "apt-get install -qq netcat-openbsd > /dev/null && nc -zv localhost 50051"
-```
-
-Windows (PowerShell):
-```powershell
-docker compose exec eep python -c "import socket; s=socket.create_connection(('localhost',50051),2); print('gRPC reachable'); s.close()"
-```
-
-**Docker socket accessible from EEP:**
-```bash
-docker compose exec eep python -c "import docker; c=docker.from_env(); print('Docker ping:', c.ping())"
-# Docker ping: True
-```
-
-**IEP2 DB pool connects:**
-```bash
-docker compose exec eep python -c "
-import asyncio, asyncpg
-async def t():
-    p = await asyncpg.create_pool('postgresql://retailvision:retailvision_dev@postgres:5432/retailvision')
-    print('asyncpg pool ok, size:', p.get_size())
-    await p.close()
-asyncio.run(t())"
-```
-
-**Redis consumer group introspection:**
-```bash
-docker compose exec redis redis-cli XINFO GROUPS stream:iep1:<camera_id>
-```
+**Expected output: 10 tests pass** — rows exist, IDs are UUIDs, floor coords populated, S3 frames present, consumer group exists, no pending messages.
 
 ---
 
-## Environment Variables
+## Environment Variables Reference
 
-All variables have working defaults in `docker-compose.yml` for local development. Override by editing `.env` in the `retail-edge/` directory.
+### Shared (all pipeline services)
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOW_SECONDS` | `60` | Batch window in seconds — must be identical across IEP1, IEP2, IEP3 |
+| `DATABASE_URL_SERVER` | auto | `postgresql://...@pgbouncer:5432/retailvision` (asyncpg direct, no `+asyncpg`) |
 
 ### EEP
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+asyncpg://retailvision:retailvision_dev@postgres:5432/retailvision` | SQLAlchemy async URL |
-| `REDIS_URL` | `redis://redis:6379/0` | |
-| `S3_ENDPOINT_URL` | `http://minio:9000` | |
-| `S3_ACCESS_KEY` | `retailvision` | |
-| `S3_SECRET_KEY` | `retailvision_dev` | |
-| `S3_BUCKET` | `retailvision` | |
-| `JWT_SECRET` | `dev-secret-change-in-production` | **Must be changed in production** |
-| `DEBUG_MODE` | `true` | Enables `/api/debug/*` routes — disable in production |
-| `IEP2_IMAGE` | `retailvision-iep2:latest` | Docker image used to start IEP2 containers |
-| `DOCKER_NETWORK` | `retail-edge_default` | Network IEP2 containers join. Verify: `docker network ls \| grep retail` |
+| `DATABASE_URL_EEP` | required | `postgresql+asyncpg://...` (SQLAlchemy async dialect) |
+| `REDIS_URL` | `redis://redis:6379/0` | Server Redis |
+| `JWT_SECRET` | required | **Change in production** |
+| `S3_ENDPOINT_URL / ACCESS_KEY / SECRET_KEY / BUCKET` | required | MinIO / S3 |
+| `GRPC_PORT` | `50051` | gRPC listen port |
+| `GRPC_SERVER_CERT_PATH` | `` (empty) | PEM cert path — empty = insecure dev mode |
+| `GRPC_SERVER_KEY_PATH` | `` (empty) | PEM key path — empty = insecure dev mode |
+| `AGENT_SECRET` | `` (empty) | Shared secret for edge agents — empty = no auth (dev) |
+| `DEBUG_MODE` | `false` | Enables `/api/debug/*` routes — disable in production |
+| `IEP2_IMAGE` | `retailvision-iep2:latest` | Docker image for IEP2 containers (legacy compose mode) |
 
 ### Edge Agent
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `EEP_GRPC_URL` | yes | — | `host:50051`, e.g. `eep:50051` |
-| `STORE_ID` | yes | — | UUID of the store this agent serves |
-| `AGENT_VERSION` | no | `0.1.0` | Reported in heartbeats |
-| `IEP1_IMAGE` | no | `retailvision-iep1:latest` | Docker image used to start IEP1 containers |
-| `DOCKER_NETWORK` | no | `retail-edge_default` | Network IEP1 containers join |
+| Variable | Default | Description |
+|---|---|---|
+| `EEP_GRPC_URL` | required | `host:50051` |
+| `STORE_ID` | required | UUID of the store this agent serves |
+| `AGENT_SECRET` | `` (empty) | Must match EEP's `AGENT_SECRET` |
+| `GRPC_CA_CERT_PATH` | `/etc/retailvision/certs/ca.crt` | CA cert for TLS — missing file = insecure (dev) |
+| `SERVER_REDIS_URL` | `` | Passed to IEP2 ConfigMaps |
+| `DATABASE_URL_SERVER` | `` | Passed to IEP2 ConfigMaps |
+| `LOCAL_REDIS_URL` | `redis://localhost:6379/0` | Passed to IEP1 |
+| `HEARTBEAT_INTERVAL_S` | `30` | |
 
-### IEP1
+### IEP1 Ingestion Daemon
 
 | Variable | Default | Description |
 |---|---|---|
-| `S3_ENDPOINT_URL` | — | Frame upload destination |
-| `S3_ACCESS_KEY` | — | |
-| `S3_SECRET_KEY` | — | |
-| `S3_BUCKET` | `retailvision` | |
-| `REDIS_URL` | `redis://redis:6379/0` | Manifest publish target |
+| `LOCAL_REDIS_URL` | `redis://127.0.0.1:6379/0` | Edge-local Redis (loopback) |
+| `IEP1_CONTROL_SOCK` | `unix:///dev/shm/sockets/iep1_control.sock` | gRPC control socket |
+| `IEP1_HEALTH_SOCK` | `unix:///dev/shm/sockets/iep1_health.sock` | gRPC health socket |
+| `TMPFS_FRAME_ROOT` | `/dev/shm/frames` | Shared frame store path |
 
-### IEP2
+### IEP2 Vision Worker
 
 | Variable | Required | Description |
 |---|---|---|
-| `DATABASE_URL` | yes | `postgresql://...` (asyncpg direct, no `+asyncpg` prefix) |
-| `REDIS_URL` | — | Consumer group source |
-| `S3_ENDPOINT_URL / ACCESS_KEY / SECRET_KEY / BUCKET` | — | Frame download |
-| `LIVE_STREAM_ENABLED` | — | Enables LivePublisher (Redis pub/sub for browser live view) |
+| `CAMERA_ID` | yes | `physical_cameras.id` UUID |
+| `STORE_ID` | yes | |
+| `CAMERA_CONFIG_ID` | no | Set by Edge Agent; enables homography reload |
+| `LOCAL_REDIS_URL` | yes | Edge-local Redis (reads IEP1 stream) |
+| `SERVER_REDIS_URL` | yes | Server Redis (publishes `batch_complete`) |
+| `DATABASE_URL_SERVER` | yes | `postgresql://...` (no `+asyncpg` prefix) |
+| `YOLO_INPUT_SOCK` | yes | ZMQ IPC socket for YOLO inference |
+| `OSNET_INPUT_SOCK` | yes | ZMQ IPC socket for OSNet inference |
+| `TMPFS_FRAME_ROOT` | yes | Shared frame store path (reads IEP1 files) |
 
-### IEP3
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DATABASE_URL` | yes | — | `postgresql://...` (plain, no `+asyncpg`) |
-| `REDIS_URL` | — | `redis://redis:6379/0` | |
-| `STORE_ID` | yes | — | UUID of the store this IEP3 instance serves |
-| `EXPECTED_CAMERAS` | yes | — | Comma-separated camera UUIDs |
-| `COORDINATOR_TIMEOUT_S` | — | `120` | Partial-reconciliation timeout |
-| `REID_THRESHOLD` | — | `0.75` | Cosine similarity threshold |
-| `MAX_SPEED_MPS` | — | `1.5` | Spatial gate |
-| `EMBEDDING_DIM` | — | `512` | OSNet output dimension |
-| `SELECTION_WEIGHT_AREA` | — | `0.7` | Position scoring area weight |
-| `SELECTION_WEIGHT_CONFIDENCE` | — | `0.3` | Position scoring confidence weight |
-| `GRACE_SECONDS` | — | `300.0` | LOST → EXITED grace period (seconds) |
-| `DEFAULT_FRAME_WIDTH` | — | `1920` | Fallback frame width |
-| `DEFAULT_FRAME_HEIGHT` | — | `1080` | Fallback frame height |
-
-### Frontend (dev only)
+### IEP3 Reconciliation
 
 | Variable | Default | Description |
 |---|---|---|
-| `VITE_API_URL` | `http://localhost:8000` | EEP REST base URL |
-| `VITE_LIVE_BRIDGE_URL` | `ws://localhost:8010` | Live bridge WebSocket |
-| `VITE_IEP2_DEV_API_URL` | `http://localhost:8002` | Vision Debug Console — IEP2 FastAPI dev server. Only used in dev builds; remove with `VisionDebugConsole.jsx` before shipping. |
+| `STORE_ID` | required | Store UUID — one IEP3 instance per store |
+| `WINDOW_SECONDS` | required | Must match IEP1/IEP2 |
+| `DATABASE_URL_SERVER` | required | `postgresql://...` (no `+asyncpg`) |
+| `SERVER_REDIS_URL` | `redis://redis:6379/0` | Server Redis (reads `batch_complete` stream) |
+| `REID_THRESHOLD` | `0.75` | Cosine similarity threshold |
+| `MAX_SPEED_MPS` | `1.5` | Spatial gate max walking speed |
+| `GRACE_SECONDS` | `300.0` | LOST → EXITED grace period |
+| `EMBEDDING_DIM` | `512` | OSNet embedding dimension |
+| `CENTROID_EMA_ALPHA` | `0.3` | EMA smoothing for embedding updates |
+| `COORDINATOR_TIMEOUT_S` | `120.0` | Partial-batch timeout |
+| `POSITION_WEIGHT_AREA` | `0.7` | Canonical position scoring: bbox area weight |
+| `POSITION_WEIGHT_CONF` | `0.3` | Canonical position scoring: detection confidence weight |
+| `EXPECTED_CAMERAS_REFRESH_BATCHES` | `10` | How often to re-query DB for camera count |
+| `ORPHAN_SWEEP_INTERVAL_BATCHES` | `50` | How often to run orphan sweep (batches) |
+
+### Live Bridge
+
+| Variable | Default | Description |
+|---|---|---|
+| `SERVER_REDIS_URL` | `redis://redis:6379/0` | Server Redis (reads `stream:iep2:live:{cam}`) |
+| `S3_ENDPOINT_URL / ACCESS_KEY / SECRET_KEY / BUCKET` | required | Frame URL presigning |
+| `PRESIGNED_URL_EXPIRY` | `30` | Seconds until presigned URL expires |
+
+---
+
+## Deployment
+
+### Local Docker Compose
+
+The default `docker-compose.yml` runs the full stack with dev defaults. For debugging with `DEBUG_MODE=true` and live reload:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
+
+### Cloud — Server (Helm)
+
+Prerequisites: Kubernetes cluster, `cert-manager`, `external-secrets` installed.
+
+```bash
+# Dry run
+helm upgrade --install retailvision ./charts/retailvision \
+  -f charts/retailvision/values.staging.yaml \
+  --namespace retailvision \
+  --create-namespace \
+  --dry-run
+
+# Deploy staging
+helm upgrade --install retailvision ./charts/retailvision \
+  -f charts/retailvision/values.staging.yaml \
+  --namespace retailvision
+
+# Verify EEP
+kubectl rollout status deployment/eep -n retailvision --timeout=120s
+kubectl get pods -n retailvision
+```
+
+Add stores to IEP3:
+```bash
+helm upgrade retailvision ./charts/retailvision \
+  -f charts/retailvision/values.production.yaml \
+  --set "iep3.stores={store-uuid-1,store-uuid-2}" \
+  --namespace retailvision
+```
+
+### Cloud — Edge Device (k3s bootstrap)
+
+Run from the repo root on the Jetson device:
+
+```bash
+sudo bash scripts/bootstrap-edge-k3s.sh \
+  <store_uuid> \
+  <image_version> \
+  <eep_hostname_or_ip> \
+  <agent_secret>
+```
+
+This installs k3s (API server loopback-only), applies `infra/edge/base/` manifests, writes the edge agent env file, and installs the systemd service. After bootstrap:
+
+```bash
+# Verify edge services
+k3s kubectl get pods -n retailvision
+
+# Verify edge agent connected
+journalctl -u retailvision-edge-agent -f
+```
+
+### Updating edge images (zero-downtime rolling update)
+
+```bash
+k3s kubectl set image deployment/yolo-service \
+  yolo-service=retailvision-yolo-service:1.1.0 \
+  -n retailvision
+k3s kubectl rollout status deployment/yolo-service -n retailvision
+```
+
+For IEP2 pods (managed per-camera by Edge Agent):
+```bash
+# Update the IEP2_IMAGE env var in the edge agent, then restart it
+# The next StartCamera command will use the new image
+systemctl restart retailvision-edge-agent
+```
+
+---
+
+## Monitoring & Logs
+
+### Service logs
+
+```bash
+docker compose logs -f eep               # REST API + gRPC + scheduler
+docker compose logs -f edge_agent_dev    # heartbeats + K8s operations
+docker compose logs -f iep1-daemon       # frame upload + batch windows
+docker compose logs -f iep2_vision       # detections + DB writes
+docker compose logs -f iep3_reconciliation  # reconciliation + orphan sweep
+```
+
+### Check Redis streams
+
+```bash
+# IEP1 output (edge-local stream)
+docker compose exec redis redis-cli XLEN stream:iep1:<camera_uuid>
+
+# IEP2 output (batch_complete on server Redis)
+docker compose exec redis redis-cli XLEN stream:iep2:batch_complete
+
+# IEP3 consumer group state
+docker compose exec redis redis-cli XINFO GROUPS stream:iep2:batch_complete
+# Look for iep3-<store_uuid> entry; "lag" should be 0
+```
+
+### Check pending messages (should be 0 after processing)
+
+```bash
+docker compose exec redis redis-cli XPENDING \
+  stream:iep2:batch_complete iep3-<store_uuid>
+# In XACK-before-processing model, PEL should always be empty
+```
+
+### Check tracking data
+
+```bash
+docker compose exec postgres psql -U retailvision -d retailvision -c "
+SELECT camera_id, COUNT(*), MIN(floor_x IS NOT NULL)
+FROM tracking_history GROUP BY camera_id;"
+```
+
+### Check global identities (IEP3 output)
+
+```bash
+docker compose exec postgres psql -U retailvision -d retailvision -c "
+SELECT state, COUNT(*) FROM global_identities GROUP BY state;"
+```
+
+### MinIO Console
+
+**http://localhost:9001** — username: `retailvision`, password: `retailvision_dev`
+
+---
+
+## Data Flow
+
+```
+Camera (RTSP / video file)
+└─ IEP1 daemon: frame every 1/fps s
+     ├─ JPEG → tmpfs /dev/shm/frames/{cam}/{ts}.jpg
+     └─ every 60 s: manifest JSON → edge-local Redis XADD stream:iep1:{camera_id}
+          └─ IEP2 vision: XREADGROUP iep1-frames
+               ├─ Phase A (startup): drain un-ACKed messages
+               ├─ Phase B (normal): block-read new messages
+               ├─ per manifest: tmpfs read → YOLO → ByteTrack → OSNet → homography
+               ├─ INSERT tracking_history + UPSERT local_centroids
+               ├─ XADD server-Redis stream:iep2:batch_complete
+               └─ XACK edge-local-Redis stream:iep1:{camera_id}
+                    └─ IEP3: XREADGROUP iep3-{store_id} ← stream:iep2:batch_complete
+                         ├─ XACK immediately (before processing — see ADR-001)
+                         ├─ BatchCoordinator: wait N cameras or timeout
+                         └─ Reconciler (one asyncpg transaction per batch):
+                              ├─ BatchReader: classify known vs new LocalIDs
+                              ├─ ReidMatcher: cosine ReID → link/create GlobalIDs
+                              ├─ PositionSelector: score → INSERT global_tracking_history
+                              └─ StateManager: ACTIVE→LOST→EXITED
+```
+
+`local_id` is a UUID derived from the ByteTrack integer: `uuid.UUID(int=track_id)`.
+`floor_x`/`floor_y`/`zone_id` are `NULL` until a homography calibration exists.
+
+---
+
+## Schema
+
+### IEP1/IEP2 tables
+
+| Table | Key columns |
+|---|---|
+| `tracking_history` | `camera_id`, `local_id UUID`, `timestamp_ms BIGINT`, `floor_x/y`, `zone_id`, `bbox_confidence`, `bbox_area` |
+| `local_centroids` | `local_id UUID PK`, `store_id UUID`, `centroid BYTEA` (float32[512]) |
+| `camera_schedules` | `store_id`, `camera_config_id`, `days_of_week`, `start_time`, `end_time`, `is_active` |
+| `edge_agents` | `store_id UNIQUE`, `status`, `last_heartbeat_at`, `agent_version` |
+| `camera_runtime_sessions` | `store_id`, `physical_camera_id`, `started_at`, `stopped_at`, `stop_reason` |
+
+### IEP3 tables (cross-camera identity)
+
+| Table | Key columns |
+|---|---|
+| `global_identities` | `global_id UUID PK`, `store_id`, `state` (active/lost/exited), `first/last_seen_ts`, `last_floor_x/y`, `entry/exit_zone_id` |
+| `global_local_mapping` | `global_id`, `local_id`, `camera_id`, `is_active BOOL` — partial unique index on active `(global_id, camera_id)` |
+| `global_embeddings` | `(global_id, camera_id) PK`, `centroid BYTEA` |
+| `global_tracking_history` | `global_id`, `batch_number`, `timestamp_ms`, `floor_x/y`, `source_camera`, `selection_score` |
 
 ---
 
 ## gRPC Protocol
-
-EEP and the Edge Agent communicate over a single persistent bidirectional stream defined in `services/eep/proto/agent.proto`.
 
 ```
 Edge → Cloud:  AgentMessage  { Heartbeat | CameraStatusReport }
 Cloud → Edge:  ControlMessage { StartCamera | StopCamera }
 ```
 
-The first message from any agent **must** be a `Heartbeat`. EEP aborts the stream with `INVALID_ARGUMENT` otherwise.
+First message from any agent **must** be a `Heartbeat`. EEP aborts with `INVALID_ARGUMENT` otherwise.
 
-`StartCamera` carries the full camera config (RTSP URL, FPS, window seconds, S3 config, Redis URL) so the edge agent can start IEP1 with no additional DB calls.
+Auth: each RPC carries `x-agent-token: <shared_secret>` metadata. Empty `AGENT_SECRET` disables auth (dev mode).
 
-To regenerate stubs after editing the proto (run from `retail-edge/`):
+Regenerate stubs after editing `services/eep/proto/agent.proto`:
 
 ```bash
 docker compose run --rm eep python -m grpc_tools.protoc \
@@ -635,243 +832,52 @@ docker compose run --rm eep python -m grpc_tools.protoc \
   --python_out=services/eep/app/grpc_generated \
   --grpc_python_out=services/eep/app/grpc_generated \
   services/eep/proto/agent.proto
-```
-
-Then apply the import fix in `agent_pb2_grpc.py` (replace `import agent_pb2 as agent__pb2` with the package-qualified import) and repeat for `services/edge_agent/`.
-
----
-
-## Data Flow Summary
-
-```
-Camera (RTSP / video file)
-  └─ IEP1: frame every 1/fps seconds
-       ├─ JPEG → MinIO S3  (key: frames/{camera_id}/{batch}/{ts_ms}.jpg)
-       └─ every 60 s: manifest JSON → Redis XADD stream:iep1:{camera_id}
-            └─ IEP2: XREADGROUP iep2_workers
-                 ├─ Phase A (crash recovery): drain un-ACKed messages at startup
-                 ├─ Phase B (normal): block-read new messages (2 s timeout)
-                 ├─ per frame: S3 fetch → YOLOv8 → ByteTrack → ReID → homography → shapely
-                 ├─ INSERT tracking_history + UPSERT local_centroids
-                 ├─ XADD stream:iep2:batch_complete (after DB writes)
-                 └─ XACK stream:iep1:{camera_id} (after batch_complete published)
-                      └─ IEP3: XREADGROUP iep3-{store_id} ← stream:iep2:batch_complete
-                           ├─ BatchCoordinator: wait for all expected cameras (or timeout)
-                           └─ Reconciler (one asyncpg transaction per batch):
-                                ├─ BatchReader: classify known vs new LocalIDs
-                                ├─ ReidMatcher: cross-camera cosine ReID → link/create GlobalIDs
-                                ├─ PositionSelector: score cameras → INSERT global_tracking_history
-                                └─ StateManager: ACTIVE→LOST→EXITED transitions
-```
-
-`local_id` is stored as a UUID derived deterministically from the integer assigned by `LocalIdentityManager`: `uuid.UUID(int=local_id)`. The same person always maps to the same UUID within a single IEP2 process.
-
-`floor_x`/`floor_y`/`zone_id` are `NULL` when no active homography calibration exists for the camera.
-
----
-
-## Schema Overview
-
-### IEP1 / IEP2 tables
-
-| Table | Key Columns |
-|---|---|
-| `tracking_history` | `camera_id TEXT`, `local_id UUID`, `timestamp_ms BIGINT`, `floor_x`, `floor_y`, `zone_id`, `bbox_confidence REAL`, `bbox_area INTEGER` |
-| `local_centroids` | `local_id UUID PK`, `camera_id TEXT`, `store_id UUID`, `centroid BYTEA` (float32[512]), `updated_at_batch INT` |
-| `camera_schedules` | `store_id`, `camera_config_id`, `days_of_week INTEGER[]`, `start_time TIME`, `end_time TIME`, `is_active BOOLEAN` |
-| `edge_agents` | `store_id UNIQUE`, `status` (online/offline), `last_heartbeat_at`, `agent_version` |
-| `store_config_versions` | `status` (draft/pending_activation/active/archived), `activate_at TIMESTAMPTZ` (set when scheduled), `active_from`, `active_until` |
-| `camera_runtime_sessions` | Append-only. `store_id`, `physical_camera_id`, `camera_config_id`, `version_id`, `started_at`, `stopped_at`, `stop_reason` (schedule/manual/version_activation/crash/unknown). |
-
-### IEP3 tables (cross-camera identity)
-
-| Table | Key Columns |
-|---|---|
-| `global_identities` | `global_id UUID PK`, `store_id UUID`, `state` (active/lost/exited), `first_seen_ts BIGINT`, `last_seen_ts BIGINT`, `last_floor_x/y`, `lost_since_ts BIGINT`, `entry_zone_id`, `exit_zone_id` |
-| `global_local_mapping` | `global_id UUID`, `camera_id TEXT`, `local_id UUID`, `is_active BOOLEAN`, `linked_at_ts`, `last_seen_ts`. Partial unique index: one active `(global_id, camera_id)` pair. |
-| `global_embeddings` | `(global_id, camera_id) PK`, `centroid BYTEA` (float32[512]), `updated_at_ts BIGINT` |
-| `global_tracking_history` | `global_id UUID`, `store_id UUID`, `batch_number INT`, `timestamp_ms BIGINT`, `floor_x/y NOT NULL`, `source_camera TEXT`, `source_local_id UUID`, `selection_score FLOAT4` |
-
-All pre-existing tables (stores, physical_cameras, camera_configs, calibrations, zones, store_settings, …) are unchanged from the prior schema.
-
----
-
-## Vision Debug Console (dev only)
-
-A temporary React page for uploading a video, watching live bbox overlays as IEP2 processes it, and scrubbing annotated frames in a playback timeline. Includes a live DB log panel showing `tracking_history` inserts in real time.
-
-**This page is removed before shipping.** To remove it: delete `frontend/src/pages/VisionDebugConsole.jsx` and the corresponding `Route` block in `frontend/src/App.jsx`.
-
-### Running the IEP2 dev server
-
-The FastAPI upload/WebSocket server uses the existing `iep2_vision` Docker image but with the default `CMD` (FastAPI on port 8002). It is in `docker-compose.yml` under the `dev` profile so it never starts with the main stack by default.
-
-Start it alongside the main stack:
-
-```bash
-docker compose --profile dev up -d iep2_dev
-```
-
-Stop it when done:
-
-```bash
-docker compose --profile dev stop iep2_dev
-```
-
-### Accessing the page
-
-Start the frontend in dev mode (`npm run dev` in `frontend/`), then open:
-
-**http://localhost:5173/dev/vision**
-
-The page does not appear in any navigation menu — access it directly by URL. It is excluded from production builds (`vite build`) via a conditional dynamic import on `import.meta.env.DEV`.
-
-### Env var
-
-Add to `frontend/.env` (already in `.env.example`):
-
-```
-VITE_IEP2_DEV_API_URL=http://localhost:8002
-```
-
----
-
-## MinIO Console
-
-Browse uploaded frames and floor plans at **http://localhost:9001**
-
-| Field | Value |
-|---|---|
-| Username | `retailvision` |
-| Password | `retailvision_dev` |
-
----
-
-## IEP3 — Reconciliation Service
-
-IEP3 is a fully implemented long-running daemon (no HTTP port). It consumes `stream:iep2:batch_complete` events from Redis and runs cross-camera identity reconciliation once per 60-second batch.
-
-### Starting IEP3
-
-```bash
-docker compose up -d postgres redis iep3_reconciliation
-```
-
-IEP3 requires `EXPECTED_CAMERAS` to be set — a comma-separated list of `physical_cameras.id` UUIDs for the store:
-
-```bash
-EXPECTED_CAMERAS="<cam-uuid-1>,<cam-uuid-2>" docker compose up iep3_reconciliation
-```
-
-### Verifying IEP3
-
-Check logs for the startup sequence:
-```bash
-docker compose logs iep3_reconciliation
-```
-
-Expected:
-```
-IEP3 starting — store_id=... expected_cameras=[...]
-DB verified — all required tables present.
-Redis verified.
-IEP3 ready — listening on stream:iep2:batch_complete
-```
-
-After at least one reconciled batch:
-```bash
-docker compose exec postgres psql -U retailvision -d retailvision -c "
-SELECT
-    (SELECT count(*) FROM global_identities WHERE state='active')    AS active_globals,
-    (SELECT count(*) FROM global_local_mapping WHERE is_active=TRUE) AS active_links,
-    (SELECT count(*) FROM global_tracking_history)                    AS canonical_positions;"
-```
-
-### IEP3 Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `EXPECTED_CAMERAS` | — | **Required.** Comma-separated camera UUIDs for this store |
-| `COORDINATOR_TIMEOUT_S` | `120` | Seconds to wait for all cameras before partial reconciliation |
-| `REID_THRESHOLD` | `0.75` | Cosine similarity threshold for cross-camera matching |
-| `MAX_SPEED_MPS` | `1.5` | Spatial gate maximum walking speed (m/s) |
-| `EMBEDDING_DIM` | `512` | OSNet embedding dimension |
-| `SELECTION_WEIGHT_AREA` | `0.7` | Bbox area weight for canonical position scoring |
-| `SELECTION_WEIGHT_CONFIDENCE` | `0.3` | Detection confidence weight |
-| `GRACE_SECONDS` | `300.0` | Seconds before LOST GlobalID transitions to EXITED |
-| `DEFAULT_FRAME_WIDTH` | `1920` | Fallback resolution for scoring when camera config not found |
-| `DEFAULT_FRAME_HEIGHT` | `1080` | Fallback resolution for scoring when camera config not found |
-
-## IEP4 – IEP6 (Skeleton Services)
-
-Three additional pipeline stages exist as Docker skeleton services. They build and start, but contain no implementation logic.
-
-| Service | Port | Planned Function |
-|---|---|---|
-| `iep4_alerts` | 8004 | Zone occupancy thresholds, dwell-time alerts |
-| `iep5_analytics` | 8005 | Aggregated heatmaps, path analysis |
-| `iep6_agent` | 8006 | LLM-powered natural language insights |
-
-Start all services alongside the live services:
-
-```bash
-docker compose up -d
+# Then fix the relative import in agent_pb2_grpc.py and repeat for services/edge_agent/
 ```
 
 ---
 
 ## Troubleshooting
 
-**Edge Agent logs `NOT_FOUND` and keeps reconnecting after a fresh DB**
+**Edge Agent logs `NOT_FOUND` and keeps reconnecting**
+After `docker compose down -v` the DB is wiped but `STORE_ID` in `.env` still refers to the deleted store. Recreate the store via the API — the agent reconnects automatically (exponential backoff, 1 s → 60 s cap).
 
-After `docker compose down -v`, the database is wiped but the Edge Agent's `STORE_ID` in `.env` still refers to the deleted store. EEP rejects the gRPC connection with `NOT_FOUND` until the store is recreated via the API. The agent retries with exponential backoff (1 s → 60 s cap) and reconnects automatically within 60 seconds of store creation — no manual restart needed.
-
-**EEP can't reach Docker socket**
-
-Ensure `/var/run/docker.sock` is mounted (set in `docker-compose.yml`). On Linux, verify your user is in the `docker` group. On Docker Desktop for Mac/Windows, the socket is automatically available.
+**EEP won't start — `GRPC_SERVER_CERT_PATH` validation error**
+In dev mode, leave `GRPC_SERVER_CERT_PATH` and `GRPC_SERVER_KEY_PATH` empty (the default). EEP will start with gRPC insecure. If you get `GRPC_SERVER_CERT_PATH` errors, check that the fields in `config.py` have `Field(default="")` not `Field(...)`.
 
 **Edge Agent can't connect to EEP gRPC**
-
-Check `EEP_GRPC_URL` — inside Docker Compose it should be `eep:50051`, not `localhost:50051`.
-
+Inside Docker Compose use `eep:50051`, not `localhost:50051`. Check `EEP_GRPC_URL` in `.env`.
 ```bash
-docker compose logs edge_agent | grep "Connection failed"
+docker compose logs edge_agent_dev | grep "Connecting to EEP"
 ```
 
-**IEP2 containers not starting**
+**IEP3 orphan sweep warnings on startup**
+Normal after a crash — IEP3 cleaned up partial state left by the previous process. Expect `deleted_globals` and `deleted_centroids` to be small non-zero numbers immediately after a restart. Both return to 0 after the next periodic sweep.
 
-Check EEP logs for orchestrator errors:
-
+**IEP3 `SERVER_REDIS_URL` not connecting**
+IEP3 reads `SERVER_REDIS_URL` (not `REDIS_URL`). Confirm the compose service gets it from the `*shared-config` anchor:
 ```bash
-docker compose logs eep | grep -i "iep2\|orchestrat\|docker"
+docker compose exec iep3_reconciliation env | grep REDIS
+# SERVER_REDIS_URL=redis://redis:6379/0
 ```
 
-Ensure `IEP2_IMAGE` is built:
+**No rows in `tracking_history` after 60 s**
+1. `docker compose exec redis redis-cli XLEN stream:iep1:<camera_uuid>` — must be > 0 (IEP1 published a batch)
+2. Check IEP2 logs: `docker compose logs iep2_vision | grep -i "error\|batch"`
+3. Verify `CAMERA_ID` env var matches the camera UUID IEP1 published to
 
-```bash
-docker images | grep iep2
-```
-
-**No rows in `tracking_history`**
-
-1. Verify IEP2 is running: `docker ps --filter "name=iep2_"`
-2. Check Redis stream has messages: `docker compose exec redis redis-cli XLEN stream:iep1:<camera_id>`
-3. Check IEP2 logs for YOLO/DB errors: `docker logs iep2_<store>_<cam>`
-4. Verify homography calibration exists (floor_x/floor_y will be NULL without it — rows are still written)
+**PgBouncer `SET` errors in IEP3**
+IEP3 uses asyncpg direct queries with per-query timeouts (`conn.fetch(..., timeout=120.0)`) — no `SET statement_timeout`. If you see SET errors, something is bypassing the repository layer and using raw psycopg2.
 
 **`DOCKER_NETWORK` mismatch**
-
-The default Compose network name is `retail-edge_default`. If you cloned to a different directory the project name changes.
-
+Default Compose network is `retail-edge_default`. If you cloned to a different directory, the project name changes.
 ```bash
 docker network ls | grep retail
+# Set DOCKER_NETWORK in .env to the actual network name
 ```
 
-Set `DOCKER_NETWORK` in `.env` to the actual network name.
-
-**Re-running after schema changes**
-
+**Full reset**
 ```bash
-docker compose down -v          # removes all volumes including postgres data
-docker compose up -d --build    # full rebuild and fresh schema
+docker compose down -v          # wipes all volumes including postgres data
+docker compose up -d --build    # fresh rebuild and schema migration
 ```

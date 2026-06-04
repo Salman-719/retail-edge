@@ -1,7 +1,7 @@
 # RetailVision Codebase Audit
-**Date:** 2026-06-03  
-**Scope:** EEP, IEP1, IEP2, IEP3, Edge Agent — post Phase 1–8 + IEP3 reconciliation implementation  
-**Architecture:** Edge-cloud hybrid. EEP (server) orchestrates; IEP1 runs on the edge device (managed by the Edge Agent); IEP2 runs on the server alongside EEP (managed by EEP via the local Docker socket); Edge Agent brokers cloud→edge commands.
+**Date:** 2026-06-04
+**Scope:** EEP, IEP1–IEP3, Edge Agent, Live Bridge — post M1–M6 implementation
+**Architecture:** k3s edge + cloud Kubernetes. EEP and IEP3 run on the server. IEP1 (camera ingestion daemon), IEP2 (per-camera vision workers), YOLO, and OSNet run on the edge device under k3s. A thin Edge Agent translates EEP gRPC commands into `k3s kubectl apply` operations.
 
 ---
 
@@ -10,89 +10,79 @@
 1. [System Architecture](#1-system-architecture)
 2. [Infrastructure & Schema](#2-infrastructure--schema)
 3. [EEP — Enterprise Edge Platform](#3-eep--enterprise-edge-platform)
-4. [IEP1 — Ingestion Pipeline](#4-iep1--ingestion-pipeline)
-5. [IEP2 — Vision Pipeline](#5-iep2--vision-pipeline)
-6. [Edge Agent](#6-edge-agent)
-7. [gRPC Protocol](#7-grpc-protocol)
-8. [Cross-Service Data Flows](#8-cross-service-data-flows)
-9. [Environment Variables Reference](#9-environment-variables-reference)
-10. [Dependency Versions](#10-dependency-versions)
-11. [IEP3 — Reconciliation Pipeline](#11-iep3--reconciliation-pipeline)
-12. [Known Gaps & Next Steps](#12-known-gaps--next-steps)
+4. [IEP1 — Ingestion Daemon](#4-iep1--ingestion-daemon)
+5. [IEP2 — Vision Worker](#5-iep2--vision-worker)
+6. [IEP3 — Reconciliation Pipeline](#6-iep3--reconciliation-pipeline)
+7. [Edge Agent](#7-edge-agent)
+8. [Live Bridge](#8-live-bridge)
+9. [gRPC Protocol](#9-grpc-protocol)
+10. [Redis Topology](#10-redis-topology)
+11. [Cross-Service Data Flows](#11-cross-service-data-flows)
+12. [Deployment](#12-deployment)
+13. [Environment Variables Reference](#13-environment-variables-reference)
+14. [Dependency Versions](#14-dependency-versions)
+15. [Architecture Decision Records](#15-architecture-decision-records)
+16. [Known Gaps & Deferred Work](#16-known-gaps--deferred-work)
 
 ---
 
 ## 1. System Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  SERVER HOST  (Docker Compose in dev; cloud/k8s in prod)                 │
-│                                                                          │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │  EEP  :8000 (HTTP/REST) + :50051 (gRPC)                           │  │
-│  │  FastAPI + SQLAlchemy asyncpg + APScheduler + grpc.aio             │  │
-│  │                                                                    │  │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │  │
-│  │  │ REST API    │  │ gRPC Server  │  │ APScheduler              │  │  │
-│  │  │ (30+ routes)│  │ AgentService │  │ evaluate_schedules 60 s  │  │  │
-│  │  └──────┬──────┘  └──────┬───────┘  └──────────┬───────────────┘  │  │
-│  │         └────────────────┴──────────────────────┘                  │  │
-│  │                          │                                          │  │
-│  │         orchestrator.start/stop_camera_workers()                   │  │
-│  │           ├─ registry.send_command() → gRPC → Edge Agent → IEP1   │  │
-│  │           └─ iep2_docker.start_iep2() → local Docker socket        │  │
-│  └────────────────────────────────────┬─────────────────────────────┘  │
-│                                        │ /var/run/docker.sock           │
-│  ┌─────────────────────────────────────▼───────────────────────────┐   │
-│  │  iep2_{store}_{cam}   services/iep2_vision/                     │   │
-│  │  RedisStreamFrameSource (XREADGROUP iep2_workers)               │   │
-│  │    → S3 fetch JPEG → YOLOv8 → ByteTrack                         │   │
-│  │    → LocalIdentityManager (ReID)                                │   │
-│  │    → FloorProjector (homography + shapely zones)                │   │
-│  │    → asyncpg INSERT tracking_history                            │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-│  PostgreSQL :5432     Redis :6379     MinIO S3 :9000                    │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │  iep3_reconciliation  (daemon, no port)                          │   │
-│  │  XREADGROUP iep3-{store_id} ← stream:iep2:batch_complete         │   │
-│  │  BatchCoordinator → Reconciler (one asyncpg transaction/batch):  │   │
-│  │    BatchReader → ReidMatcher → PositionSelector → StateManager   │   │
-│  │  Writes: global_identities, global_local_mapping,                │   │
-│  │          global_embeddings, global_tracking_history              │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────┬────────────────────────────────────────┘
-                                  │ gRPC bidirectional stream :50051
-                                  │ (edge dials out, stream stays open)
-                                  │ IEP1 → MinIO S3  (server-reachable endpoint)
-                                  │ IEP1 → Redis     (server-reachable endpoint)
-┌─────────────────────────────────▼────────────────────────────────────────┐
-│  EDGE DEVICE                                                             │
-│                                                                          │
-│  Edge Agent  services/edge_agent/                                        │
-│    grpc.aio client · 30 s heartbeat · exponential-backoff reconnect      │
-│    _handle_control() → docker_manager.start/stop_iep1()                  │
-│                │ /var/run/docker.sock (edge host Docker daemon)           │
-│  ┌─────────────▼──────────────────────────────────────────────────┐     │
-│  │  iep1_{store}_{cam}   services/iep1_ingestion/                 │     │
-│  │  Camera (RTSP or video file)                                   │     │
-│  │    → RtspSource / VideoFileSource                              │     │
-│  │    → S3Uploader (JPEG frames → MinIO S3 on server)            │     │
-│  │    → WindowAccumulator (60 s window)                           │     │
-│  │    → WindowPublisher (Redis XADD on server)                    │     │
-│  └────────────────────────────────────────────────────────────────┘     │
-└──────────────────────────────────────────────────────────────────────────┘
+CLOUD  (Kubernetes / Docker Compose)
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│  React Frontend :3000                                                   │
+│         │ HTTP REST                                                     │
+│  EEP  :8000 (REST) + :50051 (gRPC TLS)                                  │
+│  FastAPI · SQLAlchemy asyncpg · APScheduler · grpc.aio                 │
+│  · AgentAuthInterceptor (x-agent-token HMAC)                           │
+│  Sends StartCamera/StopCamera to Edge Agent over gRPC stream            │
+│                                                                         │
+│  IEP3 Reconciliation (daemon, no port)                                  │
+│  XREADGROUP iep3-{store_id} ← stream:iep2:batch_complete               │
+│  BatchCoordinator → Reconciler (one asyncpg transaction/batch)         │
+│  Writes: global_identities, global_local_mapping,                      │
+│          global_embeddings, global_tracking_history                    │
+│                                                                         │
+│  Live Bridge :8010  (WebSocket → presigned S3 frame URLs)              │
+│                                                                         │
+│  PostgreSQL + PgBouncer · Server Redis · MinIO S3                       │
+└──────────────────────┬──────────────────────────────────────────────────┘
+                       │ gRPC TLS :50051
+                       │ (edge dials out, stream stays open)
+┌──────────────────────▼──────────────────────────────────────────────────┐
+│  EDGE DEVICE  (k3s, Jetson / ARM64)                                     │
+│                                                                         │
+│  Edge Agent  (systemd service, not a container)                         │
+│    grpc.aio TLS client · 30 s heartbeat · exponential-backoff reconnect │
+│    StartCamera → k3s apply ConfigMap + Deployment → wait IEP2 SERVING   │
+│              → AddCamera gRPC to IEP1 daemon                            │
+│    StopCamera → RemoveCamera gRPC to IEP1 daemon → k3s delete resources │
+│                                                                         │
+│  IEP1 daemon (k3s Deployment, single pod for all cameras)               │
+│    Receives AddCamera / RemoveCamera via gRPC control socket            │
+│    Per-camera: RTSP/video → JPEG → /dev/shm/frames/{cam}/{ts}.jpg      │
+│    60-second window → manifest → edge-local Redis XADD                  │
+│                                                                         │
+│  IEP2 vision (k3s Deployment per camera, created by Edge Agent)         │
+│    XREADGROUP iep1-frames ← edge-local Redis stream:iep1:{camera_id}   │
+│    tmpfs frame read → YOLO → ByteTrack → OSNet → homography → zones    │
+│    INSERT tracking_history → XADD server-Redis stream:iep2:batch_complete│
+│                                                                         │
+│  YOLO service + OSNet service (GPU, ZMQ IPC unix sockets)               │
+│  Edge-local Redis  127.0.0.1:6379  (loopback-only, ephemeral)           │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key design decisions:**
+### Key design decisions
 
-- **IEP1 runs on the edge device.** The Edge Agent manages it via the edge host's Docker socket. IEP1 uploads frames to MinIO S3 and publishes manifests to Redis — both of which are reachable from the edge device over the network.
-- **IEP2 runs on the server alongside EEP.** EEP starts IEP2 containers via the server's local Docker socket (mounted at `/var/run/docker.sock`). IEP2 reads from Redis and writes to PostgreSQL, both of which are co-located on the same host.
-- gRPC bidirectional stream (not polling) keeps the server-edge link alive. Edge dials out to `:50051` — no inbound firewall rules needed on the edge device.
-- Redis Streams with `XREADGROUP` give at-least-once delivery for IEP1 manifests. XACK fires after the DB write completes, not before.
-- `tracking_history` rows use `camera_id TEXT` (not UUID FK) to decouple IEP2 from EEP's camera_configs schema.
-- `local_id` in `tracking_history` is a UUID derived deterministically from an int via `uuid.UUID(int=local_id)`. The int comes from `LocalIdentityManager`. The UUID form satisfies the PK/indexing needs.
+- **k3s edge model.** IEP1 is a single always-running daemon pod. IEP2 pods are created/deleted per-camera by the Edge Agent via the k3s API. No Docker socket is used anywhere.
+- **Redis topology split.** `stream:iep1:{camera_id}` lives on edge-local Redis (loopback, ephemeral). `stream:iep2:batch_complete` lives on server Redis (persistent, TLS). IEP2 connects to both.
+- **gRPC TLS + shared secret.** EEP uses `add_secure_port` (cert-manager certificate). Edge Agent verifies the CA. Each RPC carries `x-agent-token` header verified by `AgentAuthInterceptor`. Empty cert paths / empty secret = insecure dev mode.
+- **XACK before reconciliation** (ADR-001). IEP3 XACKs each `batch_complete` message immediately on receipt, before calling `on_ready`. Compensating control is `orphan_sweep()` on startup and every `ORPHAN_SWEEP_INTERVAL_BATCHES` batches.
+- **IEP3 expected cameras from DB.** `camera_configs` count is queried at startup and refreshed every `EXPECTED_CAMERAS_REFRESH_BATCHES` batches. No `EXPECTED_CAMERAS` env var.
+- **Frame delivery via tmpfs, not S3.** IEP1 writes JPEGs to `/dev/shm/frames` (hostPath shared volume). IEP2 reads them by path from the manifest. No S3 round-trip on the edge device for frame delivery.
 
 ---
 
@@ -100,88 +90,74 @@
 
 ### 2.1 Docker Compose Services
 
-| Service | Image / Build | Ports | Key Config |
-|---------|--------------|-------|------------|
-| `postgres` | postgres:15-alpine | 5432 | schema.sql mounted as initdb |
-| `redis` | redis:7-alpine | 6379 | persistent volume |
-| `minio` | minio/minio:latest | 9000 (S3), 9001 (console) | S3-compatible object store |
-| `prometheus` | prom/prometheus:v2.51.0 | 9090 | |
-| `grafana` | grafana/grafana:10.4.1 | 3001→3000 | |
-| `frontend` | ./frontend | 3000→80 | |
-| `eep` | ./services/eep | 8000 (HTTP), 50051 (gRPC) | Docker socket mounted, DEBUG_MODE=true |
-| `iep1_ingestion` | ./services/iep1_ingestion | — | started by Edge Agent on demand |
-| `iep2_vision` | ./services/iep2_vision | — | started by EEP orchestrator on demand |
-| `iep3_reconciliation` | ./services/iep3_reconciliation | — (no port) | daemon; depends_on postgres+redis service_healthy; restart: on-failure |
+| Service | Build | Ports | Notes |
+|---------|-------|-------|-------|
+| `postgres` | postgres:15-alpine | 5432 | `schema.sql` as initdb; Alembic is authoritative migration path |
+| `pgbouncer` | pgbouncer:1.22.1 | 5433→5432 | Transaction pooling; `ignore_startup_parameters=extra_float_digits` |
+| `redis` | redis:7.2.4-alpine | 6379 | Persistent volume; used as server Redis in compose |
+| `minio` | minio/minio | 9000, 9001 | S3-compatible; stores floor plans + (optional) frames |
+| `prometheus` | prom/prometheus | 9090 | |
+| `grafana` | grafana/grafana | 3001→3000 | |
+| `eep` | ./services/eep | 8000, 50051 | Docker socket mounted; `REDIS_URL`, `AGENT_SECRET` |
+| `iep1-daemon` | ./services/iep1_ingestion | — | Single daemon pod; `LOCAL_REDIS_URL` |
+| `yolo-service` | ./services/yolo_service | 50052 | GPU; ZMQ IPC on shared `ipc-sockets` volume |
+| `osnet-service` | ./services/osnet_service | 50053 | GPU; ZMQ IPC on shared `ipc-sockets` volume |
+| `iep2_vision` | ./services/iep2_vision | — | `CAMERA_ID` required; `LOCAL_REDIS_URL` + `SERVER_REDIS_URL` |
+| `iep3_reconciliation` | ./services/iep3_reconciliation | — | Daemon; `SERVER_REDIS_URL` from shared-config anchor |
+| `live_bridge` | ./services/live_bridge | 8010 | `SERVER_REDIS_URL` |
+| `edge_agent_dev` | ./services/edge_agent | — | Profile `edge`; `AGENT_SECRET` required |
+| `iep2_dev` | ./services/iep2_vision | 8002 | Profile `dev`; FastAPI upload+WebSocket dev console |
 
-EEP mounts `/var/run/docker.sock` to manage IEP2 containers. `IEP2_IMAGE` and `DOCKER_NETWORK` are env vars.
+**Shared config anchor** (`x-shared-config`):
+```yaml
+WINDOW_SECONDS: "60"
+DATABASE_URL_SERVER: "postgresql://...@pgbouncer:5432/retailvision"
+SERVER_REDIS_URL: "redis://redis:6379/0"
+```
 
-### 2.2 Database Schema — Domain 9 Tables (new)
+**Shared volumes:**
+- `frame-store` (tmpfs) — IEP1 writes, IEP2 reads
+- `ipc-sockets` (tmpfs) — ZMQ sockets between YOLO/OSNet and IEP2
+- `iep1-sockets` (tmpfs) — gRPC unix sockets for IEP1 control/health
+
+### 2.2 Database Schema
+
+#### IEP1/IEP2 tables
 
 **`tracking_history`**
-
 ```sql
-CREATE TABLE IF NOT EXISTS tracking_history (
-    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    camera_id        TEXT        NOT NULL,          -- physical_camera UUID as text
-    local_id         UUID        NOT NULL,          -- from uuid.UUID(int=local_id)
-    timestamp_ms     BIGINT      NOT NULL,
-    floor_x          DOUBLE PRECISION,              -- NULL if no homography
-    floor_y          DOUBLE PRECISION,              -- NULL if no homography
-    zone_id          UUID        REFERENCES zones(id) ON DELETE SET NULL,
-    bbox_confidence  REAL        NOT NULL,
-    bbox_area        INTEGER     NOT NULL
+CREATE TABLE tracking_history (
+    id               UUID             PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id         UUID             NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    camera_id        TEXT             NOT NULL,         -- physical_camera UUID as text
+    local_id         UUID             NOT NULL,         -- uuid.UUID(int=bytetrack_id)
+    timestamp_ms     BIGINT           NOT NULL,
+    floor_x          DOUBLE PRECISION,                  -- NULL if no homography
+    floor_y          DOUBLE PRECISION,
+    zone_id          UUID             REFERENCES zones(id) ON DELETE SET NULL,
+    bbox_confidence  REAL             NOT NULL,
+    bbox_area        INTEGER          NOT NULL
 );
 CREATE INDEX idx_tracking_history_camera_ts ON tracking_history(camera_id, timestamp_ms);
 CREATE INDEX idx_tracking_history_store_ts  ON tracking_history(store_id, timestamp_ms);
 ```
 
-**`camera_schedules`**
-
-```sql
-CREATE TABLE IF NOT EXISTS camera_schedules (
-    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    camera_config_id UUID        NOT NULL REFERENCES camera_configs(id) ON DELETE CASCADE,
-    days_of_week     INTEGER[]   NOT NULL,          -- 0=Mon … 6=Sun (weekday() convention)
-    start_time       TIME        NOT NULL,
-    end_time         TIME        NOT NULL,
-    is_active        BOOLEAN     NOT NULL DEFAULT TRUE,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
-
-**`edge_agents`**
-
-```sql
-CREATE TABLE IF NOT EXISTS edge_agents (
-    id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_id          UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE UNIQUE,
-    status            TEXT        NOT NULL CHECK (status IN ('online', 'offline')) DEFAULT 'offline',
-    last_heartbeat_at TIMESTAMPTZ,
-    agent_version     TEXT,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
-
-`UNIQUE` on `store_id` is the conflict target for the UPSERT in `_upsert_agent()`.
-
-### 2.4 IEP3 Schema Additions
-
-**`local_centroids`** — written by IEP2, read by IEP3:
+**`local_centroids`** — written by IEP2, read by IEP3
 ```sql
 CREATE TABLE local_centroids (
     local_id         UUID  PRIMARY KEY,
     camera_id        TEXT  NOT NULL,
     store_id         UUID  NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    centroid         BYTEA NOT NULL,          -- float32[512] raw bytes (.tobytes())
+    centroid         BYTEA NOT NULL,   -- float32[512] raw bytes
     updated_at_batch INT   NOT NULL
 );
 ```
 
-**`global_identities`** — one row per store-wide person:
+**`camera_schedules`**, **`edge_agents`**, **`camera_runtime_sessions`** — see `services/eep/schema.sql`.
+
+#### IEP3 tables
+
+**`global_identities`**
 ```sql
 CREATE TABLE global_identities (
     global_id      UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -190,14 +166,15 @@ CREATE TABLE global_identities (
     last_seen_ts   BIGINT       NOT NULL,
     last_floor_x   DOUBLE PRECISION,
     last_floor_y   DOUBLE PRECISION,
-    state          VARCHAR(16)  NOT NULL DEFAULT 'active' CHECK (state IN ('active','lost','exited')),
+    state          VARCHAR(16)  NOT NULL DEFAULT 'active'
+                                CHECK (state IN ('active','lost','exited')),
     lost_since_ts  BIGINT,
-    entry_zone_id  UUID         REFERENCES zones(id) ON DELETE SET NULL,
-    exit_zone_id   UUID         REFERENCES zones(id) ON DELETE SET NULL
+    entry_zone_id  UUID REFERENCES zones(id) ON DELETE SET NULL,
+    exit_zone_id   UUID REFERENCES zones(id) ON DELETE SET NULL
 );
 ```
 
-**`global_local_mapping`** — maps per-camera LocalIDs to GlobalIDs:
+**`global_local_mapping`**
 ```sql
 CREATE TABLE global_local_mapping (
     id             BIGSERIAL PRIMARY KEY,
@@ -210,22 +187,22 @@ CREATE TABLE global_local_mapping (
     unlinked_at_ts BIGINT
 );
 -- Partial unique index: one active LocalID per (global_id, camera_id)
-CREATE UNIQUE INDEX idx_glm_one_active_per_camera ON global_local_mapping(global_id, camera_id)
-    WHERE is_active = TRUE;
+CREATE UNIQUE INDEX idx_glm_one_active_per_camera
+    ON global_local_mapping(global_id, camera_id) WHERE is_active = TRUE;
 ```
 
-**`global_embeddings`** — per-camera appearance centroid per GlobalID:
+**`global_embeddings`**
 ```sql
 CREATE TABLE global_embeddings (
     global_id     UUID   NOT NULL REFERENCES global_identities(global_id) ON DELETE CASCADE,
     camera_id     TEXT   NOT NULL,
-    centroid      BYTEA  NOT NULL,    -- float32[512]
+    centroid      BYTEA  NOT NULL,   -- float32[512]
     updated_at_ts BIGINT NOT NULL,
     PRIMARY KEY (global_id, camera_id)
 );
 ```
 
-**`global_tracking_history`** — canonical store-wide position per GlobalID per batch:
+**`global_tracking_history`**
 ```sql
 CREATE TABLE global_tracking_history (
     id              BIGSERIAL        PRIMARY KEY,
@@ -234,7 +211,7 @@ CREATE TABLE global_tracking_history (
     version_id      UUID             REFERENCES store_config_versions(id) ON DELETE SET NULL,
     batch_number    INT              NOT NULL,
     timestamp_ms    BIGINT           NOT NULL,
-    floor_x         DOUBLE PRECISION NOT NULL,    -- NOT NULL: calibration required for activation
+    floor_x         DOUBLE PRECISION NOT NULL,
     floor_y         DOUBLE PRECISION NOT NULL,
     zone_id         UUID             REFERENCES zones(id) ON DELETE SET NULL,
     source_camera   TEXT             NOT NULL,
@@ -245,236 +222,160 @@ CREATE TABLE global_tracking_history (
 
 ### 2.3 Redis Streams
 
-#### IEP1 → IEP2
+#### Edge-local Redis — `stream:iep1:{camera_id}`
 
-**Stream name:** `stream:iep1:{camera_id}`  
-**Consumer group:** `iep2_workers`  
-**Consumer name:** `iep2_{camera_id}` (per IEP2 process)
-
-Each message payload is a JSON-encoded manifest:
+- **Written by:** IEP1 daemon (one XADD per 60-second window)
+- **Read by:** IEP2 (one consumer per camera, group `iep2_workers`, consumer `iep2_{camera_id}`)
+- **MAXLEN:** 1000 (approximate), set on every XADD
+- **Payload:** JSON-encoded manifest
 
 ```json
 {
   "status": "ok" | "offline",
   "batch_number": 3,
   "window_start_ms": 1717350060000,
-  "window_end_ms": 1717350120000,
+  "window_end_ms":   1717350120000,
   "frame_count": 298,
   "expected_frames": 300,
   "gaps": [],
-  "frames": [[<ts_ms>, "<s3_key>"], ...]
+  "frames": [[<ts_ms>, "<tmpfs_path>"], ...]
 }
 ```
 
-IEP2 uses two-phase delivery:
-- **Phase A** (crash recovery): XREADGROUP with `ID="0"` drains un-ACKed messages from before restart.
-- **Phase B** (normal): XREADGROUP with `ID=">"` reads new messages, blocking 2 s per call.
+Frame paths are tmpfs paths (e.g. `/dev/shm/frames/{camera_id}/{ts_ms}.jpg`), not S3 keys.
 
-XACK fires at manifest level — after all frames in the manifest have been processed and written to the DB, and after the `batch_complete` event has been published to the IEP2→IEP3 stream.
+IEP2 XACK fires **after** `batch_complete` is published to server Redis and **after** `local_centroids` are flushed.
 
-#### IEP2 → IEP3
+#### Server Redis — `stream:iep2:batch_complete`
 
-**Stream name:** `stream:iep2:batch_complete`  
-**Consumer group:** `iep3-{store_id}` (one group per store; multiple IEP3 instances on different stores share the stream but each reads independently via its own group)  
-**Consumer name:** `iep3-{store_id}-worker`
+- **Written by:** IEP2 (one XADD per batch per camera)
+- **Read by:** IEP3 (group `iep3-{store_id}`, consumer `coordinator-1`)
+- **MAXLEN:** 500 (approximate), set on every XADD
 
-Each message payload (fields):
+Fields: `camera_id`, `store_id`, `batch_number`, `window_start_ms`, `window_end_ms` (all bytes).
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `camera_id` | bytes | Physical camera UUID (text) |
-| `store_id` | bytes | Store UUID |
-| `batch_number` | bytes | Integer batch counter |
-| `window_start_ms` | bytes | Batch window start (epoch ms) |
-| `window_end_ms` | bytes | Batch window end (epoch ms) |
+IEP3 XACKs **before** calling `on_ready` — see ADR-001.
 
-IEP2 publishes to this stream **after** `_flush_centroids` completes and **before** XACK of the IEP1 stream. This ordering guarantees that when IEP3 reads a `batch_complete`, all `tracking_history` and `local_centroids` rows for that batch are already committed to PostgreSQL.
+#### Server Redis — `iep2:reload:{camera_config_id}` (pub/sub)
 
-### 2.4 S3 Object Layout
+Published by EEP `draft.py` after homography calibration saves. IEP2 `_watch_reload_signals` coroutine subscribes and calls `projector.load()` to pick up new calibration without restart.
+
+### 2.4 S3 / MinIO Object Layout
 
 ```
 retailvision/
-  frames/{camera_id}/{batch_number}/{capture_ts_ms}.jpg
+  floor-plans/{store_id}/{filename}
+  calibration-files/{camera_config_id}/{filename}
+  frames/{camera_id}/{batch_number}/{capture_ts_ms}.jpg   (optional, legacy path)
 ```
 
-IEP1 uploads JPEG frames. IEP2 fetches them by key from the manifest. IEP1 deletes frames 300 s after the batch closes (TTL cleanup via `_pending_cleanup` deque).
+In the k3s deployment model, frames are delivered via tmpfs (not S3). S3 is used for floor plans, calibration images, and the optional Live Bridge frame delivery path.
 
 ---
 
 ## 3. EEP — Enterprise Edge Platform
 
-**Location:** `services/eep/`  
-**Runtime:** FastAPI + uvicorn, Python 3.11, asyncpg connection pool  
+**Location:** `services/eep/`
+**Runtime:** FastAPI + uvicorn, Python 3.11, asyncpg connection pool
 **Entry point:** `app/main.py` → `lifespan()` → `app = FastAPI(lifespan=lifespan)`
 
-### 3.1 Startup Sequence (`lifespan`)
+### 3.1 Startup Sequence
 
 ```python
 async with engine.begin() as conn:
-    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ"))
     await conn.run_sync(ModelBase.metadata.create_all)   # idempotent DDL
-
 ensure_bucket()                                          # MinIO bucket init
-asyncio.create_task(_cleanup_deactivated_users())        # daily background task
-await start_grpc_server()                                # gRPC on :50051 (before scheduler)
-start_scheduler()                                        # APScheduler evaluate_schedules every 60 s
+await start_grpc_server()                                # gRPC on :50051
+start_scheduler()                                        # APScheduler every 60 s
 yield
 stop_scheduler()
 await stop_grpc_server(grace=5.0)
 ```
 
-Order matters: gRPC must start before APScheduler because scheduler tasks call `registry.send_command()`.
+gRPC starts before APScheduler because scheduler tasks call `registry.send_command()`.
 
-### 3.2 Database Layer
+### 3.2 Configuration (`app/core/config.py`)
 
-**`app/core/database.py`**
+`pydantic_settings.BaseSettings`, `extra="ignore"`, env file `.env`.
 
-```python
-engine = create_async_engine(settings.DATABASE_URL, pool_size=10, max_overflow=20, pool_pre_ping=True)
-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+| Field | Default | Description |
+|-------|---------|-------------|
+| `DATABASE_URL_EEP` | required | `postgresql+asyncpg://...` (SQLAlchemy async) |
+| `WINDOW_SECONDS` | required | Must match IEP1/IEP2/IEP3 |
+| `REDIS_URL` | `redis://redis:6379/0` | Server Redis |
+| `JWT_SECRET` | required | Change in production |
+| `S3_*` | required | MinIO / S3 credentials |
+| `GRPC_PORT` | `50051` | gRPC listen port |
+| `GRPC_SERVER_CERT_PATH` | `""` | Empty = insecure dev mode |
+| `GRPC_SERVER_KEY_PATH` | `""` | Empty = insecure dev mode |
+| `AGENT_SECRET` | `""` | Empty = no auth check (dev mode) |
+| `DEBUG_MODE` | `False` | Enables `/api/debug/*` routes |
 
-async def get_db() -> AsyncSession:   # FastAPI dependency
-    async with AsyncSessionLocal() as session:
-        try: yield session
-        except: await session.rollback(); raise
-```
-
-`AsyncSessionLocal` is used directly (not via `session_scope()` — that function does not exist) for non-request DB access (scheduler, servicer, orchestrator). Callers are responsible for `await session.commit()`.
-
-**`app/core/config.py`** — `pydantic_settings.BaseSettings`, env file `.env`, `extra="ignore"`. All 15 settings fields have safe defaults for local dev.
-
-### 3.3 SQLAlchemy Models
-
-All models use SQLAlchemy 2.x `Mapped[T] = mapped_column(...)` style. Base class: `app/models/base.py`.
-
-| Model | Table | Notes |
-|-------|-------|-------|
-| `User` | `users` | `deactivated_at TIMESTAMPTZ` added at startup if absent |
-| `Store` | `stores` | `status`, `timezone`, `operating_hours JSONB` |
-| `StoreMember` | `store_members` | role: owner/manager/member |
-| `PhysicalCamera` | `physical_cameras` | `cloud_stream_url` → RTSP URL for IEP1 |
-| `StoreConfigVersion` | `store_config_versions` | status: draft/active/archived |
-| `CameraConfig` | `camera_configs` | FK → `physical_cameras`, `store_config_versions` |
-| `Calibration` | `calibrations` | `homography_matrix JSONB`, `is_current`, `method` |
-| `Zone` | `zones` | `points JSONB` (polygon vertices) |
-| `StoreSettings` | `store_settings` | `frame_sample_rate_fps INTEGER DEFAULT 5` |
-| `CameraSchedule` | `camera_schedules` | `days_of_week INTEGER[]`, `start_time TIME`, `end_time TIME` |
-| `AuditLog` | `audit_logs` | all write operations |
-
-`CameraSchedule` validation (Pydantic schemas):
-- `days_of_week`: values 0–6, no duplicates (`@field_validator`)
-- `start_time < end_time` (`@model_validator(mode="after")`)
-- `TriggerRequest.action`: must be `"start"` or `"stop"`
-
-### 3.4 REST API Routes
-
-All routes use `prefix="/api"` at registration. Store-scoped routes use `get_store_context` middleware for slug→store_id resolution and JWT validation.
-
-**Auth** (`/api/auth/*`)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/api/auth/register` | — | Create user account |
-| POST | `/api/auth/login` | — | Returns `access_token` + `refresh_token` |
-| POST | `/api/auth/refresh` | refresh JWT | Rotate tokens |
-| POST | `/api/auth/logout` | JWT | Revoke refresh token |
-| POST | `/api/auth/request-password-reset` | — | Send reset email |
-| POST | `/api/auth/reset-password` | — | Consume reset token |
-
-**Stores** (`/api/stores/*`)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/api/stores` | JWT | Create store (owner role assigned) |
-| GET | `/api/stores` | JWT | List user's stores |
-| GET | `/api/store/{slug}` | store member | Get store detail |
-| PATCH | `/api/store/{slug}` | owner/manager | Update store |
-| DELETE | `/api/store/{slug}` | owner | Soft-delete store |
-
-**Members, Invitations** (`/api/store/{slug}/members/*`)
-
-CRUD for `StoreMember`. Invitation flow with email delivery via `aiosmtplib`.
-
-**Config / Draft** (`/api/store/{slug}/draft/*`, `/api/store/{slug}/versions/*`)
-
-Full configuration lifecycle: draft creation, physical camera CRUD, camera config CRUD, calibration upload (homography correspondences → computed H matrix stored in JSONB), zone CRUD, version activation with `countdown_sec`, version sync event tracking.
-
-**Camera Schedules** (`/api/store/{slug}/schedules/*`)
-
-| Method | Path | Auth | Status | Description |
-|--------|------|------|--------|-------------|
-| GET | `/api/store/{slug}/schedules` | member | 200 | List all schedules |
-| POST | `/api/store/{slug}/schedules` | owner/manager | 201 | Create schedule; validates `camera_config_id` belongs to store |
-| PATCH | `/api/store/{slug}/schedules/{id}` | owner/manager | 200 | Partial update |
-| DELETE | `/api/store/{slug}/schedules/{id}` | owner/manager | 204 | Delete |
-| POST | `/api/store/{slug}/schedules/{id}/trigger` | owner/manager | 202 | Manual start/stop; calls orchestrator + syncs scheduler state |
-
-The trigger endpoint:
-1. Calls `orchestrator.start_camera_workers()` or `stop_camera_workers()`
-2. Calls `mark_running()` or `mark_stopped()` to keep `_running_cameras` in sync
-3. Returns 202 — workers start asynchronously in Docker, 202 signals "instruction issued"
-
-**Employees, Shifts** — full CRUD for `Employee`, `ShiftPattern`, `ShiftInstance` (not covered in this audit cycle).
-
-**Audit** (`/api/store/{slug}/audit`) — append-only `AuditLog` read endpoint.
-
-**Debug** (`/api/debug/agent/command`) — only registered when `DEBUG_MODE=true`.
+### 3.3 gRPC Server (`app/grpc_server/server.py`)
 
 ```python
-POST /api/debug/agent/command
-Body: { store_id, camera_id, action: "start"|"stop", rtsp_url?, target_fps?, window_seconds? }
-Response 202: { status: "sent", action, camera_id }
-Response 404: No agent connected for store
-```
-
-Directly calls `registry.send_command()` to push a `ControlMessage` to the connected edge agent.
-
-### 3.5 gRPC Server
-
-**`app/grpc_server/server.py`**
-
-```python
-_server: grpc.aio.Server | None = None
-
-async def start_grpc_server(port=50051):
-    _server = grpc.aio.server()
-    agent_pb2_grpc.add_AgentServiceServicer_to_server(AgentServiceServicer(), _server)
-    _server.add_insecure_port(f"[::]:{port}")
+async def start_grpc_server(port: int | None = None) -> grpc.aio.Server:
+    _server = grpc.aio.server(interceptors=[AgentAuthInterceptor()])
+    # TLS enabled only when both cert paths are set:
+    if cert_path and key_path:
+        _server.add_secure_port(f"[::]:{port}", _load_server_credentials())
+    else:
+        _server.add_insecure_port(f"[::]:{port}")   # dev mode
     await _server.start()
-
-async def stop_grpc_server(grace=5.0):
-    await _server.stop(grace=grace)
 ```
 
-Uses `grpc.aio` (async). Not the sync gRPC server — that would block the FastAPI event loop.
+Includes `grpc_health.v1` and `grpc_reflection` services. Health set to `SERVING` on start.
 
-**`app/grpc_server/registry.py`**
+### 3.4 Auth Interceptor (`app/grpc_server/interceptor.py`)
+
+`AgentAuthInterceptor` implements `grpc.aio.ServerInterceptor`.
+
+```python
+_AGENT_SECRET: bytes = os.environ.get("AGENT_SECRET", "").encode("utf-8")
+
+def _token_valid(provided: str) -> bool:
+    if not _AGENT_SECRET:
+        return False   # only called when secret is non-empty
+    return hmac.compare_digest(provided.encode("utf-8"), _AGENT_SECRET)
+
+async def intercept_service(self, continuation, handler_call_details):
+    if not _AGENT_SECRET:           # dev mode — bypass auth entirely
+        return await continuation(handler_call_details)
+    token = metadata.get("x-agent-token", "")
+    if not token or not _token_valid(token):
+        abort UNAUTHENTICATED
+    return await continuation(handler_call_details)
+```
+
+`hmac.compare_digest` is used for constant-time comparison (timing-attack safe).
+
+### 3.5 Registry (`app/grpc_server/registry.py`)
 
 ```python
 _connections: dict[str, asyncio.Queue] = {}  # store_id → queue
 
-async def register(store_id) -> asyncio.Queue    # replaces existing on reconnect
+async def register(store_id) -> asyncio.Queue
 def deregister(store_id)
-async def send_command(store_id, msg: ControlMessage) -> bool  # False if not connected
+async def send_command(store_id, msg: ControlMessage) -> bool
 def connected_stores() -> list[str]
 ```
 
-Module-level dict. Importable from anywhere in EEP. On agent reconnect, the old queue is replaced — the old writer task sees a dead stream and exits cleanly.
+Module-level dict. On agent reconnect, the old queue is replaced. `send_command` returns `False` (never raises) if no agent is connected.
 
-**`app/grpc_server/servicer.py`** — `AgentServiceServicer.Connect()`
+### 3.6 Servicer (`app/grpc_server/servicer.py`)
 
-Protocol:
-1. First message **must** be `Heartbeat`. Any other type → `context.abort(INVALID_ARGUMENT)`.
-2. `store_id` extracted from first heartbeat, registered in `registry`.
-3. Two concurrent tasks: `_reader` (processes incoming `AgentMessage`), `_writer` (drains queue → `context.write(ControlMessage)`).
-4. `asyncio.wait([reader_task, writer_task], return_when=FIRST_COMPLETED)` — whichever finishes first causes the other to be cancelled.
-5. `finally` block: `registry.deregister()`, UPSERT `edge_agents.status = 'offline'`.
+`Connect()` protocol:
+1. First `AgentMessage` must be `Heartbeat` → `INVALID_ARGUMENT` otherwise
+2. `store_id` extracted, registered in registry
+3. `_reader` task: processes incoming messages (`_upsert_agent` on heartbeat)
+4. `_writer` task: drains queue → `context.write(ControlMessage)`
+5. `asyncio.wait(FIRST_COMPLETED)` — whichever finishes first cancels the other
+6. `finally`: `registry.deregister()`, UPSERT `edge_agents.status='offline'`
 
-`_upsert_agent()` uses `ON CONFLICT (store_id)` UPSERT:
-
+`_upsert_agent`:
 ```sql
 INSERT INTO edge_agents (store_id, status, last_heartbeat_at, agent_version, updated_at)
-VALUES (:store_id::uuid, :status, :now, :version, :now)
+VALUES ($1::uuid, $2, $3, $4, $3)
 ON CONFLICT (store_id) DO UPDATE SET
     status            = EXCLUDED.status,
     last_heartbeat_at = EXCLUDED.last_heartbeat_at,
@@ -482,550 +383,443 @@ ON CONFLICT (store_id) DO UPDATE SET
     updated_at        = EXCLUDED.updated_at
 ```
 
-`agent_version` uses `COALESCE` — subsequent heartbeats where version is `None` (stop event) preserve the last-known version.
-
-### 3.6 Camera Schedule Evaluator
-
-**`app/core/scheduler.py`**
-
-```python
-scheduler = AsyncIOScheduler(timezone="UTC")
-
-def start_scheduler():
-    from app.tasks.camera_scheduler import evaluate_schedules  # lazy import avoids circular
-    scheduler.add_job(evaluate_schedules, trigger="interval", seconds=60,
-                      id="camera_schedule_evaluator", replace_existing=True, max_instances=1)
-    scheduler.start()
-
-def stop_scheduler():
-    scheduler.shutdown(wait=False)
-```
-
-`max_instances=1` prevents overlapping evaluations if a cycle takes >60 s.
+### 3.7 Scheduler & Orchestrator
 
 **`app/tasks/camera_scheduler.py`**
 
-```python
-_running_cameras: set[tuple[str, str]] = set()  # (store_id, camera_config_id)
-
-def mark_running(store_id, camera_config_id)   # called by trigger endpoint
-def mark_stopped(store_id, camera_config_id)   # called by trigger endpoint
-```
-
-`evaluate_schedules()` flow:
-1. Load all `is_active=true` schedules + store `timezone` via `_LOAD_SQL`
-2. `now_utc.astimezone(ZoneInfo(store_timezone))` → per-store local time
-3. `_should_run(row, now_local)`: `weekday() in days_of_week AND start_time <= current_time < end_time`
-4. `if should_run and key not in _running_cameras` → `await _on_camera_start(row)` → `_running_cameras.add(key)`
-5. `if not should_run and key in _running_cameras` → `await _on_camera_stop(row)` → `_running_cameras.discard(key)`
-
-Errors in `_on_camera_start`/`_on_camera_stop` are caught and logged. One camera failure never blocks others. DB load failure skips the entire tick.
-
-`_running_cameras` resets on EEP restart. This means a camera scheduled to run during an EEP restart will start again on the next 60 s tick rather than being double-started.
-
-### 3.7 Orchestrator
+`_running_cameras: set[tuple[str, str]]` — (store_id, camera_config_id). `evaluate_schedules()` fires every 60 s, checks per-store local time against schedule windows, calls `orchestrator.start/stop_camera_workers()`. `mark_running/mark_stopped()` called by the trigger endpoint to prevent double-starting.
 
 **`app/core/orchestrator.py`**
 
-`_load_camera_data()` query:
-
-```sql
-SELECT
-    cc.id                                   AS camera_config_id,
-    pc.id                                   AS physical_camera_id,
-    pc.cloud_stream_url                     AS rtsp_url,
-    COALESCE(ss.frame_sample_rate_fps, 5.0) AS target_fps
-FROM camera_configs cc
-JOIN store_config_versions scv ON scv.id = cc.version_id
-JOIN physical_cameras pc       ON pc.id  = cc.physical_camera_id
-LEFT JOIN store_settings ss    ON ss.store_id = scv.store_id
-WHERE cc.id = :camera_config_id AND scv.store_id = :store_id
-LIMIT 1
-```
-
 `start_camera_workers(store_id, camera_config_id)`:
-1. Load camera data (returns early with warning if `None`)
-2. Push `StartCamera` gRPC to edge agent via `registry.send_command()` (best-effort — logs warning if agent not connected, does not raise)
-3. Call `iep2_docker.start_iep2(...)` via `loop.run_in_executor(None, ...)` (mandatory — always runs regardless of IEP1 status)
+1. Load camera data: `camera_configs JOIN physical_cameras JOIN store_settings`
+2. `registry.send_command(StartCamera)` — best-effort (warn if agent disconnected)
+3. `iep2_docker.start_iep2(...)` via `run_in_executor` — legacy path, unused in k3s model
 
-`stop_camera_workers(store_id, camera_config_id)`:
-1. Load camera data
-2. Push `StopCamera` gRPC (best-effort)
-3. `iep2_docker.stop_iep2(...)` via executor (mandatory)
+In the k3s model, EEP sends `StartCamera` to the Edge Agent which applies k3s resources. The `iep2_docker` path is retained for dev-on-compose compatibility only.
 
-`window_seconds` is hardcoded to `60.0` in `StartCamera`. Must match IEP1 default and IEP2 batch window.
+### 3.8 Draft Calibration Router (`app/api/routers/draft.py`)
 
-### 3.8 IEP2 Docker Manager
-
-**`app/core/iep2_docker.py`**
+After every calibration save (`compute_homography_calibration`, `upload_calibration_files`), publishes a homography reload signal:
 
 ```python
-IEP2_IMAGE     = os.environ.get("IEP2_IMAGE",     "retailvision-iep2:latest")
-DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "retail-edge_default")
-
-def container_name(store_id, physical_camera_id) -> str:
-    return f"iep2_{store_id}_{physical_camera_id}"
-
-def start_iep2(store_id, physical_camera_id, camera_config_id,
-               database_url, redis_url, s3_endpoint_url,
-               s3_access_key, s3_secret_key, s3_bucket) -> None:
-    # 1. Remove existing same-named container with force=True (handles crash/restart)
-    # 2. containers.run(image, command=[...], environment={...},
-    #                   network=DOCKER_NETWORK, detach=True,
-    #                   restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
-
-def stop_iep2(store_id, physical_camera_id) -> None:
-    # container.stop(timeout=10); NotFound is silently ignored
-
-def get_iep2_status(store_id, physical_camera_id) -> str:
-    # "running" | "stopped"
+await redis.publish(f"iep2:reload:{config_id}", "homography")
 ```
 
-All functions are **synchronous** (docker-py makes blocking network calls). Always called via `asyncio.get_running_loop().run_in_executor(None, fn, ...)`.
+IEP2 `_watch_reload_signals` coroutine subscribes on server Redis and calls `projector.load()` without restarting the pod.
 
-EEP's own `DATABASE_URL`, `REDIS_URL`, `S3_*` env vars are forwarded directly to IEP2 containers. No separate IEP2 config.
+### 3.9 Debug Router (`app/api/routers/debug.py`)
 
-IEP2 container CLI:
+Only registered when `DEBUG_MODE=true`.
 
 ```
-python -m services.iep2_vision.main
-  --store-id        {store_id}
-  --camera-id       {physical_camera_id}
-  --source          redis
-  --camera-config-id {camera_config_id}
-```
-
-### 3.9 Generated gRPC Stubs (EEP)
-
-**`app/grpc_generated/agent_pb2.py`** — protobuf message classes (serialized descriptor, do not edit)  
-**`app/grpc_generated/agent_pb2_grpc.py`** — service stub + servicer base class
-
-Import fix applied: `from app.grpc_generated import agent_pb2 as agent__pb2` (grpcio-tools generates a bare `import agent_pb2` which breaks inside a package).
-
-Regeneration command (run from `retail-edge/`):
-```bash
-python -m grpc_tools.protoc \
-  -I services/eep/proto \
-  --python_out=services/eep/app/grpc_generated \
-  --grpc_python_out=services/eep/app/grpc_generated \
-  services/eep/proto/agent.proto
-# Then reapply the import fix in agent_pb2_grpc.py
+POST /api/debug/agent/command
+Body: { store_id, camera_id, action: "start"|"stop", rtsp_url?, target_fps?, window_seconds? }
+Response 202: { status: "sent", action, camera_id }
+Response 404: { error: "no agent connected for store_id" }
+Response 429: { error: "command queue full" }
 ```
 
 ---
 
-## 4. IEP1 — Ingestion Pipeline
+## 4. IEP1 — Ingestion Daemon
 
-**Location:** `services/iep1_ingestion/`  
-**Runtime:** Python 3.11, synchronous (no asyncio), one process per camera  
-**Entry point:** `python -m services.iep1_ingestion.app.main`  
-**Dockerfile pattern:** `WORKDIR /workspace`, `mkdir -p services/iep1_ingestion`, `COPY app/ services/iep1_ingestion/app/`, `touch services/__init__.py`
+**Location:** `services/iep1_ingestion/`
+**Runtime:** Python 3.11, asyncio, gRPC server (control + health unix sockets)
+**Model:** Single always-running daemon pod managing all cameras on the device. Camera lifecycle controlled via `AddCamera` / `RemoveCamera` gRPC from the Edge Agent.
 
-### 4.1 CLI Arguments
+### 4.1 Configuration (`app/daemon.py`)
 
-```
---store-id   required  Store identifier
---camera-id  required  Camera identifier  
---rtsp       optional  RTSP stream URL (mutually exclusive with --video)
---video      optional  Video file path (for dev/test)
---fps        float     Target FPS (default: 5.0)
---window     float     Batch window seconds (default: 60.0)
+```python
+LOCAL_REDIS_URL  = os.environ.get("LOCAL_REDIS_URL", "redis://127.0.0.1:6379/0")
+IEP1_CONTROL_SOCK = os.environ.get("IEP1_CONTROL_SOCK", "unix:///dev/shm/sockets/iep1_control.sock")
+IEP1_HEALTH_SOCK  = os.environ.get("IEP1_HEALTH_SOCK",  "unix:///dev/shm/sockets/iep1_health.sock")
+TMPFS_FRAME_ROOT  = os.environ.get("TMPFS_FRAME_ROOT",  "/dev/shm/frames")
 ```
 
-Exactly one of `--rtsp` or `--video` must be provided. `argparse.error()` enforces mutual exclusion.
+`LOCAL_REDIS_URL` connects to the edge-local Redis on loopback. No server Redis connection.
 
-### 4.2 Environment Variables
+### 4.2 Frame Delivery (tmpfs path)
+
+IEP1 writes JPEG frames to `{TMPFS_FRAME_ROOT}/{camera_id}/{timestamp_ms}.jpg`. Paths (not S3 keys) are included in the manifest. IEP2 reads by path from the same hostPath volume. No network round-trip for frame delivery.
+
+### 4.3 WindowPublisher (`app/publisher.py`)
+
+```python
+self._client.xadd(
+    f"stream:iep1:{camera_id}",
+    {"manifest": self._serialize(manifest)},
+    maxlen=1000,
+    approximate=True,
+)
+```
+
+`maxlen=1000, approximate=True` is set on every XADD (prevents unbounded stream growth when IEP2 is slow/offline).
+
+### 4.4 Frame Sources
+
+**`RtspSource`** — `cv2.VideoCapture(rtsp_url)`. Real-time.
+
+**`VideoFileSource`** — `cv2.VideoCapture(video_path)`. Decimation: `n = max(1, round(source_fps / target_fps))` — yields every n-th frame. Synthetic timestamps anchored to real wall clock.
+
+---
+
+## 5. IEP2 — Vision Worker
+
+**Location:** `services/iep2_vision/`
+**Runtime:** Python 3.11, asyncio, one process per camera
+**Model:** One k3s Deployment per active camera, created by Edge Agent on `StartCamera`. In dev/compose, one container started by the compose CLI.
+
+### 5.1 Configuration
+
+IEP2 uses `pydantic_settings.BaseSettings` (daemon mode):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `CAMERA_ID` | required | `physical_cameras.id` UUID |
+| `STORE_ID` | required | |
+| `CAMERA_CONFIG_ID` | `""` | UUID from Edge Agent ConfigMap; enables homography reload signal |
+| `WINDOW_SECONDS` | required | Must match IEP1 |
+| `LOCAL_REDIS_URL` | required | Reads `stream:iep1:{camera_id}` from edge-local Redis |
+| `SERVER_REDIS_URL` | required | Publishes `stream:iep2:batch_complete` to server Redis |
+| `DATABASE_URL_SERVER` | required | `postgresql://...` (no `+asyncpg` prefix) |
+| `YOLO_INPUT_SOCK` | required | ZMQ IPC socket path |
+| `OSNET_INPUT_SOCK` | required | ZMQ IPC socket path |
+| `TMPFS_FRAME_ROOT` | required | Base path for shared frame store |
+
+TLS: if `SERVER_REDIS_URL` starts with `rediss://`, the Redis client adds `ssl_ca_certs` from `redis_ca_cert_path` (default `/etc/retailvision/certs/ca.crt`).
+
+### 5.2 `RedisStreamFrameSource` (`ingest/redis_source.py`)
+
+Reads from edge-local Redis (`LOCAL_REDIS_URL`). Group `iep2_workers`, consumer `iep2_{camera_id}`.
+
+Two-phase delivery:
+- **Phase A** (startup): `XREADGROUP ID="0"` — drain un-ACKed messages (crash recovery)
+- **Phase B** (normal): `XREADGROUP ID=">"` — read new messages, block 2 s
+
+`BUSYGROUP` on `XGROUP CREATE` is caught silently (idempotent group creation on restart).
+
+XACK trade-off: fires **after** `batch_complete` is published to server Redis and centroids flushed. A crash mid-manifest replays the full manifest on Phase A restart.
+
+### 5.3 `FloorProjector` (`projection/projector.py`)
+
+`load(pool, camera_config_id)` — fetches homography matrix (JSONB `(3,3)` or flat `(9,)`) and zone polygons from PostgreSQL.
+
+`project(x1, y1, x2, y2)` — numpy H @ [px, foot_y, 1]ᵀ, returns `(floor_x, floor_y)`.
+
+`zone_of(floor_x, floor_y)` — Shapely Point.within(polygon) test.
+
+Returns `None` if no calibration loaded; `floor_x/floor_y/zone_id` stored as `NULL`.
+
+### 5.4 Homography Reload (`runtime.py`)
+
+`_watch_reload_signals(camera_config_id, projector, pool, server_redis)` coroutine:
+- Subscribes to `iep2:reload:{camera_config_id}` on server Redis pub/sub
+- On `"homography"` message: `await projector.load(pool, UUID(camera_config_id))`
+- Handles `CancelledError` cleanly; retries other errors after 5 s
+
+### 5.5 Per-Batch Pipeline
+
+```python
+# After all frames in manifest processed:
+await _flush_centroids(manager, persistence, batch_number)
+await _publish_batch_complete(
+    redis_client=server_redis,       # server Redis
+    batch_number=batch_number,
+    window_start_ms=..., window_end_ms=...,
+)
+await source.ack(message_id)         # edge-local Redis XACK
+```
+
+XADD on `stream:iep2:batch_complete` includes `maxlen=500, approximate=True`.
+
+Ordering invariant: `tracking_history` → `local_centroids` → `batch_complete` XADD (server Redis) → IEP1 stream XACK (edge-local Redis).
+
+### 5.6 Batch Keying
+
+IEP2 publishes `window_start_ms` in the `batch_complete` message. IEP3's `BatchCoordinator` groups messages by `_batch_key(window_start_ms)` — rounds to the nearest window boundary. This is restart-safe: `window_start_ms` is monotonic, unlike `batch_number` which resets to 0 on IEP1 restart.
+
+---
+
+## 6. IEP3 — Reconciliation Pipeline
+
+**Location:** `services/iep3_reconciliation/`
+**Runtime:** Python 3.11, asyncio, long-running daemon, no HTTP port
+**Entry point:** `python -m app.main`
+
+### 6.1 Startup Sequence (`app/main.py`)
+
+1. Load and validate settings (`Iep3Settings`)
+2. Create asyncpg pool, verify DB (required tables present)
+3. Create Redis client (`SERVER_REDIS_URL`), verify connectivity
+4. `repo.get_expected_cameras_count(store_id)` — query `camera_configs` count from DB
+5. `repo.orphan_sweep(store_id)` — startup cleanup (see §6.6)
+6. `check_pel_health(redis_client, store_id)` — assert PEL is empty (see §6.7)
+7. Construct `Reconciler` and `BatchCoordinator`
+8. `coordinator.run()` — blocks until `SIGTERM`/`SIGINT`
+9. Graceful shutdown: cancel coordinator, close Redis, close pool
+
+### 6.2 Configuration (`app/settings.py`)
+
+`Iep3Settings(BaseSettings)`, all via env vars, `extra="ignore"`.
+
+| Field | Env var | Default | Notes |
+|-------|---------|---------|-------|
+| `store_id` | `STORE_ID` | required | One IEP3 instance per store |
+| `window_seconds` | `WINDOW_SECONDS` | required | Must match IEP1/IEP2 |
+| `database_url_server` | `DATABASE_URL_SERVER` | required | `postgresql://...` (no `+asyncpg`) |
+| `server_redis_url` | `SERVER_REDIS_URL` | `redis://redis:6379/0` | |
+| `reid_threshold` | `REID_THRESHOLD` | `0.75` | Cosine similarity cutoff |
+| `max_speed_mps` | `MAX_SPEED_MPS` | `1.5` | Spatial gate |
+| `grace_seconds` | `GRACE_SECONDS` | `300.0` | LOST → EXITED |
+| `embedding_dim` | `EMBEDDING_DIM` | `512` | OSNet output dim |
+| `centroid_ema_alpha` | `CENTROID_EMA_ALPHA` | `0.3` | EMA smoothing for embeddings |
+| `coordinator_timeout_s` | `COORDINATOR_TIMEOUT_S` | `120.0` | Partial-batch timeout |
+| `position_weight_area` | `POSITION_WEIGHT_AREA` | `0.7` | Canonical position scoring |
+| `position_weight_conf` | `POSITION_WEIGHT_CONF` | `0.3` | Must sum to 1.0 with area |
+| `expected_cameras_refresh_batches` | `EXPECTED_CAMERAS_REFRESH_BATCHES` | `10` | DB re-query cadence |
+| `orphan_sweep_interval_batches` | `ORPHAN_SWEEP_INTERVAL_BATCHES` | `50` | Periodic sweep cadence |
+
+`@model_validator(mode="after")` asserts `position_weight_area + position_weight_conf ≈ 1.0` (± 0.01).
+
+### 6.3 BatchCoordinator (`app/coordinator.py`)
+
+Consumer group `iep3-{store_id}`. `XREADGROUP BLOCK 5000 COUNT 16`.
+
+`_batch_key(window_start_ms)` — rounds to nearest window boundary:
+```python
+window_ms = int(self._window_seconds * 1000)
+return int(round(window_start_ms / window_ms) * window_ms)
+```
+
+State dicts keyed by `batch_key` (int), not `batch_number`. Restart-safe.
+
+**XACK strategy:** fires immediately on message receipt, before `on_ready`. See ADR-001.
+
+**Expected cameras:** queried from DB at startup, refreshed every `_refresh_batches` fires via:
+```sql
+SELECT COUNT(cc.id) FROM camera_configs cc
+JOIN store_config_versions scv ON scv.id = cc.version_id
+WHERE scv.store_id = $1 AND scv.status = 'active'
+```
+
+`check_pel_health` (module-level function):
+- Calls `redis.xpending(STREAM, f"iep3-{store_id}")`
+- Logs WARNING if `pending > 0` (indicates XACK was never sent — code bug)
+- Returns `0` silently if consumer group doesn't exist yet (first startup)
+
+### 6.4 Reconciler (`app/reconciler.py`)
+
+Owns the single `pool.acquire()` / `conn.transaction()` per batch. Sub-components constructed once at `__init__`, reused across all batches. `PositionSelector._resolution_cache` is intentionally long-lived.
+
+```python
+async def process_batch(batch_number, window, reporting_cameras) -> dict:
+    t0 = time.monotonic()
+    async with self._pool.acquire() as conn:
+        async with conn.transaction():
+            known, new = await self._reader.classify(conn, window_start_ms, window_end_ms)
+            n_new_globals = await self._matcher.link_new_locals(conn, ...)
+            n_written = await self._selector.write_canonical_positions(conn, ...)
+            cleanup_stats = await self._state.run_cleanup(conn, ...)
+    # transaction committed
+    reconcile_elapsed = time.monotonic() - t0
+    self._batches_processed += 1
+
+    # R7: skip orphan sweep if reconciliation used >80% of window budget
+    if self._batches_processed % self._settings.orphan_sweep_interval_batches == 0:
+        if reconcile_elapsed < self._settings.window_seconds * 0.8:
+            await self._repo.orphan_sweep(self._store_id)
+        else:
+            logger.info("Skipping orphan sweep — reconciliation took %.1fs", reconcile_elapsed)
+    return stats
+```
+
+Exceptions propagate to `BatchCoordinator._fire()` which catches, logs, and continues. Failed batch is skipped.
+
+### 6.5 Repository (`app/repository.py`)
+
+No ORM. All SQL uses asyncpg `$1…$N` positional params. Per-query timeouts:
+- Transactional queries: `timeout=120.0` (inside batch transaction)
+- Standalone queries: `timeout=30.0`
+
+**New in M4-S3:**
+- `get_expected_cameras_count(store_id) → int` — standalone
+- `orphan_sweep(store_id) → tuple[int, int]` — transactional, structured logging
+
+**`orphan_sweep`** cleans two categories in one transaction:
+1. `global_identities` where `last_seen_ts == first_seen_ts` AND no `global_tracking_history` row
+2. `local_centroids` where `store_id = $1` AND no active `global_local_mapping`
+
+Returns `(deleted_globals, deleted_centroids)`. Logs `extra={"store_id", "deleted_globals", "deleted_centroids"}`.
+
+### 6.6 Orphan Sweep Schedule
+
+- **Startup:** always runs before consuming any messages (clears state from previous crash)
+- **Periodic:** every `ORPHAN_SWEEP_INTERVAL_BATCHES` batches (default 50 ≈ 50 minutes at 1 batch/min)
+- **Skip condition:** if `reconcile_elapsed >= window_seconds * 0.8` (avoid extending processing window)
+- **Isolation:** always separate transaction, never nested inside reconciliation transaction
+
+See `docs/operations/iep3-orphan-runbook.md` for SQL diagnostic queries.
+
+### 6.7 PEL Health Check
+
+`check_pel_health(redis_client, store_id)` in `coordinator.py`:
+- Called once at IEP3 startup, after orphan sweep
+- Non-empty PEL indicates XACK was not sent in a previous session — impossible in XACK-before-processing model, signals a code bug
+- Logs WARNING if `pending > 0`; returns `0` if group doesn't exist (first run)
+
+### 6.8 ReID Gates (`app/reid/gates.py`)
+
+`cross_camera_gate(new_x, new_y, new_ts, last_x, last_y, last_ts, max_speed_mps) → bool`
+
+- NULL `new_x/y` or `last_x/y` → `True` (uncalibrated camera, always passes)
+- Negative `elapsed_s` → `True` + warning log (clock skew)
+- Zero `elapsed_s` → `True` (simultaneous observations)
+- Otherwise: `hypot(Δx, Δy) / elapsed_s ≤ max_speed_mps`
+
+### 6.9 ReidMatcher (`app/reid/matcher.py`)
+
+Operates inside the Reconciler's transaction. Loads all candidate globals and embeddings once before the per-LocalID loop. Mutates candidates in-place so GlobalIDs created for `local_id_i` are immediately available for `local_id_{i+1}`.
+
+Cross-camera filter: exclude candidates with an active link on `obs.camera_id`. Then spatial gate. Then cosine similarity.
+
+None check for `last_floor_x/y` is handled inside `cross_camera_gate` (returns `True` for NULL coords), not in the matcher pre-loop.
+
+### 6.10 PositionSelector (`app/selection.py`)
+
+Score: `position_weight_area * min(bbox_area/frame_px, 1.0) + position_weight_conf * bbox_confidence`
+
+Uses `self._settings.position_weight_area` and `self._settings.position_weight_conf` (renamed from `selection_weight_*` in M4-S3).
+
+Standalone DB calls (`get_camera_batch_info_bulk`, `get_camera_resolution`) acquire their own connections — correct: they read EEP-owned tables outside the IEP3 transaction.
+
+### 6.11 StateManager (`app/state.py`)
+
+Strict order inside transaction:
+1. `ACTIVE → LOST`: GlobalIDs with no active link seen since `window_start_ms`
+2. `LOST → EXITED`: `(window_end_ms - lost_since_ts) >= grace_ms`
+3. `deactivate_mappings_for_globals` — before centroid deletion
+4. `delete_centroids_for_globals`
+
+LOST → ACTIVE reactivation handled exclusively by `ReidMatcher.reactivate_global()`.
+
+---
+
+## 7. Edge Agent
+
+**Location:** `services/edge_agent/`
+**Runtime:** Python 3.11, asyncio, grpc.aio client, no HTTP server
+**Deployment:** systemd service on edge host (not a container)
+**Entry point:** `python -m services.edge_agent.app.main`
+
+### 7.1 Architecture Change from Docker Model
+
+The Edge Agent no longer uses Docker socket or `docker_manager.py`. It now uses the k3s Kubernetes API via `kubernetes` Python client (`k8s_manager.py`). The `_tracked_cameras` dict is gone — k3s Deployments are the source of truth.
+
+### 7.2 Configuration (`app/agent.py`)
 
 | Var | Default | Description |
 |-----|---------|-------------|
-| `S3_ENDPOINT_URL` | — | MinIO/S3 endpoint |
-| `S3_ACCESS_KEY` | — | |
-| `S3_SECRET_KEY` | — | |
-| `S3_BUCKET` | `retailvision` | |
-| `REDIS_URL` | `redis://localhost:6379/0` | |
+| `STORE_ID` | required | |
+| `WINDOW_SECONDS` | `60` | |
+| `IEP1_CONTROL_SOCK` | `unix:///dev/shm/sockets/iep1_control.sock` | gRPC to IEP1 daemon |
+| `IEP1_HEALTH_SOCK` | `unix:///dev/shm/sockets/iep1_health.sock` | |
+| `YOLO_HEALTH_SOCK` | `localhost:50052` | Inference service health via hostPort |
+| `OSNET_HEALTH_SOCK` | `localhost:50053` | |
+| `LOCAL_REDIS_URL` | `redis://localhost:6379/0` | Passed to IEP2 ConfigMaps |
+| `SERVER_REDIS_URL` | `""` | Passed to IEP2 ConfigMaps |
+| `DATABASE_URL_SERVER` | `""` | Passed to IEP2 ConfigMaps |
+| `GRPC_CA_CERT_PATH` | `/etc/retailvision/certs/ca.crt` | CA cert for EEP TLS |
+| `AGENT_SECRET` | `""` | Sent as `x-agent-token` metadata |
+| `HEARTBEAT_INTERVAL_S` | `30` | |
+| `IPC_SOCKETS_HOST_PATH` | `/dev/shm/sockets` | hostPath for IEP2 health sockets |
 
-### 4.3 `Iep1Settings` Dataclass
+Required vars at startup (`_REQUIRED_VARS`): `EEP_GRPC_URL`, `STORE_ID`, `DATABASE_URL_SERVER`, `SERVER_REDIS_URL`, `AGENT_SECRET`.
 
-```python
-@dataclass
-class Iep1Settings:
-    store_id:             str
-    camera_id:            str
-    rtsp_url:             str | None = None
-    target_fps:           float = 5.0
-    batch_window_seconds: float = 60.0
-    s3_bucket:            str   = "retailvision"
-    redis_url:            str   = "redis://localhost:6379/0"
-```
-
-### 4.4 Frame Sources (FrameSource Protocol)
-
-Both sources implement: `frames() → Iterator[(capture_ts_ms, frame)]`, `is_available() → bool`, `release()`.
-
-**`RtspSource`** — `cv2.VideoCapture(rtsp_url)`. Real-time, blocks on reads.
-
-**`VideoFileSource`** — `cv2.VideoCapture(video_path)`. Key implementation details:
-- `source_fps = cap.get(cv2.CAP_PROP_FPS)` — defaults to `target_fps` if unreadable
-- `effective_fps = min(target_fps, source_fps)` — no upsampling
-- Decimation: `n = max(1, round(source_fps / effective_fps))` — yield every n-th frame
-- `capture_ts_ms = start_epoch_ms + int(frame_index * 1000 / source_fps)` — synthetic timestamps anchored to real wall clock
-
-`source` is injected into `Iep1Runtime.__init__` — constructed in `main()` and passed in, not hardcoded.
-
-### 4.5 `Iep1Runtime.run()`
+### 7.3 TLS Fallback (`_load_channel_credentials`)
 
 ```python
-window_start_ms = now_ms()
-batch_duration_ms = settings.batch_window_seconds * 1000
-
-for capture_ts_ms, frame in source.frames():
-    key = uploader.upload(capture_ts_ms, frame)       # JPEG → S3
-    accumulator.add(capture_ts_ms, key)               # append to window
-    flush_expired_batches()                           # delete S3 keys >300 s old
-
-    if now_ms() - window_start_ms >= batch_duration_ms:
-        _close_window(window_start_ms)                # publish manifest → Redis
-        window_start_ms = now_ms()
+def _load_channel_credentials() -> grpc.ChannelCredentials | None:
+    if not GRPC_CA_CERT_PATH or not os.path.exists(GRPC_CA_CERT_PATH):
+        return None   # dev mode — insecure channel
+    with open(GRPC_CA_CERT_PATH, "rb") as f:
+        return grpc.ssl_channel_credentials(root_certificates=f.read())
 ```
 
-`_close_window()` calls `publisher.publish(manifest)` which does `XADD stream:iep1:{camera_id}`.
+`_connect_to_eep` uses `secure_channel` when credentials are available, `insecure_channel` otherwise. `x-agent-token` metadata only sent when `AGENT_SECRET` is non-empty.
 
-`BATCH_TTL_SECONDS = 300` — S3 frames are deleted 300 s after their batch closes. `_pending_cleanup` is a `deque` of `(close_time_ms, [s3_keys])`.
+### 7.4 Startup Sequence (`_startup`)
 
-On exit (`finally`): final window closed, all pending cleanup flushed, all remaining S3 keys deleted unconditionally, `source.release()` called.
+1. `km.init_k8s_clients()` — load kubeconfig (blocking, via executor)
+2. `_wait_for_health("yolo", YOLO_HEALTH_SOCK, timeout=120)` — poll gRPC health
+3. `_wait_for_health("osnet", OSNET_HEALTH_SOCK, timeout=120)`
+4. `_wait_for_health("iep1", IEP1_HEALTH_SOCK, timeout=60)`
+5. `_restore_active_cameras()` — re-add cameras surviving Edge Agent restart
 
-### 4.6 `WindowAccumulator`
+### 7.5 `_restore_active_cameras`
 
-Tracks frames for the current batch window. `close()` produces a `Manifest` with `status`, `frame_count`, `expected_frames`, `gaps`, and `frames` list. If no frames were captured (camera offline), `status="offline"`.
+Reads k3s Deployments via `km.list_active_iep2_deployments()`. For each deployment, reads `RTSP_URL` from the associated ConfigMap and calls `_add_camera_to_iep1()`. If `RTSP_URL` is absent, skips with warning (EEP will resync).
 
-### 4.7 `WindowPublisher`
+This makes IEP1 the durable state store for camera-to-RTSP mapping across Edge Agent restarts.
 
-```python
-redis.xadd(f"stream:iep1:{camera_id}", {"manifest": json.dumps(manifest_dict)})
-```
+### 7.6 `StartCamera` Handler
 
-Uses sync `redis` client (not async). IEP1 is fully synchronous.
+1. Build ConfigMap data: `{CAMERA_ID, STORE_ID, WINDOW_SECONDS, LOCAL_REDIS_URL, SERVER_REDIS_URL, DATABASE_URL_SERVER, RTSP_URL, TARGET_FPS}`
+2. `km.apply_camera_configmap(camera_id, cm_data)` (via executor)
+3. `km.apply_iep2_deployment(camera_id)` (via executor)
+4. `_wait_for_iep2_health(camera_id, timeout=60)` — poll unix socket
+5. `_add_camera_to_iep1(camera_id, ...)` — gRPC `AddCamera` to IEP1 daemon
+6. Start `_watch_iep2_health` task per camera
+
+### 7.7 `StopCamera` Handler
+
+1. Cancel `_health_watchers[camera_id]`
+2. gRPC `RemoveCamera` to IEP1 daemon
+3. `km.delete_iep2(camera_id)` — delete Deployment + ConfigMap (via executor)
+
+### 7.8 IEP1 Restart Recovery (`_iep1_health_watcher`)
+
+Watches `grpc.health.v1.Watch` stream on IEP1 health socket. On `NOT_SERVING → SERVING` transition, calls `_restore_active_cameras()` to re-add all cameras lost to IEP1 in-memory state.
+
+### 7.9 `k8s_manager.py`
+
+All Kubernetes API calls use the `kubernetes` Python client, loaded via kubeconfig (`/etc/rancher/k3s/k3s.yaml` on edge). Runs in `_k8s_exec` thread pool (max_workers=4) — never on asyncio thread.
+
+Key functions:
+- `init_k8s_clients()` — loads kubeconfig, creates `AppsV1Api` and `CoreV1Api`
+- `apply_camera_configmap(camera_id, data)` — create_or_patch ConfigMap in `retailvision` namespace
+- `apply_iep2_deployment(camera_id)` — create_or_patch Deployment with `IEP2_IMAGE` from env
+- `delete_iep2(camera_id)` — delete Deployment + ConfigMap
+- `list_active_iep2_deployments()` — returns list of `{camera_id, ...ConfigMap fields}`
+- `get_active_camera_ids()` — set of camera_ids with running Deployments
+- `get_camera_k8s_status(camera_id)` — `"running"` | `"stopped"` from Pod phase
 
 ---
 
-## 5. IEP2 — Vision Pipeline
+## 8. Live Bridge
 
-**Location:** `services/iep2_vision/`  
-**Runtime:** Python 3.11, asyncio throughout, one process per camera  
-**Entry point:** `python -m services.iep2_vision.main` (or `python services/iep2_vision/main.py`)  
-**Models loaded once** at `IEP2Runtime.__init__()` — YOLO (yolov8n.pt) and ReID (osnet_x1_0).
+**Location:** `services/live_bridge/`
+**Runtime:** FastAPI + uvicorn, Python 3.11, asyncio
+**Entry point:** `app/main.py` → `FastAPI()`
 
-### 5.1 CLI Arguments
-
-```
---store-id          required  Store UUID
---camera-id         required  Physical camera ID (text, used as camera_id in tracking_history)
---camera-config-id  optional  UUID of camera_configs row; enables floor projection
---source            video|redis  (default: video)
---video             required if --source video
---start-ms          int (default: 0)
-```
-
-### 5.2 `Iep2Settings` Dataclass
+WebSocket endpoint `GET /ws/live/{camera_id}`. One `asyncio.Task` per camera, started on first client connection, stopped when last client disconnects. Presigns S3 URLs for `stream:iep2:live:{camera_id}` frames.
 
 ```python
-@dataclass
-class Iep2Settings:
-    store_id:            str
-    camera_id:           str
-    database_url:        str
-    camera_config_id:    str | None = None
-    redis_url:           str        = "redis://localhost:6379/0"
-    s3_endpoint_url:     str        = ""
-    s3_access_key:       str        = ""
-    s3_secret_key:       str        = ""
-    s3_bucket:           str        = "retailvision"
-    target_fps:          float      = 5.0
-    live_stream_enabled: bool       = True
+SERVER_REDIS_URL = os.environ.get("SERVER_REDIS_URL", "redis://redis:6379/0")
 ```
 
-### 5.3 `PostgresPersistence`
-
-**`persistence/postgres.py`**
-
-```python
-class PostgresPersistence:
-    def __init__(self, database_url, store_id, camera_id):
-        self._store_id = uuid.UUID(store_id)   # parsed once at init
-        self._pool = None
-
-    async def connect(self):
-        self._pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
-
-    async def insert_detection(self, local_id, timestamp_ms, bbox_confidence,
-                               bbox_area, floor_x, floor_y, zone_id):
-        await self._pool.execute(_INSERT_SQL, self._store_id, self._camera_id,
-                                 local_id, timestamp_ms, floor_x, floor_y,
-                                 zone_id, bbox_confidence, bbox_area)
-
-    # async context manager: __aenter__ → connect(), __aexit__ → close()
-```
-
-`_INSERT_SQL` uses positional `$1…$9` parameters (asyncpg style). No ORM. No DDL — schema is created by EEP at startup via `schema.sql`.
-
-### 5.4 `FloorProjector`
-
-**`projection/projector.py`**
-
-Loaded after DB pool opens, reuses the same asyncpg pool (no second connection).
-
-```python
-async def load(self, pool: asyncpg.Pool, camera_config_id: uuid.UUID):
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(_HOMOGRAPHY_SQL, camera_config_id)
-        # Homography query: calibrations WHERE camera_config_id=$1
-        #   AND is_current=true AND status IN ('ok','verified') AND method='homography'
-        zone_rows = await conn.fetch(_ZONES_SQL, camera_config_id)
-        # Zone query: zones JOIN store_config_versions JOIN camera_configs
-        #   WHERE cc.id=$1 AND scv.status='active'
-```
-
-`project(x1, y1, x2, y2)` — pure numpy:
-
-```python
-px = (x1 + x2) / 2.0   # horizontal centre
-py = float(y2)          # bottom of bbox (foot point)
-src = np.array([px, py, 1.0], dtype=np.float64)
-dst = self._H @ src
-return float(dst[0] / dst[2]), float(dst[1] / dst[2])
-```
-
-`zone_of(floor_x, floor_y)` — shapely `Point.contains(polygon)` test, returns first matching zone UUID.
-
-`_parse_homography()` handles both flat `(9,)` and `(3,3)` JSONB storage formats.
-
-If no homography loaded: `project()` returns `None`, `floor_x/floor_y/zone_id` stored as `NULL`.
-
-### 5.5 `RedisStreamFrameSource`
-
-**`ingest/redis_source.py`**
-
-```python
-STREAM_PREFIX = "stream:iep1"
-GROUP_NAME    = "iep2_workers"
-BLOCK_MS      = 2000
-READ_COUNT    = 10
-
-class RedisStreamFrameSource:
-    def __init__(self, camera_id, redis_url, s3_client):
-        self._stream_name   = f"{STREAM_PREFIX}:{camera_id}"
-        self._consumer_name = f"iep2_{camera_id}"
-```
-
-`_ensure_group()`: `XGROUP CREATE ... mkstream=True`, catches `BUSYGROUP` error silently.
-
-`manifests()` async generator:
-- **Phase A**: `XREADGROUP ID="0"` until empty → crash recovery
-- **Phase B**: `XREADGROUP ID=">"` infinite loop → normal operation
-- Yields `(message_id, manifest_dict)`
-
-`ack(message_id)`: caller calls after full manifest processed and DB writes committed.
-
-Manifest field decoded: `fields.get(b"manifest") or fields.get("manifest")` → `json.loads(raw)`.
-
-### 5.6 Per-Frame Pipeline (`_run_frame_detections`)
-
-```python
-for track in enriched:
-    if track["local_id"] is not None:
-        x1, y1, x2, y2 = [int(c) for c in track["bbox"]]
-        bbox_area = (x2 - x1) * (y2 - y1)
-        local_id_uuid = uuid.UUID(int=track["local_id"])   # int → UUID conversion
-        proj = projector.project(x1, y1, x2, y2)
-        floor_x, floor_y = proj if proj else (None, None)
-        zone_id = projector.zone_of(floor_x, floor_y) if proj else None
-        await persistence.insert_detection(
-            local_id=local_id_uuid, timestamp_ms=capture_ts_ms,
-            bbox_confidence=float(track["confidence"]),
-            bbox_area=bbox_area, floor_x=floor_x, floor_y=floor_y, zone_id=zone_id
-        )
-```
-
-`LocalIdentityManager.process_frame()` returns `int` local_ids. `uuid.UUID(int=local_id)` converts deterministically (same int always → same UUID). Only tracks with `local_id is not None` (identity confirmed) are written to DB.
-
-### 5.7 IEP1 Redis Pipeline (`_stream_from_iep1`)
-
-```python
-async for message_id, manifest in source.manifests():
-    if manifest.get("status") == "offline":
-        await source.ack(message_id)   # ACK and skip offline windows
-        continue
-
-    for frame_entry in manifest.get("frames", []):
-        capture_ts_ms, s3_key = int(frame_entry[0]), frame_entry[1]
-        frame = _fetch_s3_frame(s3_client, s3_bucket, s3_key)
-        if frame is None: continue
-        # detect → track → identify → project → insert
-        ...
-
-    await self._flush_centroids(manager, persistence, batch_number)
-    await self._publish_batch_complete(
-        redis_client=source.redis_client,   # exposed by RedisStreamFrameSource
-        batch_number=batch_number,
-        window_start_ms=manifest.get("window_start_ms", 0),
-        window_end_ms=manifest.get("window_end_ms", 0),
-    )
-    await source.ack(message_id)   # ACK after batch_complete published
-```
-
-Ordering invariant: `tracking_history` writes → `local_centroids` UPSERTs → `stream:iep2:batch_complete` XADD → `stream:iep1:{cam}` XACK.
-
-XACK is manifest-scoped, not frame-scoped. A crash mid-manifest replays the entire manifest on restart (Phase A recovery).
-
-### 5.8 S3 Frame Fetch
-
-```python
-def _fetch_s3_frame(s3_client, bucket, key) -> np.ndarray | None:
-    resp = s3_client.get_object(Bucket=bucket, Key=key)
-    data = resp["Body"].read()
-    arr = np.frombuffer(data, dtype=np.uint8)
-    return cv2.imdecode(arr, cv2.IMREAD_COLOR)  # None on failure
-```
-
-`boto3` S3 client is sync (blocking). Acceptable for single-camera process — one S3 call per frame sequentially.
+Health endpoint: `GET /health` → `{"status": "ok"}`.
 
 ---
 
-## 6. Edge Agent
+## 9. gRPC Protocol
 
-**Location:** `services/edge_agent/`  
-**Runtime:** Python 3.11, asyncio, grpc.aio client, no HTTP server  
-**Entry point:** `python -m services.edge_agent.app.main`  
-**Dockerfile pattern:** same as IEP1 (`WORKDIR /workspace`, `mkdir -p services/edge_agent`, etc.)
+**Proto:** `services/eep/proto/agent.proto` (canonical)
+**Package:** `retailvision.agent.v1`
+**Transport:** TLS (cert-manager in production, insecure in dev when cert paths are empty)
+**Auth:** `x-agent-token` metadata, HMAC constant-time comparison. Bypassed when `AGENT_SECRET` is empty.
 
-### 6.1 Configuration (env vars only)
-
-| Var | Required | Default | Description |
-|-----|----------|---------|-------------|
-| `EEP_GRPC_URL` | yes | — | e.g. `eep:50051` or `localhost:50051` |
-| `STORE_ID` | yes | — | Store UUID this agent represents |
-| `AGENT_VERSION` | no | `0.1.0` | Reported in heartbeats |
-| `IEP1_IMAGE` | no | `retailvision-iep1:latest` | Docker image for IEP1 containers |
-| `DOCKER_NETWORK` | no | `retail-edge_default` | Compose network name; verify with `docker network ls` |
-
-Missing `EEP_GRPC_URL` or `STORE_ID` → `sys.exit(1)`.
-
-### 6.2 Reconnect Loop (`run_agent`)
-
-```python
-backoff = 1
-while True:
-    try:
-        await _connect(grpc_url, store_id, agent_version)
-        backoff = 1   # reset on clean disconnect
-    except Exception as exc:
-        await asyncio.sleep(backoff)
-        backoff = min(backoff * 2, 60)
-```
-
-Backoff: 1s → 2s → 4s … → 60s cap. Never retries faster than 1 s.
-
-### 6.3 `_connect`
-
-```python
-async with grpc.aio.insecure_channel(grpc_url) as channel:
-    stub = AgentServiceStub(channel)
-    hb_task = asyncio.create_task(_heartbeat_loop(store_id, agent_version))
-    try:
-        async for ctrl_msg in stub.Connect(_request_generator()):
-            await _handle_control(ctrl_msg)
-    finally:
-        hb_task.cancel(); await hb_task  # cancel+await on disconnect
-```
-
-`_request_generator()` is an async generator that `await _outgoing.get()` indefinitely. `_outgoing` is module-level — not recreated on reconnect. Any queued commands survive a disconnect/reconnect cycle.
-
-### 6.4 Heartbeat Loop (`_heartbeat_loop`)
-
-```python
-while True:
-    await _outgoing.put(AgentMessage(heartbeat=Heartbeat(
-        store_id=store_id, agent_version=agent_version,
-        timestamp_ms=int(time.time() * 1000)
-    )))
-    # Per-camera status reports
-    for camera_id, cam_store_id in list(_tracked_cameras.items()):
-        status = docker_manager.get_status(cam_store_id, camera_id)
-        await _outgoing.put(AgentMessage(camera_status=CameraStatusReport(
-            camera_id=camera_id, container_status=status,
-            timestamp_ms=int(time.time() * 1000)
-        )))
-    await asyncio.sleep(30)
-```
-
-First heartbeat is put **immediately** (no initial sleep) — EEP's servicer requires Heartbeat as the first message. Subsequent heartbeats every 30 s, each followed by one `CameraStatusReport` per tracked camera.
-
-### 6.5 Control Message Handler (`_handle_control`)
-
-```python
-loop = asyncio.get_running_loop()
-
-if ctrl_msg.HasField("start_camera"):
-    await loop.run_in_executor(None, docker_manager.start_iep1, cmd, IEP1_IMAGE, DOCKER_NETWORK)
-    _tracked_cameras[cmd.camera_id] = cmd.store_id
-
-elif ctrl_msg.HasField("stop_camera"):
-    await loop.run_in_executor(None, docker_manager.stop_iep1, cmd.store_id, cmd.camera_id)
-    _tracked_cameras.pop(cmd.camera_id, None)
-```
-
-`_tracked_cameras: dict[str, str]` — camera_id → store_id. Module-level. Survives reconnects.
-
-### 6.6 `docker_manager.py`
-
-```python
-def container_name(store_id, camera_id) -> str:
-    return f"iep1_{store_id}_{camera_id}"
-
-def start_iep1(cmd, image, network):
-    # Remove existing container force=True (crash recovery)
-    # containers.run(image, command=[...], environment={...},
-    #                network=network, detach=True,
-    #                restart_policy={"Name": "on-failure", "MaximumRetryCount": 3})
-
-def stop_iep1(store_id, camera_id):
-    # container.stop(timeout=10); NotFound → log, no raise
-
-def get_status(store_id, camera_id) -> "running" | "stopped":
-    # container.status == "running" → "running", else → "stopped"
-    # NotFound → "stopped"
-```
-
-IEP1 container command:
-```
-python -m services.iep1_ingestion.app.main
-  --store-id  {store_id}
-  --camera-id {camera_id}
-  --rtsp      {rtsp_url}
-  --fps       {target_fps}
-  --window    {window_seconds}
-```
-
-All sync. Always called via `run_in_executor`.
-
-### 6.7 Generated gRPC Stubs (Edge Agent)
-
-**`app/grpc_generated/agent_pb2.py`** + **`agent_pb2_grpc.py`** — generated from `proto/agent.proto` (byte-for-byte identical to EEP's proto).
-
-Import fix: `from services.edge_agent.app.grpc_generated import agent_pb2 as agent__pb2`.
-
-Note: EEP's fix uses `from app.grpc_generated import agent_pb2` (different base package because EEP's Dockerfile puts code at `/app/`). Edge Agent uses `from services.edge_agent.app.grpc_generated import agent_pb2` because the Dockerfile mirrors the `services.edge_agent.*` module path under `/workspace/`.
-
----
-
-## 7. gRPC Protocol
-
-**Proto:** `services/eep/proto/agent.proto` (canonical) ↔ `services/edge_agent/proto/agent.proto` (copy, must be byte-for-byte identical)  
-**Package:** `retailvision.agent.v1`  
-**Transport:** insecure (no TLS in current implementation)  
-**Versions:** `grpcio==1.64.0`, `grpcio-tools==1.64.0` (must match exactly)
-
-### 7.1 Service Definition
+### 9.1 Service
 
 ```protobuf
 service AgentService {
@@ -1033,266 +827,314 @@ service AgentService {
 }
 ```
 
-Single bidirectional streaming RPC. Edge agent dials out; stream stays open for agent lifetime.
+Single bidirectional streaming RPC. Edge dials out to EEP `:50051`; stream stays open for agent lifetime.
 
-### 7.2 Message Hierarchy
+### 9.2 Messages
 
-**Edge → Cloud (`AgentMessage`):**
-
+**Edge → Cloud:**
 ```protobuf
-message AgentMessage {
-  oneof payload {
-    Heartbeat          heartbeat     = 1;
-    CameraStatusReport camera_status = 2;
-  }
-}
-message Heartbeat {
-  string store_id;       // identifies which store's agent this is
-  string agent_version;
-  int64  timestamp_ms;
-}
-message CameraStatusReport {
-  string camera_id;        // physical_camera UUID as string
-  string container_status; // "running" | "stopped" | "error"
-  int64  timestamp_ms;
-}
+message AgentMessage { oneof payload { Heartbeat heartbeat = 1; CameraStatusReport camera_status = 2; } }
+message Heartbeat     { string store_id; string agent_version; int64 timestamp_ms; }
+message CameraStatusReport { string camera_id; string container_status; int64 timestamp_ms; }
 ```
 
-**Cloud → Edge (`ControlMessage`):**
-
+**Cloud → Edge:**
 ```protobuf
-message ControlMessage {
-  oneof payload {
-    StartCamera start_camera = 1;
-    StopCamera  stop_camera  = 2;
-  }
-}
-message StartCamera {
-  string   camera_id;       // physical_camera UUID
-  string   store_id;
-  string   rtsp_url;
-  float    target_fps;
-  float    window_seconds;  // must be 60.0 — matches IEP2 batch window
-  S3Config s3_config;
-  string   redis_url;
-}
-message StopCamera {
-  string camera_id;
-  string store_id;
-}
-message S3Config {
-  string endpoint_url;
-  string access_key;
-  string secret_key;
-  string bucket;
-}
+message ControlMessage { oneof payload { StartCamera start_camera = 1; StopCamera stop_camera = 2; } }
+message StartCamera    { string camera_id; string store_id; string rtsp_url; float target_fps;
+                         float window_seconds; }
+message StopCamera     { string camera_id; string store_id; }
 ```
 
-### 7.3 Protocol Invariants
+`S3Config` is defined in the proto for legacy use; not used in the k3s deployment model (IEP2 pods receive S3 config via ConfigMap / env vars).
 
-- First `AgentMessage` must be `Heartbeat`. Enforced server-side with `INVALID_ARGUMENT` abort.
-- `store_id` in proto messages is a `string` (UUID formatted). Cast to `::uuid` only in SQL.
-- `window_seconds = 60.0` is hardcoded in orchestrator. Changing it requires updating IEP1 `--window`, IEP2 batch window, and the proto default.
-- `camera_id` in `StartCamera` = `physical_camera.id` UUID (not `camera_config.id`). These are different UUIDs.
+### 9.3 Protocol Invariants
+
+- First `AgentMessage` must be `Heartbeat`. Server aborts with `INVALID_ARGUMENT` otherwise.
+- `window_seconds` in `StartCamera` must equal `WINDOW_SECONDS` env var on IEP1 and IEP2.
+- `camera_id` in `StartCamera` = `physical_cameras.id` UUID. **Not** `camera_configs.id`.
+- Auth bypass: empty `AGENT_SECRET` on EEP disables the auth interceptor entirely. Empty `AGENT_SECRET` on edge agent sends no `x-agent-token` header.
+
+Regenerate stubs:
+```bash
+docker compose run --rm eep python -m grpc_tools.protoc \
+  -I services/eep/proto \
+  --python_out=services/eep/app/grpc_generated \
+  --grpc_python_out=services/eep/app/grpc_generated \
+  services/eep/proto/agent.proto
+# Fix import in agent_pb2_grpc.py; repeat for services/edge_agent/
+```
 
 ---
 
-## 8. Cross-Service Data Flows
+## 10. Redis Topology
 
-### 8.1 Schedule → Workers Start (normal path)
+### 10.1 Edge-Local Redis
 
-```
-[SERVER] APScheduler fires (every 60 s)
-  → evaluate_schedules()
-    → _LOAD_SQL: SELECT camera_schedules JOIN stores WHERE is_active=true AND status='active'
-    → per-schedule: _should_run(row, now_local_tz)
-    → _on_camera_start(row) if should_run and not already running
-      → orchestrator.start_camera_workers(store_id, camera_config_id)
-          → _load_camera_data: JOIN camera_configs → physical_cameras → store_settings
+| Property | Value |
+|----------|-------|
+| Bind | `127.0.0.1` (loopback only, never network-accessible) |
+| Port | `6379` |
+| Persistence | None (`save ""`, `appendonly no`) |
+| Max memory | `256mb`, `allkeys-lru` |
+| Config | `infra/redis-local.conf` |
+| Env var | `LOCAL_REDIS_URL` |
 
-          ── IEP1 path (best-effort) ──────────────────────────────────────
-          → registry.send_command(store_id, StartCamera{...})
-            → asyncio.Queue.put() → _writer task → context.write()
-              ── gRPC stream ──────────────────────────────────────────────
-              [EDGE] → Edge Agent _handle_control()
-                → run_in_executor(docker_manager.start_iep1, cmd, IMAGE, NETWORK)
-                  → edge docker.containers.run("iep1_...", detach=True)
-                    → IEP1: frames → MinIO S3 (server) → Redis XADD (server)
+Contains: `stream:iep1:{camera_id}` (one per active camera). Ephemeral — device reboot clears all streams; IEP1 re-publishes current window on next startup.
 
-          ── IEP2 path (mandatory) ────────────────────────────────────────
-          [SERVER] → run_in_executor(iep2_docker.start_iep2, ...)
-            → server docker.containers.run("iep2_...", detach=True)
-              → IEP2: XREADGROUP (Redis on server) → S3 fetch → YOLO
-                    → track → project → INSERT tracking_history (server DB)
-```
+### 10.2 Server Redis
 
-### 8.2 Manual Trigger Path
+| Property | Value |
+|----------|-------|
+| Bind | All interfaces (cloud host) |
+| Port | `6379` (plain) / `6380` (TLS in k3s deployment) |
+| TLS | `rediss://` scheme triggers `ssl_ca_certs` in IEP2 + IEP3 |
+| Env var | `SERVER_REDIS_URL` |
 
-```
-POST /api/store/{slug}/schedules/{id}/trigger {action: "start"}
-  → require_owner_or_manager(ctx)
-  → _get_schedule_or_404()
-  → orchestrator.start_camera_workers(store_id_str, config_id_str)
-    → (same as 8.1 from orchestrator onward)
-  → mark_running(store_id_str, config_id_str)
-    → _running_cameras.add((store_id_str, config_id_str))
-  → 202 {status: "accepted", action: "start", schedule_id, camera_config_id}
-```
+Contains:
+- `stream:iep2:batch_complete` (global, all stores)
+- `stream:iep2:live:{camera_id}` (optional, for Live Bridge)
+- `iep2:reload:{camera_config_id}` (pub/sub channel, transient)
 
-`mark_running()` is critical — prevents scheduler double-starting a manually triggered camera on the next 60 s cycle.
+### 10.3 Per-Service Redis Assignment
 
-### 8.3 IEP1 → IEP2 Frame Delivery
+| Service | Redis URL env var | Target |
+|---------|-------------------|--------|
+| IEP1 | `LOCAL_REDIS_URL` | Edge-local |
+| IEP2 (reads IEP1) | `LOCAL_REDIS_URL` | Edge-local |
+| IEP2 (publishes batch_complete) | `SERVER_REDIS_URL` | Server |
+| IEP2 (homography reload pub/sub) | `SERVER_REDIS_URL` | Server |
+| IEP3 | `SERVER_REDIS_URL` | Server |
+| EEP | `REDIS_URL` | Server (Redis-backed `_running_cameras`) |
+| Live Bridge | `SERVER_REDIS_URL` | Server |
+| Edge Agent | n/a (passes via ConfigMap) | n/a |
 
-```
-[EDGE] IEP1 (camera loop, runs on edge device):
-  frame captured → cv2.imencode JPEG → S3.put_object(Key=frames/{cam}/{batch}/{ts}.jpg)
-                                        ↑ MinIO S3 endpoint on server (S3_ENDPOINT_URL)
-  accumulator.add(ts_ms, s3_key)
-  if window elapsed:
-    manifest = {frames: [[ts, key], ...], status, batch_number, ...}
-    redis.XADD stream:iep1:{camera_id} {manifest: json(manifest)}
-              ↑ Redis on server (REDIS_URL)
+In Docker Compose dev mode, both Redis URL env vars point to the same Redis instance.
 
-[SERVER] IEP2 (redis consumer loop, runs on server alongside EEP):
-  XREADGROUP iep2_workers iep2_{cam} stream:iep1:{cam} > COUNT 10 BLOCK 2000
-  for each message:
-    manifest = json.loads(fields["manifest"])
-    if offline: XACK; continue
-    for [ts, key] in manifest.frames:
-      frame = s3.get_object(Bucket, Key) → np.frombuffer → cv2.imdecode
-      detections = yolo.detect(frame)
-      tracks = bytetrack.update(detections)
-      enriched = identity_manager.process_frame(frame, tracks)
-      for track with local_id:
-        floor_x, floor_y = homography @ foot_point / w
-        zone_id = shapely.contains(floor_x, floor_y)
-        asyncpg.execute INSERT INTO tracking_history
-    XACK stream:iep1:{cam} iep2_workers message_id
-```
+---
 
-### 8.4 IEP2 → IEP3 Reconciliation
+## 11. Cross-Service Data Flows
+
+### 11.1 Schedule → Camera Start
 
 ```
-[SERVER] IEP2 (per batch, after all frames processed):
-  _flush_centroids() → UPSERT local_centroids (appearance centroids)
-  _publish_batch_complete() → XADD stream:iep2:batch_complete
-    {camera_id, store_id, batch_number, window_start_ms, window_end_ms}
-  source.ack(message_id)  ← XACK stream:iep1:{cam} only after batch_complete published
-
-[SERVER] IEP3 (per store, running continuously):
-  BatchCoordinator.run():
-    XREADGROUP iep3-{store_id} ← stream:iep2:batch_complete (BLOCK 5000 ms)
-    XACK immediately on receipt → message not redelivered if reconciliation crashes
-    Collect batch_complete events per (store_id, batch_number)
-    Wait until all EXPECTED_CAMERAS report (or COORDINATOR_TIMEOUT_S elapses)
-    on_ready(batch_number, window, reporting_cameras) → Reconciler.process_batch()
-
-  Reconciler.process_batch():
-    async with pool.acquire() as conn:
-      async with conn.transaction():
-        BatchReader.classify(conn, window_start_ms, window_end_ms)
-          → read_batch_observations: SELECT tracking_history WHERE store_id + window
-          → get_active_mappings_bulk: SELECT global_local_mapping WHERE is_active=TRUE
-          → touch_links_bulk: UPDATE last_seen_ts for known LocalIDs (unnest)
-          → returns (known: list[LocalObservation], new: list[LocalObservation])
-
-        ReidMatcher.link_new_locals(conn, store_id, new, batch_number, window_end_ms)
-          → get_candidate_globals: SELECT global_identities state IN ('active','lost')
-          → get_embeddings_bulk: SELECT global_embeddings for all candidates
-          → per new LocalID (first_seen_ts ASC order):
-              load_local_centroid → cross-camera filter → spatial gate → cosine similarity
-              if match: link_local or reactivate_global
-              if no match: create_global_identity + link_local + upsert_embedding
-          → mutates in-memory candidates pool for within-batch linking
-
-        PositionSelector.write_canonical_positions(conn, store_id, batch_number, window)
-          → get_positions_for_selection: JOIN tracking_history × global_local_mapping
-          → get_camera_batch_info_bulk (standalone, outside transaction): camera_config_id
-          → per camera: get_camera_resolution (standalone, outside transaction)
-          → score: 0.7*(bbox_area/frame_px) + 0.3*bbox_confidence; winner per GlobalID
-          → write_global_position: INSERT global_tracking_history
-          → update_global_last_seen: UPDATE global_identities last_floor_x/y/ts
-
-        StateManager.run_cleanup(conn, store_id, window_start_ms, window_end_ms)
-          → transition_active_to_lost: ACTIVE → LOST if no active link seen since window_start
-          → transition_lost_to_exited: LOST → EXITED if lost_since_ts + grace_ms < window_end
-          → deactivate_mappings_for_globals: UPDATE global_local_mapping is_active=FALSE
-          → delete_centroids_for_globals: DELETE local_centroids via mapping table
-      ← COMMIT
+APScheduler (60 s) → evaluate_schedules()
+  → _should_run(row, now_local_tz)
+  → orchestrator.start_camera_workers(store_id, camera_config_id)
+      → _load_camera_data(): camera_configs JOIN physical_cameras JOIN store_settings
+      → registry.send_command(StartCamera{camera_id, rtsp_url, target_fps, ...})
+          → asyncio.Queue → _writer task → gRPC context.write()
+              ── gRPC TLS stream ──────────────────────────────────
+              Edge Agent _handle_control()
+                → k8s_manager.apply_camera_configmap(camera_id, {...})
+                → k8s_manager.apply_iep2_deployment(camera_id)
+                → _wait_for_iep2_health(camera_id, timeout=60)
+                → _add_camera_to_iep1(camera_id, rtsp_url, ...)
+                    → gRPC AddCamera to IEP1 daemon unix socket
+                        IEP1: RTSP → JPEG → /dev/shm/frames/ → XADD stream:iep1:{cam}
 ```
 
-### 8.5 Agent Heartbeat → DB
+### 11.2 IEP1 → IEP2 → IEP3 Frame Pipeline
 
 ```
-Edge Agent (every 30 s):
-  _outgoing.put(AgentMessage{heartbeat: {store_id, agent_version, ts}})
-  for cam in _tracked_cameras:
-    status = docker_manager.get_status(cam)   # sync
-    _outgoing.put(AgentMessage{camera_status: {cam, status, ts}})
+IEP1: RTSP frame → /dev/shm/frames/{cam}/{ts}.jpg
+      every 60 s: manifest → edge-local Redis XADD stream:iep1:{cam}
 
-_request_generator → stub.Connect → gRPC stream → EEP servicer._reader
-  Heartbeat → _upsert_agent(store_id, version, "online")
-    → asyncpg INSERT INTO edge_agents ON CONFLICT (store_id) DO UPDATE
+IEP2: XREADGROUP iep1-frames stream:iep1:{cam}
+      manifest → read /dev/shm/frames paths (tmpfs, no network)
+      → YOLO (ZMQ unix socket) → ByteTrack → OSNet (ZMQ unix socket)
+      → homography → INSERT tracking_history
+      → UPSERT local_centroids
+      → server Redis XADD stream:iep2:batch_complete  (maxlen=500)
+      → edge-local Redis XACK stream:iep1:{cam}
 
+IEP3: server Redis XREADGROUP iep3-{store_id} stream:iep2:batch_complete
+      → XACK immediately (ADR-001)
+      → BatchCoordinator: collect cameras, fire when all N reported (or timeout)
+      → Reconciler (one asyncpg transaction):
+          BatchReader.classify → ReidMatcher.link_new_locals
+          → PositionSelector.write_canonical_positions
+          → StateManager.run_cleanup
+      → periodic orphan_sweep (every 50 batches, skip if >80% window used)
+```
+
+### 11.3 Homography Calibration Reload
+
+```
+EEP draft.py: POST /calibration/homography → save to DB → db.commit()
+  → redis.publish("iep2:reload:{config_id}", "homography")
+
+IEP2 _watch_reload_signals coroutine (server Redis pub/sub):
+  → projector.load(pool, UUID(camera_config_id))
+  → homography matrix + zones refreshed in-memory
+  (no IEP2 pod restart required)
+```
+
+### 11.4 Heartbeat → DB
+
+```
+Edge Agent heartbeat loop (30 s):
+  → XADD AgentMessage{heartbeat} to _outgoing queue
+  → _request_generator yields → stub.Connect gRPC stream
+      EEP servicer._reader:
+        Heartbeat → _upsert_agent(store_id, "online")
+          → asyncpg INSERT INTO edge_agents ON CONFLICT DO UPDATE
 On disconnect:
-  servicer.Connect finally block → _upsert_agent(store_id, status="offline")
+  servicer.Connect finally → _upsert_agent(store_id, "offline")
 ```
 
 ---
 
-## 9. Environment Variables Reference
+## 12. Deployment
 
-### EEP (`services/eep/`)
+### 12.1 Local Docker Compose
+
+Default: insecure gRPC (no certs), no auth. All services on same Docker network.
+
+```bash
+docker compose up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge
+docker compose --profile edge up -d iep1-daemon yolo-service osnet-service edge_agent_dev
+```
+
+Dev overrides (DEBUG_MODE, live reload):
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
+
+### 12.2 Cloud — Server (Helm)
+
+Chart: `charts/retailvision/` (see `Chart.yaml`, `values.yaml`, `values.staging.yaml`, `values.production.yaml`).
+
+Templates:
+| Template | Resource |
+|----------|----------|
+| `namespace.yaml` | Namespace `retailvision` |
+| `rbac.yaml` | ServiceAccounts for `eep`, `iep3` |
+| `eep-certificate.yaml` | cert-manager Certificate → Secret `eep-tls` |
+| `external-secrets.yaml` | ExternalSecret pulling secrets from secrets manager |
+| `eep-deployment.yaml` | Deployment, replicas=2, anti-affinity, TLS volume mount |
+| `eep-service.yaml` | ClusterIP :8000 + LoadBalancer :50051 |
+| `iep3-statefulset.yaml` | One StatefulSet per store in `iep3.stores[]`, replicas=1 always |
+| `iep3-service.yaml` | Headless service per StatefulSet |
+| `pgbouncer-deployment.yaml` | Deployment + ClusterIP service |
+| `redis-statefulset.yaml` | StatefulSet + TLS ConfigMap + ClusterIP service :6380 |
+
+**R2 invariant:** IEP3 must be a StatefulSet (not Deployment) — multiple replicas would split the in-memory candidate pool. `replicas: 1` is enforced.
+
+**R1 invariant:** `eep.replicas > 1` requires Redis-backed `_running_cameras` (M4-S1). Do not scale EEP before that is deployed.
+
+### 12.3 Edge Device — k3s Bootstrap
+
+Script: `scripts/bootstrap-edge-k3s.sh <store_uuid> <version> <eep_host> <agent_secret>`
+
+Steps:
+1. NTP sync (mandatory — stream timestamps must align)
+2. k3s install with `--bind-address=127.0.0.1` (API server loopback-only)
+3. NVIDIA container toolkit + device plugin
+4. Create shared host paths (`/dev/shm/sockets`, `/dev/shm/frames`)
+5. Apply `infra/edge/base/` manifests (namespace, RBAC, yolo, osnet, iep1-daemon)
+6. Write `/etc/retailvision/edge-agent.env`
+7. Install `retailvision-edge-agent.service` systemd unit
+
+Edge base manifests:
+| File | Content |
+|------|---------|
+| `namespace.yaml` | Namespace `retailvision` |
+| `rbac.yaml` | ServiceAccount + Role + RoleBinding for edge-agent |
+| `yolo-service.yaml` | Deployment, GPU limit `nvidia.com/gpu: 1`, ZMQ unix socket IPC |
+| `osnet-service.yaml` | Same pattern as yolo-service |
+| `iep1-daemon.yaml` | Deployment, `hostNetwork: true` (for loopback Redis access), `LOCAL_REDIS_URL` |
+
+**`hostNetwork: true` on IEP1:** Required because IEP1 connects to `redis://127.0.0.1:6379`. Inside a k3s pod, `127.0.0.1` is the pod's own loopback. `hostNetwork: true` makes the pod share the host's network namespace so `127.0.0.1` reaches the host Redis instance.
+
+---
+
+## 13. Environment Variables Reference
+
+### EEP
+
+| Var | Default | Required | Description |
+|-----|---------|----------|-------------|
+| `DATABASE_URL_EEP` | — | yes | `postgresql+asyncpg://...` (SQLAlchemy async) |
+| `WINDOW_SECONDS` | — | yes | Must match IEP1/IEP2/IEP3 |
+| `REDIS_URL` | `redis://redis:6379/0` | | Server Redis |
+| `JWT_SECRET` | — | yes | Change in production |
+| `AGENT_SECRET` | `""` | | Empty = no auth (dev mode) |
+| `GRPC_SERVER_CERT_PATH` | `""` | | Empty = insecure gRPC (dev mode) |
+| `GRPC_SERVER_KEY_PATH` | `""` | | Empty = insecure gRPC (dev mode) |
+| `GRPC_PORT` | `50051` | | |
+| `DEBUG_MODE` | `false` | | Enables `/api/debug/*` — disable in production |
+| `S3_ENDPOINT_URL/ACCESS_KEY/SECRET_KEY/BUCKET` | — | yes | MinIO / S3 |
+
+### IEP1 Ingestion Daemon
 
 | Var | Default | Description |
 |-----|---------|-------------|
-| `DATABASE_URL` | `postgresql+asyncpg://...@localhost:5432/retailvision` | SQLAlchemy async URL |
-| `REDIS_URL` | `redis://localhost:6379/0` | |
-| `S3_ENDPOINT_URL` | `http://localhost:9000` | MinIO |
-| `S3_PUBLIC_URL` | — | Public-facing S3 URL for signed URLs |
-| `S3_ACCESS_KEY` | `retailvision` | |
-| `S3_SECRET_KEY` | `retailvision_dev` | |
-| `S3_BUCKET` | `retailvision` | |
-| `JWT_SECRET` | `dev-secret-change-in-production` | **Change in production** |
-| `JWT_ALGORITHM` | `HS256` | |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | `30` | |
-| `SMTP_HOST/PORT/USER/PASSWORD/FROM` | — | Email delivery |
-| `DEBUG_MODE` | `true` (compose default) | Enables `/api/debug/*` routes |
-| `IEP2_IMAGE` | `retailvision-iep2:latest` | Docker image for IEP2 |
-| `DOCKER_NETWORK` | `retail-edge_default` | Network for IEP2 containers |
+| `LOCAL_REDIS_URL` | `redis://127.0.0.1:6379/0` | Edge-local Redis (loopback) |
+| `IEP1_CONTROL_SOCK` | `unix:///dev/shm/sockets/iep1_control.sock` | |
+| `IEP1_HEALTH_SOCK` | `unix:///dev/shm/sockets/iep1_health.sock` | |
+| `TMPFS_FRAME_ROOT` | `/dev/shm/frames` | Shared frame store base path |
 
-### IEP1 (`services/iep1_ingestion/`)
-
-| Var | Default | Description |
-|-----|---------|-------------|
-| `S3_ENDPOINT_URL/ACCESS_KEY/SECRET_KEY/BUCKET` | — | Frame upload |
-| `REDIS_URL` | `redis://localhost:6379/0` | Manifest publish |
-
-### IEP2 (`services/iep2_vision/`)
+### IEP2 Vision Worker
 
 | Var | Required | Description |
 |-----|----------|-------------|
-| `DATABASE_URL` | yes | `postgresql://...` (no `+asyncpg` prefix — direct asyncpg) |
-| `REDIS_URL` | — | Consumer group source |
-| `S3_ENDPOINT_URL/ACCESS_KEY/SECRET_KEY/BUCKET` | — | Frame download |
-| `LIVE_STREAM_ENABLED` | — | Enable LivePublisher (Redis pub/sub for UI) |
+| `CAMERA_ID` | yes | `physical_cameras.id` UUID |
+| `STORE_ID` | yes | |
+| `CAMERA_CONFIG_ID` | | Enables homography reload signal subscription |
+| `WINDOW_SECONDS` | yes | Must match IEP1 |
+| `LOCAL_REDIS_URL` | yes | Reads IEP1 stream from edge-local Redis |
+| `SERVER_REDIS_URL` | yes | Publishes `batch_complete` to server Redis |
+| `DATABASE_URL_SERVER` | yes | `postgresql://...` (no `+asyncpg`) |
+| `YOLO_INPUT_SOCK` | yes | ZMQ IPC socket |
+| `OSNET_INPUT_SOCK` | yes | ZMQ IPC socket |
+| `TMPFS_FRAME_ROOT` | yes | Base path for shared frame store |
 
-### Edge Agent (`services/edge_agent/`)
+### IEP3 Reconciliation
+
+| Var | Default | Description |
+|-----|---------|-------------|
+| `STORE_ID` | required | One IEP3 per store |
+| `WINDOW_SECONDS` | required | Must match IEP1/IEP2 |
+| `DATABASE_URL_SERVER` | required | `postgresql://...` (no `+asyncpg`) |
+| `SERVER_REDIS_URL` | `redis://redis:6379/0` | |
+| `REID_THRESHOLD` | `0.75` | Cosine similarity cutoff |
+| `MAX_SPEED_MPS` | `1.5` | Spatial gate |
+| `GRACE_SECONDS` | `300.0` | LOST → EXITED |
+| `EMBEDDING_DIM` | `512` | |
+| `CENTROID_EMA_ALPHA` | `0.3` | EMA smoothing |
+| `COORDINATOR_TIMEOUT_S` | `120.0` | Partial-batch timeout |
+| `POSITION_WEIGHT_AREA` | `0.7` | Must sum to 1.0 with CONF |
+| `POSITION_WEIGHT_CONF` | `0.3` | |
+| `EXPECTED_CAMERAS_REFRESH_BATCHES` | `10` | DB camera-count re-query cadence |
+| `ORPHAN_SWEEP_INTERVAL_BATCHES` | `50` | Periodic sweep cadence |
+
+### Edge Agent
 
 | Var | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `EEP_GRPC_URL` | yes | — | `host:50051` |
-| `STORE_ID` | yes | — | Store UUID |
-| `AGENT_VERSION` | — | `0.1.0` | Reported in heartbeats |
-| `IEP1_IMAGE` | — | `retailvision-iep1:latest` | |
-| `DOCKER_NETWORK` | — | `retail-edge_default` | Verify: `docker network ls \| grep retail` |
+| `EEP_GRPC_URL` | yes | | `host:50051` |
+| `STORE_ID` | yes | | |
+| `AGENT_SECRET` | yes | | Must match EEP's `AGENT_SECRET`; empty = no token sent (dev) |
+| `GRPC_CA_CERT_PATH` | | `/etc/retailvision/certs/ca.crt` | Missing file = insecure channel (dev) |
+| `SERVER_REDIS_URL` | yes | | Passed to IEP2 ConfigMaps |
+| `DATABASE_URL_SERVER` | yes | | Passed to IEP2 ConfigMaps |
+| `LOCAL_REDIS_URL` | | `redis://localhost:6379/0` | Passed to IEP1 |
+| `HEARTBEAT_INTERVAL_S` | | `30` | |
+
+### Live Bridge
+
+| Var | Default | Description |
+|-----|---------|-------------|
+| `SERVER_REDIS_URL` | `redis://redis:6379/0` | Reads `stream:iep2:live:{camera_id}` |
+| `S3_ENDPOINT_URL/ACCESS_KEY/SECRET_KEY/BUCKET` | required | Frame URL presigning |
+| `PRESIGNED_URL_EXPIRY` | `30` | Seconds |
 
 ---
 
-## 10. Dependency Versions
+## 14. Dependency Versions
 
-### EEP (`services/eep/requirements.txt`)
+### EEP
 
 ```
 fastapi==0.115.0
@@ -1303,64 +1145,58 @@ redis[asyncio]==5.0.4
 boto3==1.34.69
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-bcrypt==3.2.2
-python-multipart==0.0.9
 pydantic-settings==2.2.1
-email-validator==2.1.1
-httpx==0.27.0
-aiosmtplib==3.0.1
-shapely==2.0.4
-opencv-python-headless==4.9.0.80
-numpy==1.26.4
 apscheduler==3.10.4
 grpcio==1.64.0
 grpcio-tools==1.64.0
+grpcio-health-checking==1.64.0
+grpcio-reflection==1.64.0
 docker==7.1.0
+shapely==2.0.4
 ```
 
-### IEP1 (`services/iep1_ingestion/requirements.txt`)
+### IEP1
 
 ```
 opencv-python-headless==4.9.0.80
-boto3==1.34.0
 redis==5.0.1
-python-dotenv==1.0.1
+grpcio==1.64.0     # IEP1 gRPC control/health server
 numpy==1.26.4
 ```
 
-### IEP2 (`services/iep2_vision/requirements.txt`)
+### IEP2
 
 ```
-opencv-python-headless
+opencv-python-headless==4.9.0.80
 ultralytics           # YOLOv8
-supervision==0.22.0
 boxmot>=10.0.0        # ByteTrack
 asyncpg==0.29.0
 shapely==2.0.4
-python-dotenv==1.0.1
-redis==5.0.1
-boto3==1.34.0
-fastapi, uvicorn[standard], numpy, Pillow
+redis[asyncio]==5.0.3
+pydantic-settings==2.2.1
+grpcio==1.64.0
+numpy==1.26.4
 ```
 
-### Edge Agent (`services/edge_agent/requirements.txt`)
+### IEP3
+
+```
+asyncpg==0.29.0
+redis[asyncio]==5.0.3
+numpy==1.26.4
+pydantic-settings==2.2.1
+```
+
+### Edge Agent
 
 ```
 grpcio==1.64.0
 grpcio-tools==1.64.0
-docker==7.1.0
+grpcio-health-checking==1.64.0
+kubernetes==29.0.0
 ```
 
-### IEP3 (`services/iep3_reconciliation/requirements.txt`)
-
-```
-asyncpg==0.29.0
-redis[asyncio]==5.0.4
-numpy==1.26.4
-python-dotenv==1.0.1
-```
-
-### Test (`tests/e2e/`)
+### Tests
 
 ```
 pytest
@@ -1370,146 +1206,61 @@ redis[asyncio]
 boto3
 ```
 
-`pyproject.toml`: `asyncio_mode = "auto"`, `testpaths = ["tests"]`.
+---
+
+## 15. Architecture Decision Records
+
+### ADR-001: XACK Before Processing in IEP3
+
+**Status:** Accepted
+**Location:** `docs/decisions/ADR-001-xack-before-processing.md`
+
+IEP3 XACKs `batch_complete` messages immediately on receipt, before calling `on_ready`. This means a crash between XACK and reconciliation silently loses the batch (no retry).
+
+**Rationale:** Reconciliation is not idempotent (creates GlobalIDs, FSM transitions). Making it idempotent requires deterministic GlobalID derivation or stored batch-key deduplication — neither is worth the complexity for the expected crash frequency.
+
+**Compensating controls:**
+1. `orphan_sweep()` on every IEP3 startup
+2. `orphan_sweep()` every `ORPHAN_SWEEP_INTERVAL_BATCHES` batches
+3. Orphan sweep skipped when reconciliation > 80% of window budget (R7)
+4. `check_pel_health()` on startup (non-empty PEL = code bug)
+5. Orphan sweep always in a separate transaction from reconciliation
+
+**Failure mode analysis:**
+- Crash after XACK, before `on_ready`: no DB writes → no orphans
+- Crash inside transaction: PostgreSQL rolls back → no orphans
+- Crash after COMMIT: full success, no orphans
+- Only orphan source: `global_identity` created, crash before `global_tracking_history` written
 
 ---
 
-## 11. IEP3 — Reconciliation Pipeline
+## 16. Known Gaps & Deferred Work
 
-**Location:** `services/iep3_reconciliation/`  
-**Runtime:** Python 3.11, asyncio, long-running daemon, no HTTP server, no exposed port  
-**Entry point:** `python -m app.main`  
-**Trigger:** `SIGTERM`/`SIGINT` for graceful shutdown
+### Resolved since last audit (M1–M6)
 
-### 11.1 Configuration (`app/settings.py`)
+| Item | Resolution |
+|------|-----------|
+| No TLS on gRPC | M4-S2: cert-manager cert + `add_secure_port`; dev fallback to insecure |
+| No auth on gRPC | M4-S2: `AgentAuthInterceptor` with HMAC constant-time compare |
+| `_running_cameras` resets on EEP restart | M4-S1: Redis-backed `_running_cameras` set |
+| `EXPECTED_CAMERAS` static env var | M4-S3: dynamic query from `camera_configs` + periodic refresh |
+| IEP3 settings as dataclass | M4-S3: migrated to `pydantic_settings.BaseSettings` |
+| No orphan sweep robustness | M4-S3 + M5-S2: per-query timeouts, structured logging, PEL check, R7 timing skip |
+| Redis topology not split | M5-S1: edge-local (`LOCAL_REDIS_URL`) vs server (`SERVER_REDIS_URL`) |
+| No homography live reload | M5-S1: pub/sub signal in `draft.py` + `_watch_reload_signals` in IEP2 |
+| Docker socket model on edge | M6-S2: replaced by k3s + `k8s_manager.py` + `edge_agent.py` rewrite |
+| Batch keying by `batch_number` | M4-S3: switched to `window_start_ms`-rounded keying (restart-safe) |
+| XADD without MAXLEN | M5-S1: all XADD calls now include `maxlen=N, approximate=True` |
 
-`Iep3Settings` is a frozen dataclass built by `get_settings()` from environment variables. All fields have safe defaults except `DATABASE_URL`, `STORE_ID`, and `EXPECTED_CAMERAS` — those raise `ValueError` at startup if missing. `DATABASE_URL` must use plain `postgresql://` (not `postgresql+asyncpg://`).
+### Remaining gaps
 
-### 11.2 DB Layer (`app/db.py`)
-
-Module-level `asyncpg.Pool` singleton. `create_pool(url)` initialises it (min=2, max=10, command_timeout=30). `get_pool()` raises `RuntimeError` if called before `create_pool`. Pool is created once at startup and shared across all sub-components including standalone repository methods.
-
-### 11.3 Repository (`app/repository.py`)
-
-No ORM. All SQL is positional asyncpg `$1…$N`. Six dataclasses: `LocalObservation`, `MappingRow`, `GlobalCandidate`, `PositionRow`, `ResolutionResult`, `CameraBatchInfo`.
-
-Two classes of methods:
-
-**Standalone** (acquire own connection — called outside the batch transaction):
-- `get_camera_resolution(camera_id)` — resolution fallback chain: `physical_cameras.stream_width/height` → `camera_configs.video_width/height` → `calibrations.image_width/height`
-- `get_camera_batch_info_bulk(camera_ids)` — open `camera_runtime_sessions` → `camera_config_id` + `version_id`
-- `orphan_sweep()` — startup cleanup: remove GlobalIDs with `last_seen_ts == first_seen_ts` and no `global_tracking_history` row (crash between process 1 and 2)
-
-**Transaction** (receive `conn` from Reconciler — never call `pool.acquire()` internally):
-`read_batch_observations`, `get_active_mappings_bulk`, `touch_links_bulk` (unnest), `load_local_centroid`, `get_candidate_globals`, `get_embeddings_bulk`, `create_global_identity`, `link_local`, `deactivate_mapping`, `upsert_embedding`, `reactivate_global`, `get_positions_for_selection`, `write_global_position`, `update_global_last_seen`, `transition_active_to_lost`, `transition_lost_to_exited`, `deactivate_mappings_for_globals`, `delete_centroids_for_globals`
-
-**`transition_active_to_lost` uses `window_start_ms` as the activity threshold** — not `window_end_ms - 60_000`. The correct parameter is:
-```sql
-WHERE glm.last_seen_ts >= $3   -- $3 = window_start_ms (exact, not approximated)
-```
-
-### 11.4 BatchCoordinator (`app/coordinator.py`)
-
-Consumer group `iep3-{store_id}`. XREADGROUP block=5000 ms, count=100. XACK fires **before** calling `on_ready` — message is not redelivered even if reconciliation fails. State cleanup (dict pops) before `on_ready` call. `_check_timeouts()` iterates a defensive copy of `_first_received.items()`.
-
-On timeout: fires `on_ready` with the cameras that reported (partial reconciliation). Logged as WARNING.
-
-### 11.5 BatchReader (`app/reader.py`)
-
-`classify(conn, window_start_ms, window_end_ms)` → `(known, new)`.  
-Exactly 3 queries: `read_batch_observations` + `get_active_mappings_bulk` + `touch_links_bulk`.  
-`new` list is sorted by `first_seen_ts ASC` from DB — never re-sorted. Empty window returns `([], [])`.
-
-### 11.6 ReID Gates (`app/reid/gates.py`)
-
-`cross_camera_gate(new_x, new_y, new_ts, last_x, last_y, last_ts, max_speed_mps=1.5) → bool`
-
-Pure function. Returns `True` (passes) when `elapsed_s ≤ 0` (simultaneous observations) or `distance_m / elapsed_s ≤ max_speed_mps`.
-
-### 11.7 ReidMatcher (`app/reid/matcher.py`)
-
-Operates inside the Reconciler's transaction. Loads all candidate globals and embeddings **once** before the per-LocalID loop. Mutates `candidates` and `embedding_map` in-place so GlobalIDs created for `local_id_i` are immediately available as candidates for `local_id_{i+1}`.
-
-Per-observation pipeline:
-1. Load appearance centroid (`local_centroids`)
-2. Cross-camera filter: exclude candidates with an active link on `obs.camera_id`
-3. Spatial-temporal gate: `cross_camera_gate` per survivor
-4. Cosine similarity: `dot(_l2_normalize(centroid), _representative_centroid(cam_centroids))`
-5. If `best_score ≥ threshold`: link (or reactivate if `state='lost'`) → `returns False` (no new GlobalID)
-6. Else: `create_global_identity` + `link_local` + `upsert_embedding` → `returns True`
-
-`_l2_normalize` guards `norm < 1e-8` (returns vector unchanged — near-zero centroids score ~0, below threshold).
-
-### 11.8 PositionSelector (`app/selection.py`)
-
-`_selection_score(bbox_area, bbox_confidence, frame_width, frame_height, weight_area, weight_confidence)`  
-= `weight_area * min(bbox_area/frame_px, 1.0) + weight_confidence * bbox_confidence`
-
-`write_canonical_positions` flow:
-1. `get_positions_for_selection` (inside transaction) — all active GlobalID positions
-2. `get_camera_batch_info_bulk` (**standalone**, outside transaction) — `camera_config_id`
-3. `_resolve_resolutions` — `(camera_id, camera_config_id)` cache, falls back to `get_camera_resolution` (standalone), then env var defaults
-4. Group by `global_id` in Python
-5. Score + select winner per GlobalID
-6. `write_global_position` + `update_global_last_seen` (inside transaction)
-
-Resolution cache key: `(camera_id, camera_config_id)`. Natural invalidation on version activation — new `camera_config_id` → cache miss → fresh DB query.
-
-### 11.9 StateManager (`app/state.py`)
-
-`run_cleanup(conn, store_id, window_start_ms, window_end_ms)` — strict order:
-1. `transition_active_to_lost` — GlobalIDs with no active link seen since `window_start_ms`
-2. `transition_lost_to_exited` — GlobalIDs where `lost_since_ts + grace_seconds*1000 < window_end_ms`
-3. `deactivate_mappings_for_globals` — must run before step 4 (centroid deletion reads mapping)
-4. `delete_centroids_for_globals` — DELETE `local_centroids` for LocalIDs linked to exited GlobalIDs
-
-Newly LOST GlobalIDs (set in this batch) will not exit in the same batch: `window_end_ms - window_end_ms = 0 < grace_ms`.
-
-LOST → ACTIVE reactivation is handled exclusively by `ReidMatcher.reactivate_global()` — StateManager never sets a GlobalID back to active.
-
-### 11.10 Reconciler (`app/reconciler.py`)
-
-Owns the single `pool.acquire()` / `conn.transaction()` block per batch. Constructs all four sub-components once at `__init__` and reuses them across all batches. `PositionSelector._resolution_cache` is intentionally long-lived.
-
-`process_batch(batch_number, window, reporting_cameras) → dict` returns stats including `known_locals`, `new_locals`, `new_globals_created`, `positions_written`, `newly_lost`, `newly_exited`. Exceptions propagate to `BatchCoordinator._fire()` which catches, logs, and continues — a failed batch is skipped and orphan sweep on restart handles any partial state.
-
-### 11.11 Tests
-
-**Unit tests** (`tests/unit/iep3/`): 25 cases, no DB/Redis. All run inside the `iep3_reconciliation` container with workspace mounted. `conftest.py` adds `services/iep3_reconciliation/` to `sys.path`. `FakeRepo` is stateful (not just AsyncMock) to simulate in-memory candidate pool mutations in the matcher.
-
-**Integration test** (`tests/e2e/test_iep3_reconciler.py`): 2 tests against live PostgreSQL. Seeds 4 `tracking_history` rows + 3 `local_centroids` for a 3-camera scenario (2 cameras see same person A with identical centroid, 1 camera sees person B with orthogonal centroid). Verifies all 5 Architecture Spec §10 invariants. Cleans up via `DELETE FROM stores WHERE id=$1` (CASCADE).
-
----
-
-## 12. Known Gaps & Next Steps
-
-### In-scope gaps (not yet implemented)
-
-| Gap | Location | Impact |
-|-----|----------|--------|
-| `_running_cameras` resets on EEP restart | `camera_scheduler.py` | Cameras scheduled to be running at restart time will not start until the next 60 s tick. For most schedules this is acceptable. Fix: query `edge_agents` + Docker on startup to rebuild state. |
-| Agent reconnect doesn't replay pending queue | `agent.py` | `_outgoing` is module-level and survives reconnect, but commands queued before disconnect are replayed in FIFO order — correct behaviour. However if the EEP process restarts, any buffered commands are lost. Fix: persist commands to Redis before queuing. |
-| `CameraStatusReport` received by EEP but not acted on | `servicer.py` `_reader` | Camera status is logged only. Phase 7 comment says "update container state tracking here". The `_running_cameras` set is in Edge Agent, not EEP — EEP has no container-level state tracking beyond the gRPC stream liveness. |
-| `edge_agents` table not in SQLAlchemy models | `models/__init__.py` | `edge_agents` is created via `schema.sql` and written via raw SQL in `servicer.py`. It is not mapped as a SQLAlchemy ORM model. This is intentional — the table is only written by the servicer and read by `schema.sql` introspection. Add a model if query composition via ORM is needed. |
-| `grpcio` not in EEP requirements | `requirements.txt` | `grpcio-tools==1.64.0` is present and depends on `grpcio==1.64.0`, so it's installed transitively. Explicit pin `grpcio==1.64.0` should be added for clarity. |
-| No TLS on gRPC | `server.py` | `add_insecure_port` — acceptable for dev/LAN. Production needs `add_secure_port` with SSL credentials. |
-| No authentication on gRPC | `servicer.py` | Any process that knows EEP's address and port can connect as an agent with any `store_id`. Production needs mutual TLS or a shared secret in metadata. |
-| DEBUG_MODE defaults to `true` in compose | `docker-compose.yml` | The debug endpoint has no auth. Must be `false` or removed entirely in production. |
-| `IEP2_IMAGE` tag `latest` | `docker-compose.yml` | `latest` is mutable. Pin to a digest or semver tag for reproducible deployments. |
-| Window seconds mismatch risk | `orchestrator.py` | `window_seconds=60.0` is hardcoded. IEP1's default `--window 60.0` and IEP2's 60 s batch window must all match. No runtime validation. |
-
-### IEP3-specific gaps
-
-| Gap | Location | Impact |
-|-----|----------|--------|
-| XACK before `on_ready` — no retry on reconciliation failure | `coordinator.py` | A reconciliation crash leaves partial DB state. Orphan sweep on the next IEP3 restart cleans up `global_identities` that were created but never received a `global_tracking_history` row. For mapping-level partial state, no automated cleanup exists — accepted trade-off for simplicity. |
-| `_pool` module singleton is not thread-safe for multi-store | `db.py` | IEP3 is designed as one-process-per-store. Running multiple stores in one process would share the pool — not the intended deployment model. |
-| Resolution cache never expires | `selection.py` | On camera config version change, the old `(camera_id, camera_config_id)` key becomes unreachable (natural invalidation). But the old entry is never garbage-collected from the dict. In practice the dict grows by at most one entry per version activation, so memory impact is negligible. |
-| No Prometheus metrics | All IEP3 modules | Reconciliation latency, ReID match rate, partial batch rate are not exported. Add `prometheus_client` counters/histograms to `reconciler.py` when observability is needed. |
-
-### Out-of-scope (future phases)
-
-- IEP4: Alerts — zone occupancy thresholds, dwell time alerts
-- IEP5: Analytics — aggregated heatmaps, path analysis
-- IEP6: Embedded agent — Jetson/RPi optimised inference
-- Production hardening: TLS, gRPC auth, K8s deployment, observability (Prometheus metrics from EEP, IEP1, IEP2, IEP3)
+| Gap | Location | Impact | Mitigation |
+|-----|----------|--------|-----------|
+| mTLS not yet implemented | EEP gRPC | Shared secret is less secure than per-device certs | Migration plan at `docs/security/mtls-migration.md` |
+| `_running_cameras` in EEP not Redis-backed in all code paths | `camera_scheduler.py` | EEP restart may cause schedule re-evaluation to start cameras that were stopped manually | Acceptable for current scale; Redis persistence is the M4-S1 fix |
+| IEP2 `run_from_iep1` legacy path still uses single `redis_url` | `iep2_vision/runtime.py` | Only used in dev/test path, not production daemon path | Non-critical |
+| No Prometheus metrics | All IEP1–IEP3 | Reconciliation latency, ReID match rate, partial batch rate invisible | Add `prometheus_client` counters to `reconciler.py` in a future observability sprint |
+| `local_centroids` orphan sweep doesn't filter by `store_id` in the legacy code path | Resolved by store_id filter added in M5-S2; schema uncertainty about `store_id` column on old rows | Low — orphan sweep is safe to run without the filter (deletes any orphaned centroid regardless of store) | Verify `local_centroids.store_id` column exists before running store-filtered sweep |
+| IEP3 `coordinator_timeout_s` default `120s` diverges from spec's `10s` | `settings.py` | Longer timeout means partial batches fire later — safer for multi-camera deployments | Intentional deviation; spec default was too aggressive |
+| k3s on x86 dev machines | `infra/edge/base/` | YOLO/OSNet Dockerfiles use Jetson/ARM64 JetPack base image | Use `Dockerfile.dev` (CPU fallback) on x86 |
+| IEP4/IEP5/IEP6 skeleton services | `services/iep4_alerts/`, etc. | No implementation logic — start and idle | Planned for future phases |

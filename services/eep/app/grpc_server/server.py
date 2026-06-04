@@ -41,10 +41,20 @@ async def start_grpc_server(port: int | None = None) -> grpc.aio.Server:
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, _server)
     health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
     reflection.enable_server_reflection(_REFLECTION_SERVICES, _server)
-    credentials = _load_server_credentials()
-    _server.add_secure_port(f"[::]:{port}", credentials)
+    cert_path = os.environ.get("GRPC_SERVER_CERT_PATH", "")
+    key_path  = os.environ.get("GRPC_SERVER_KEY_PATH", "")
+    if cert_path and key_path:
+        credentials = _load_server_credentials()
+        _server.add_secure_port(f"[::]:{port}", credentials)
+        log.info("gRPC server started  port=%d  tls=enabled  reflection=enabled  health=SERVING", port)
+    else:
+        _server.add_insecure_port(f"[::]:{port}")
+        log.warning(
+            "gRPC server started  port=%d  tls=DISABLED (dev mode) — "
+            "set GRPC_SERVER_CERT_PATH + GRPC_SERVER_KEY_PATH in production",
+            port,
+        )
     await _server.start()
-    log.info("gRPC server started  port=%d  tls=enabled  reflection=enabled  health=SERVING", port)
     return _server
 
 
