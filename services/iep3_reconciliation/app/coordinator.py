@@ -19,6 +19,33 @@ import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
 
+
+async def check_pel_health(redis_client: aioredis.Redis, store_id: str) -> int:
+    """Check pending entries in the IEP3 consumer group.
+
+    In the XACK-before-processing model the PEL must always be empty on startup.
+    A non-empty PEL means XACK was not sent in a previous session — which
+    should be impossible and indicates a code bug or Redis client issue.
+    Returns 0 if the group does not yet exist (first startup before coordinator runs).
+    """
+    group = f"iep3-{store_id}"
+    try:
+        info = await redis_client.xpending(STREAM, group)
+        pending_count = int(info["pending"])
+    except aioredis.ResponseError:
+        # Group does not exist yet — first startup, no PEL possible.
+        pending_count = 0
+
+    if pending_count > 0:
+        logger.warning(
+            "Non-empty PEL for IEP3 store=%s pending=%d — investigate XACK logic",
+            store_id, pending_count,
+        )
+    else:
+        logger.info("PEL health: 0 pending entries for group %s", group)
+    return pending_count
+
+
 # Type alias for the reconciliation callback
 OnReadyCallback = Callable[
     [int, tuple[int, int], frozenset],   # batch_key, window, reporting_cameras

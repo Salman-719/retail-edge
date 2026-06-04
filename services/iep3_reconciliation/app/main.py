@@ -20,7 +20,7 @@ import sys
 
 import redis.asyncio as aioredis
 
-from app.coordinator import BatchCoordinator
+from app.coordinator import BatchCoordinator, check_pel_health
 from app.db import close_pool, create_pool, get_pool
 from app.reconciler import Reconciler
 from app.repository import Iep3Repository
@@ -96,13 +96,11 @@ async def _main() -> None:
     expected_cameras = await repo.get_expected_cameras_count(settings.store_id)
     logger.info("Expected cameras from DB: %d", expected_cameras)
 
-    # ── Startup orphan sweep (R4) ─────────────────────────────────────────────
-    deleted_globals, deleted_centroids = await repo.orphan_sweep(settings.store_id)
-    if deleted_globals or deleted_centroids:
-        logger.warning(
-            "Startup orphan sweep: deleted_globals=%d deleted_centroids=%d",
-            deleted_globals, deleted_centroids,
-        )
+    # ── Startup orphan sweep ──────────────────────────────────────────────────
+    await repo.orphan_sweep(settings.store_id)
+
+    # ── R4: PEL health check — must be 0 in XACK-before-processing model ─────
+    await check_pel_health(redis_client, settings.store_id)
 
     # ── Reconciler ────────────────────────────────────────────────────────────
     reconciler = Reconciler(

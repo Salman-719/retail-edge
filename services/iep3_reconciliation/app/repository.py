@@ -204,26 +204,32 @@ class Iep3Repository:
                     """
                     WITH deleted AS (
                         DELETE FROM local_centroids lc
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM global_local_mapping glm
-                            WHERE glm.local_id  = lc.local_id
-                              AND glm.is_active = TRUE
-                        )
+                        WHERE lc.store_id = $1
+                          AND NOT EXISTS (
+                              SELECT 1 FROM global_local_mapping glm
+                              WHERE glm.local_id  = lc.local_id
+                                AND glm.is_active = TRUE
+                          )
                         RETURNING local_id
                     )
                     SELECT COUNT(*) FROM deleted
                     """,
+                    store_uuid,
                     timeout=_STANDALONE_TIMEOUT,
                 )
 
         deleted_globals   = int(deleted_globals or 0)
         deleted_centroids = int(deleted_centroids or 0)
 
-        if deleted_globals or deleted_centroids:
-            logger.warning(
-                "Orphan sweep store=%s deleted_globals=%d deleted_centroids=%d",
-                store_id, deleted_globals, deleted_centroids,
-            )
+        _sweep_extra = {
+            "store_id":          store_id,
+            "deleted_globals":   deleted_globals,
+            "deleted_centroids": deleted_centroids,
+        }
+        if deleted_globals > 0 or deleted_centroids > 0:
+            logger.warning("Orphan sweep found stale data", extra=_sweep_extra)
+        else:
+            logger.info("Orphan sweep clean", extra=_sweep_extra)
         return deleted_globals, deleted_centroids
 
     # =========================================================================

@@ -4,6 +4,7 @@ All sub-components receive the same conn and run inside one transaction.
 from __future__ import annotations
 
 import logging
+import time
 
 from app.db import get_pool
 from app.reader import BatchReader
@@ -64,6 +65,7 @@ class Reconciler:
         handles any partial state.
         """
         window_start_ms, window_end_ms = window
+        t0 = time.monotonic()
         # R1: partial logging moved to coordinator._fire (R6); reconciler
         # always processes whatever cameras reported — no special-casing.
 
@@ -112,6 +114,7 @@ class Reconciler:
                 )
 
         # Transaction committed. Build and log stats.
+        reconcile_elapsed = time.monotonic() - t0
         self._batches_processed += 1
         stats = {
             "batch_number":        batch_number,
@@ -128,21 +131,22 @@ class Reconciler:
         logger.info("Batch %d reconciled: %s", batch_number, stats)
 
         # R4: periodic orphan sweep — every ORPHAN_SWEEP_INTERVAL_BATCHES batches
+        # R7: skip sweep when reconciliation consumed >80% of the window to avoid
+        # extending the processing window and causing the next batch to be late.
         if self._batches_processed % self._settings.orphan_sweep_interval_batches == 0:
-            try:
-                deleted_globals, deleted_centroids = await self._repo.orphan_sweep(
-                    self._store_id
-                )
-                if deleted_globals or deleted_centroids:
-                    logger.warning(
-                        "Periodic orphan sweep  batch=%d  "
-                        "deleted_globals=%d  deleted_centroids=%d",
-                        batch_number, deleted_globals, deleted_centroids,
+            sweep_budget = self._settings.window_seconds * 0.8
+            if reconcile_elapsed < sweep_budget:
+                try:
+                    await self._repo.orphan_sweep(self._store_id)
+                except Exception:
+                    logger.exception(
+                        "Periodic orphan sweep failed at batch=%d — skipping",
+                        batch_number,
                     )
-            except Exception:
-                logger.exception(
-                    "Periodic orphan sweep failed at batch=%d — skipping",
-                    batch_number,
+            else:
+                logger.info(
+                    "Skipping orphan sweep — reconciliation took %.1fs (>80%% of %.0fs window)",
+                    reconcile_elapsed, self._settings.window_seconds,
                 )
 
         return stats
