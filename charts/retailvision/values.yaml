@@ -1,0 +1,54 @@
+global:
+  imageRegistry: registry.example.com/retailvision
+  imagePullPolicy: IfNotPresent
+
+windowSeconds: "60"
+
+eep:
+  image:
+    tag: "1.0.0"
+  replicas: 2
+  grpcPort: 50051
+  httpPort: 8000
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"
+
+iep3:
+  image:
+    tag: "1.0.0"
+  stores: []   # populated per environment: ["store-uuid-1", "store-uuid-2"]
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+pgbouncer:
+  image:
+    tag: "1.22.1"
+  replicas: 2
+  poolMode: transaction
+  maxClientConn: 500
+  defaultPoolSize: 20
+
+redis:
+  image:
+    tag: "7.2.4"
+  tls: true
+  maxmemory: "512mb"
+
+secrets:
+  # Injected by external-secrets from secrets manager.
+  # Values are secret manager paths, not plaintext secrets.
+  postgresPassword: "retailvision/postgres-password"
+  redisPassword:    "retailvision/redis-password"
+  jwtSecret:        "retailvision/jwt-secret"
+  agentSecret:      "retailvision/agent-secret"
+  redisUrl:         "retailvision/redis-url"

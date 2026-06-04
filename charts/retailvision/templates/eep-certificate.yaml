@@ -1,0 +1,15 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: eep-grpc-tls
+  namespace: retailvision
+spec:
+  secretName: eep-tls
+  issuerRef:
+    name: retailvision-ca-issuer
+    kind: ClusterIssuer
+  dnsNames:
+    - eep.retailvision.internal
+    - eep.retailvision.example.com
+  duration: 8760h    # 1 year
+  renewBefore: 720h  # renew 30 days before expiry

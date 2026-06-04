@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: osnet-service
+  namespace: retailvision
+  labels:
+    app: osnet-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: osnet-service
+  template:
+    metadata:
+      labels:
+        app: osnet-service
+    spec:
+      containers:
+        - name: osnet-service
+          image: retailvision-osnet-service:1.0.0
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: "2Gi"
+              cpu: "1"
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+          env:
+            - name: OSNET_MODEL_VARIANT
+              value: "osnet_x0_25"
+            - name: OSNET_MAX_BATCH_SIZE
+              value: "64"
+            - name: OSNET_BATCH_TIMEOUT_MS
+              value: "20"
+          volumeMounts:
+            - name: ipc-sockets
+              mountPath: /tmp/sockets
+          livenessProbe:
+            exec:
+              command: ["grpc_health_probe",
+                        "-addr=unix:///tmp/sockets/osnet_health.sock"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 3
+      volumes:
+        - name: ipc-sockets
+          hostPath:
+            path: /dev/shm/sockets
+            type: DirectoryOrCreate

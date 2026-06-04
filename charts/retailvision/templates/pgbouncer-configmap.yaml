@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgbouncer-config
+  namespace: retailvision
+data:
+  pgbouncer.ini: |
+    [databases]
+    retailvision = host=postgres port=5432 dbname=retailvision
+
+    [pgbouncer]
+    listen_addr = *
+    listen_port = 5432
+    auth_type = scram-sha-256
+    auth_file = /etc/pgbouncer/userlist.txt
+
+    ; Transaction pooling — services must NOT use SET or LISTEN/NOTIFY
+    pool_mode = {{ .Values.pgbouncer.poolMode }}
+    max_client_conn = {{ .Values.pgbouncer.maxClientConn }}
+    default_pool_size = {{ .Values.pgbouncer.defaultPoolSize }}
+
+    ; Must be empty for transaction pooling
+    server_reset_query =
+    server_reset_query_always = 0
+
+    ; Suppress harmless extra_float_digits from asyncpg/psycopg2
+    ignore_startup_parameters = extra_float_digits
+
+    logfile = /tmp/pgbouncer.log
+    pidfile = /tmp/pgbouncer.pid

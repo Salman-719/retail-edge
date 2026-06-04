@@ -1,0 +1,11 @@
+# Production overrides — full replica count, production-grade resources.
+# Populate iep3.stores with actual store UUIDs before deploying.
+
+eep:
+  replicas: 2
+
+iep3:
+  stores: []   # set at deploy time: --set iep3.stores={uuid1,uuid2,...}
+
+redis:
+  maxmemory: "1gb"

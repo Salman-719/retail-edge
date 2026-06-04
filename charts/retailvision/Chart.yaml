@@ -1,0 +1,14 @@
+apiVersion: v2
+name: retailvision
+description: RetailVision — server-side retail analytics platform (EEP + IEP3)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.26.0"
+keywords:
+  - retailvision
+  - retail-analytics
+  - edge-cloud
+maintainers:
+  - name: RetailVision Team
+dependencies: []

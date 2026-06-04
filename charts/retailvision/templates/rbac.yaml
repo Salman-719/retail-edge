@@ -1,0 +1,12 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eep
+  namespace: retailvision
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: iep3
+  namespace: retailvision

@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eep
+  namespace: retailvision
+  labels:
+    app: eep
+spec:
+  replicas: {{ .Values.eep.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: eep
+  template:
+    metadata:
+      labels:
+        app: eep
+    spec:
+      serviceAccountName: eep
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: eep
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: eep
+          image: "{{ .Values.global.imageRegistry }}/eep:{{ .Values.eep.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.eep.httpPort }}
+              name: http
+            - containerPort: {{ .Values.eep.grpcPort }}
+              name: grpc
+          env:
+            - name: WINDOW_SECONDS
+              value: {{ .Values.windowSeconds | quote }}
+            - name: DATABASE_URL_EEP
+              value: "postgresql+asyncpg://pgbouncer:5432/retailvision"
+            # EEP reads REDIS_URL (not SERVER_REDIS_URL) — see config.py
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: redis-url
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: jwt-secret
+            - name: AGENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: agent-secret
+            - name: GRPC_PORT
+              value: {{ .Values.eep.grpcPort | quote }}
+            - name: GRPC_SERVER_CERT_PATH
+              value: "/certs/tls.crt"
+            - name: GRPC_SERVER_KEY_PATH
+              value: "/certs/tls.key"
+            - name: DEBUG_MODE
+              value: "false"
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /certs
+              readOnly: true
+          resources: {{ toYaml .Values.eep.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.eep.httpPort }}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.eep.httpPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: eep-tls

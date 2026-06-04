@@ -1,0 +1,36 @@
+---
+# HTTP — internal cluster access (EEP API, admin, health)
+apiVersion: v1
+kind: Service
+metadata:
+  name: eep-http
+  namespace: retailvision
+  labels:
+    app: eep
+spec:
+  type: ClusterIP
+  selector:
+    app: eep
+  ports:
+    - name: http
+      port: {{ .Values.eep.httpPort }}
+      targetPort: {{ .Values.eep.httpPort }}
+      protocol: TCP
+---
+# gRPC — LoadBalancer, edge-reachable (TLS terminated at pod)
+apiVersion: v1
+kind: Service
+metadata:
+  name: eep-grpc
+  namespace: retailvision
+  labels:
+    app: eep
+spec:
+  type: LoadBalancer
+  selector:
+    app: eep
+  ports:
+    - name: grpc
+      port: {{ .Values.eep.grpcPort }}
+      targetPort: {{ .Values.eep.grpcPort }}
+      protocol: TCP

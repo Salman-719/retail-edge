@@ -1,0 +1,62 @@
+{{- range .Values.iep3.stores }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: iep3-{{ . | replace "-" "" | trunc 16 }}
+  namespace: retailvision
+  labels:
+    app: iep3
+    store-id: {{ . }}
+spec:
+  replicas: 1
+  serviceName: iep3-{{ . | replace "-" "" | trunc 16 }}
+  selector:
+    matchLabels:
+      app: iep3
+      store-id: {{ . }}
+  template:
+    metadata:
+      labels:
+        app: iep3
+        store-id: {{ . }}
+    spec:
+      serviceAccountName: iep3
+      containers:
+        - name: iep3
+          image: "{{ $.Values.global.imageRegistry }}/iep3:{{ $.Values.iep3.image.tag }}"
+          imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
+          env:
+            - name: STORE_ID
+              value: {{ . | quote }}
+            - name: WINDOW_SECONDS
+              value: {{ $.Values.windowSeconds | quote }}
+            - name: DATABASE_URL_SERVER
+              value: "postgresql://pgbouncer:5432/retailvision"
+            - name: SERVER_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: redis-url
+            - name: REID_THRESHOLD
+              value: "0.75"
+            - name: GRACE_SECONDS
+              value: "300"
+            - name: MAX_SPEED_MPS
+              value: "1.5"
+            - name: POSITION_WEIGHT_AREA
+              value: "0.7"
+            - name: POSITION_WEIGHT_CONF
+              value: "0.3"
+            - name: ORPHAN_SWEEP_INTERVAL_BATCHES
+              value: "50"
+            - name: EXPECTED_CAMERAS_REFRESH_BATCHES
+              value: "10"
+          resources: {{ toYaml $.Values.iep3.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import sys; sys.exit(0)"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+{{- end }}

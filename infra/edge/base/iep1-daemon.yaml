@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iep1-daemon
+  namespace: retailvision
+  labels:
+    app: iep1-daemon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iep1-daemon
+  template:
+    metadata:
+      labels:
+        app: iep1-daemon
+    spec:
+      containers:
+        - name: iep1
+          image: retailvision-iep1:1.0.0
+          env:
+            - name: LOCAL_REDIS_URL
+              value: "redis://127.0.0.1:6379/0"
+            - name: WINDOW_SECONDS
+              value: "60"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import sys; sys.exit(0)"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+      # IEP1 writes to the local Redis on 127.0.0.1 — requires host network
+      # so the loopback address resolves to the host (Jetson) Redis instance.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet

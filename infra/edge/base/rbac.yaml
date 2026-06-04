@@ -1,0 +1,35 @@
+---
+# ServiceAccount for the thin Edge Agent
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: edge-agent
+  namespace: retailvision
+---
+# Edge Agent needs to manage IEP2 Deployments and per-camera ConfigMaps
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: edge-agent-role
+  namespace: retailvision
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "pods"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: edge-agent-binding
+  namespace: retailvision
+subjects:
+  - kind: ServiceAccount
+    name: edge-agent
+    namespace: retailvision
+roleRef:
+  kind: Role
+  name: edge-agent-role
+  apiGroup: rbac.authorization.k8s.io
