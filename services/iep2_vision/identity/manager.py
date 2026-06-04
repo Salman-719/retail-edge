@@ -36,22 +36,47 @@ MIN_BBOX_AREA              = 2500  # minimum bbox area (px²) for sampled-phase 
 
 
 class LocalIdentityManager:
-    def __init__(self, osnet_client, fps: float = 5.0):
-        """osnet_client is an OsNetClient instance; injected once."""
+    def __init__(
+        self,
+        osnet_client,
+        camera_id: str = "",
+        redis_local=None,
+        fps: float = 5.0,
+    ):
+        """osnet_client: OsNetClient; camera_id + redis_local enable Redis counter persistence (R5)."""
         self._osnet_client = osnet_client
+        self._camera_id = camera_id
+        self._redis = redis_local
         self._fps = fps
         self._lost_ttl_frames = TTL_FRAMES
         self._gate_cfg = SpatialGateConfig()
-        self._active:  dict[int, ActiveTrack]  = {}  # track_id  → ActiveTrack
-        self._pending: dict[int, PendingTrack] = {}  # track_id  → PendingTrack
-        self._lost:    dict[int, LostEntry]    = {}  # local_id  → LostEntry
+        self._active:  dict[int, ActiveTrack]  = {}
+        self._pending: dict[int, PendingTrack] = {}
+        self._lost:    dict[int, LostEntry]    = {}
         # Sticky mapping: once a track_id is assigned a local_id, the binding is permanent.
-        # When ByteTrack re-surfaces the same track_id, we restore the prior local_id
-        # immediately without going through pending/ReID, because ByteTrack already
-        # confirmed it is the same physical object.
-        self._track_to_local: dict[int, int] = {}    # track_id  → local_id (immutable)
-        self._next_id: int = 1
+        self._track_to_local: dict[int, int] = {}
+        # Per-track frame counter: counts how many frames each track has been visible.
+        # Used for per-track embedding schedule (R6 M2-S4).
+        self._track_frame_index: dict[int, int] = {}
+        self._next_id: int = self._load_counter()
         self._frame_index: int = 0
+
+    def _load_counter(self) -> int:
+        if self._redis is None or not self._camera_id:
+            return 1
+        try:
+            val = self._redis.get(f"iep2:id_counter:{self._camera_id}")
+            return int(val) + 1 if val else 1
+        except Exception:
+            return 1
+
+    def _persist_counter(self) -> None:
+        if self._redis is None or not self._camera_id:
+            return
+        try:
+            self._redis.set(f"iep2:id_counter:{self._camera_id}", self._next_id - 1)
+        except Exception:
+            pass  # counter is best-effort; collision risk is low
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -99,12 +124,17 @@ class LocalIdentityManager:
 
         for tid in disappeared_pending:
             del self._pending[tid]  # dropped silently — no local_id ever minted
+            self._track_frame_index.pop(tid, None)
             log.info("F%04d  pending track dropped  track_id=%d  (never resolved)", self._frame_index, tid)
 
         # Stage 3 — process each current track
         enriched: list[dict] = []
         for track in tracks:
             tid = track["track_id"]
+
+            # Advance per-track frame counter (R6 M2-S4)
+            self._track_frame_index[tid] = self._track_frame_index.get(tid, 0) + 1
+            track_frame = self._track_frame_index[tid]
 
             # ── Branch A: already active ───────────────────────────────────────
             if tid in self._active:
@@ -124,8 +154,8 @@ class LocalIdentityManager:
                     if emb is not None:
                         gallery.add(emb, is_init=True)
                 else:
-                    # Sampled phase: quality-gated, interval-throttled
-                    if self._frame_index % SAMPLE_INTERVAL == 0:
+                    # Sampled phase: per-track interval + quality gate (R6 M2-S4)
+                    if track_frame % SAMPLE_INTERVAL == 0:
                         conf = track.get("confidence", 0.0)
                         x1, y1, x2, y2 = track["bbox"]
                         bbox_area = (x2 - x1) * (y2 - y1)
@@ -187,6 +217,7 @@ class LocalIdentityManager:
                     # Fast path — no occlusion candidates, assign immediately
                     local_id = self._next_id
                     self._next_id += 1
+                    self._persist_counter()
                     gallery = EmbeddingGallery()
                     self._active[tid] = ActiveTrack(
                         local_id=local_id, track_id=tid, gallery=gallery
@@ -267,6 +298,7 @@ class LocalIdentityManager:
         else:
             local_id = self._next_id
             self._next_id += 1
+            self._persist_counter()
             gallery = EmbeddingGallery()
             self._track_to_local[pending.track_id] = local_id
             log.info(

@@ -15,6 +15,7 @@ INSERT INTO tracking_history
      floor_x, floor_y, zone_id,
      bbox_confidence, bbox_area)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (camera_id, local_id, timestamp_ms) DO NOTHING
 """
 
 _STREAM_RESOLUTION_SQL = """

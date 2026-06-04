@@ -1,10 +1,14 @@
 """IEP2 pipeline owner — models, orchestration, stream interface.
 
-Usage (video file):
+Usage (daemon — production):
+    from runtime import run_daemon, Settings
+    asyncio.run(run_daemon(Settings()))
+
+Usage (video file — dev):
     async with runtime.run(video_path) as stream:
         async for result in stream: ...
 
-Usage (live from IEP1):
+Usage (live from IEP1 — legacy):
     async with runtime.run_from_iep1() as stream:
         async for result in stream: ...
 """
@@ -15,6 +19,7 @@ import logging
 import os
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator, Iterator, Tuple
@@ -258,12 +263,12 @@ class IEP2Runtime:
         batch_number: int,
         window_start_ms: int,
         window_end_ms: int,
+        frame_count: int = 0,
     ) -> None:
-        """XADD one batch_complete event to stream:iep2:batch_complete.
+        """XADD one batch_complete event to stream:iep2:batch_complete with MAXLEN.
 
-        Called after centroid flush and before XACK. A failed XADD is logged
-        but does not prevent XACK — IEP3's coordinator timeout guard handles
-        cameras that fail to report.
+        Called after centroid flush and before XACK (R10 M2-S4).
+        A failed XADD is logged but does not prevent XACK.
         """
         fields = {
             "camera_id":       self.settings.camera_id,
@@ -271,9 +276,12 @@ class IEP2Runtime:
             "batch_number":    str(batch_number),
             "window_start_ms": str(window_start_ms),
             "window_end_ms":   str(window_end_ms),
+            "frame_count":     str(frame_count),
         }
         try:
-            await redis_client.xadd("stream:iep2:batch_complete", fields)
+            await redis_client.xadd(
+                "stream:iep2:batch_complete", fields, maxlen=500, approximate=True
+            )
             log.debug(
                 "Published batch_complete  camera=%s  batch=%d  window=[%d, %d]",
                 self.settings.camera_id, batch_number, window_start_ms, window_end_ms,
@@ -477,6 +485,318 @@ class IEP2Runtime:
             "Stream finished (IEP1)  camera=%s  frames=%d  db_rows=%d",
             camera_id, frame_index, db_rows_written,
         )
+
+
+# ---------------------------------------------------------------------------
+# Daemon mode — Settings (pydantic-settings, env vars only, no CLI args).
+# ---------------------------------------------------------------------------
+
+def _make_settings_class():
+    try:
+        from pydantic_settings import BaseSettings
+        from pydantic import Field as _Field
+
+        class Settings(BaseSettings):
+            camera_id:           str   = _Field(...)
+            camera_config_id:    str   = _Field(default="")
+            store_id:            str   = _Field(...)
+            window_seconds:      float = _Field(..., gt=0)
+            local_redis_url:     str   = _Field(...)
+            server_redis_url:    str   = _Field(...)
+            database_url_server: str   = _Field(...)
+            yolo_input_sock:     str   = _Field(default="ipc:///tmp/sockets/yolo_input.sock")
+            osnet_input_sock:    str   = _Field(default="ipc:///tmp/sockets/osnet_input.sock")
+            tmpfs_frame_root:    str   = _Field(default="/dev/shm/frames")
+            target_fps:          float = _Field(default=5.0, gt=0)
+            health_sock:         str   = _Field(default="")
+
+            class Config:
+                env_file = ".env"
+                extra    = "ignore"
+
+        return Settings
+    except ImportError:
+        return None
+
+
+_Settings = _make_settings_class()
+if _Settings is not None:
+    Settings = _Settings  # exported symbol
+
+
+def _read_frame_from_tmpfs(path: str):
+    """Read a JPEG from the IEP1 tmpfs path. Returns BGR ndarray or None."""
+    import cv2 as _cv2
+    frame = _cv2.imread(path)
+    if frame is None:
+        log.warning("Failed to read frame from tmpfs path=%s", path)
+    return frame
+
+
+async def _cleanup_frames(manifest: dict) -> None:
+    """R12 (M2-S4): delete tmpfs frame files after manifest is fully processed."""
+    for entry in manifest.get("frames", []):
+        path = entry[1] if isinstance(entry, (list, tuple)) and len(entry) > 1 else None
+        if path:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                log.warning("tmpfs cleanup failed path=%s: %s", path, exc)
+
+
+async def _run_health_service(settings) -> None:
+    """R11 (M2-S4): gRPC health service on per-camera unix socket.
+
+    Reports NOT_SERVING if YOLO or OSNet TCP health endpoints are unreachable.
+    """
+    try:
+        import grpc
+        import grpc.aio
+        from grpc_health.v1 import health, health_pb2, health_pb2_grpc
+
+        sock = settings.health_sock or (
+            f"unix:///tmp/sockets/iep2_health_{settings.camera_id}.sock"
+        )
+        health_servicer = health.HealthServicer()
+        server = grpc.aio.server()
+        health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+        server.add_insecure_port(sock)
+        await server.start()
+        health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+        log.info("IEP2 health service  camera=%s  sock=%s", settings.camera_id, sock)
+
+        yolo_addr  = os.environ.get("YOLO_HEALTH_TCP_ADDR",  "yolo-service:50052")
+        osnet_addr = os.environ.get("OSNET_HEALTH_TCP_ADDR", "osnet-service:50053")
+
+        while True:
+            await asyncio.sleep(10)
+            yolo_ok  = await _grpc_health_ping(yolo_addr)
+            osnet_ok = await _grpc_health_ping(osnet_addr)
+            status = (
+                health_pb2.HealthCheckResponse.SERVING
+                if yolo_ok and osnet_ok
+                else health_pb2.HealthCheckResponse.NOT_SERVING
+            )
+            health_servicer.set("", status)
+            if not (yolo_ok and osnet_ok):
+                log.warning(
+                    "Health degraded  camera=%s  yolo=%s  osnet=%s",
+                    settings.camera_id, yolo_ok, osnet_ok,
+                )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.error("Health service failed  camera=%s: %s", settings.camera_id, exc)
+
+
+async def _grpc_health_ping(addr: str) -> bool:
+    """Return True if the gRPC health endpoint reports SERVING."""
+    try:
+        import grpc
+        import grpc.aio
+        from grpc_health.v1 import health_pb2, health_pb2_grpc
+        async with grpc.aio.insecure_channel(addr) as ch:
+            stub = health_pb2_grpc.HealthStub(ch)
+            resp = await stub.Check(
+                health_pb2.HealthCheckRequest(service=""), timeout=2.0
+            )
+            return resp.status == health_pb2.HealthCheckResponse.SERVING
+    except Exception:
+        return False
+
+
+async def run_daemon(settings) -> None:
+    """Long-running IEP2 daemon (R1 M2-S4).
+
+    Reads IEP1 manifests from local Redis, processes frames from tmpfs,
+    writes tracking_history to cloud DB, publishes batch_complete to server Redis.
+    ByteTrack and LocalIdentityManager state persist across all batch boundaries.
+    """
+    import asyncio
+    import redis as _sync_redis
+    import redis.asyncio as aioredis
+
+    try:
+        from .detector.detector import YoloClient
+        from .reid.reid import OsNetClient
+        from .tracker.tracker import create_tracker, update
+        from .identity.manager import LocalIdentityManager
+        from .persistence.postgres import PostgresPersistence
+        from .projection.projector import FloorProjector
+        from .ingest.redis_source import RedisStreamFrameSource
+    except ImportError:
+        _root = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, _root)
+        from detector.detector import YoloClient
+        from reid.reid import OsNetClient
+        from tracker.tracker import create_tracker, update
+        from identity.manager import LocalIdentityManager
+        from persistence.postgres import PostgresPersistence
+        from projection.projector import FloorProjector
+        from ingest.redis_source import RedisStreamFrameSource
+
+    log.info(
+        "IEP2 daemon starting  camera=%s  store=%s  local_redis=%s  server_redis=%s",
+        settings.camera_id, settings.store_id,
+        settings.local_redis_url, settings.server_redis_url,
+    )
+
+    # ── Connections ───────────────────────────────────────────────────────────
+    local_redis  = aioredis.Redis.from_url(settings.local_redis_url, decode_responses=False)
+    server_redis = aioredis.Redis.from_url(settings.server_redis_url, decode_responses=False)
+    # Sync Redis client for LocalIdentityManager counter persistence
+    sync_redis   = _sync_redis.Redis.from_url(settings.local_redis_url, decode_responses=True)
+
+    async with PostgresPersistence(
+        database_url=settings.database_url_server,
+        store_id=settings.store_id,
+        camera_id=settings.camera_id,
+    ) as persistence:
+
+        # ── ML clients ────────────────────────────────────────────────────────
+        yolo_client  = YoloClient(camera_id=settings.camera_id)
+        osnet_client = OsNetClient(camera_id=settings.camera_id)
+        await yolo_client.start()
+        await osnet_client.start()
+
+        # ── Pipeline components ───────────────────────────────────────────────
+        tracker  = create_tracker()
+        manager  = LocalIdentityManager(
+            osnet_client=osnet_client,
+            camera_id=settings.camera_id,
+            redis_local=sync_redis,
+        )
+        projector = FloorProjector()
+        if settings.camera_config_id:
+            await projector.load(persistence.pool, uuid.UUID(settings.camera_config_id))
+
+        # ── Health service background task ────────────────────────────────────
+        health_task = asyncio.create_task(_run_health_service(settings))
+
+        # ── Manifest consumer (local Redis, IEP1 stream) ──────────────────────
+        consumer = RedisStreamFrameSource(
+            camera_id=settings.camera_id,
+            redis_url=settings.local_redis_url,
+            s3_client=None,  # frames come from tmpfs, not S3
+        )
+        await consumer.connect()
+
+        try:
+            log.info("IEP2 daemon SERVING  camera=%s", settings.camera_id)
+
+            async for message_id, manifest in consumer.manifests():
+                if manifest.get("status") == "offline":
+                    await consumer.ack(message_id)
+                    continue
+
+                frames = manifest.get("frames", [])
+                frame_count = 0
+
+                for entry in frames:
+                    capture_ts_ms = int(entry[0])
+                    path          = entry[1]
+
+                    frame = _read_frame_from_tmpfs(path)
+                    if frame is None:
+                        continue
+
+                    detections = await yolo_client.detect(frame, capture_ts_ms)
+                    tracks     = update(tracker, detections)
+                    _project_tracks(tracks, projector)
+                    enriched   = await manager.process_frame(
+                        frame, tracks, timestamp_ms=capture_ts_ms
+                    )
+
+                    for track in enriched:
+                        if track["local_id"] is None:
+                            continue
+                        x1, y1, x2, y2 = [int(c) for c in track["bbox"]]
+                        floor_x = track.get("floor_x")
+                        floor_y = track.get("floor_y")
+                        zone_id = (
+                            projector.zone_of(floor_x, floor_y)
+                            if floor_x is not None and floor_y is not None
+                            else None
+                        )
+                        await persistence.insert_detection(
+                            local_id=uuid.UUID(int=track["local_id"]),
+                            timestamp_ms=capture_ts_ms,
+                            bbox_confidence=float(track["confidence"]),
+                            bbox_area=(x2 - x1) * (y2 - y1),
+                            floor_x=floor_x,
+                            floor_y=floor_y,
+                            zone_id=zone_id,
+                        )
+                    frame_count += 1
+
+                # ── Strict batch-close order: centroids → batch_complete → XACK → cleanup ──
+                fake_settings = type("_S", (), {
+                    "camera_id": settings.camera_id,
+                    "store_id":  settings.store_id,
+                })()
+                rt = _DaemonBatchHelper(fake_settings)
+                await rt._flush_centroids_daemon(manager, persistence, manifest.get("batch_number", 0))
+
+                await server_redis.xadd(
+                    "stream:iep2:batch_complete",
+                    {
+                        "camera_id":       settings.camera_id,
+                        "store_id":        settings.store_id,
+                        "batch_number":    str(manifest.get("batch_number", 0)),
+                        "window_start_ms": str(manifest.get("window_start_ms", 0)),
+                        "window_end_ms":   str(manifest.get("window_end_ms", 0)),
+                        "frame_count":     str(frame_count),
+                    },
+                    maxlen=500,
+                    approximate=True,
+                )
+                await consumer.ack(message_id)
+                await _cleanup_frames(manifest)
+
+                log.info(
+                    "Batch complete  camera=%s  batch=%s  frames=%d",
+                    settings.camera_id, manifest.get("batch_number"), frame_count,
+                )
+
+        except asyncio.CancelledError:
+            log.info("IEP2 daemon cancelled  camera=%s", settings.camera_id)
+            raise
+        finally:
+            health_task.cancel()
+            try:
+                await health_task
+            except asyncio.CancelledError:
+                pass
+            await yolo_client.close()
+            await osnet_client.close()
+            await consumer.close()
+            await local_redis.aclose()
+            await server_redis.aclose()
+            sync_redis.close()
+
+
+class _DaemonBatchHelper:
+    """Thin adapter so flush_centroids can reuse IEP2Runtime's method."""
+    def __init__(self, settings):
+        self.settings = settings
+
+    async def _flush_centroids_daemon(self, manager, persistence, batch_number):
+        active = manager.get_active_centroids()
+        if not active:
+            return
+        records = [
+            {
+                "local_id":         str(uuid.UUID(int=lid)),
+                "camera_id":        self.settings.camera_id,
+                "store_id":         self.settings.store_id,
+                "centroid":         arr.astype("float32").tobytes(),
+                "updated_at_batch": batch_number,
+            }
+            for lid, arr in active.items()
+        ]
+        await persistence.upsert_local_centroids(records)
 
 
 # ---------------------------------------------------------------------------

@@ -7,10 +7,14 @@ Handles two phases:
 
 No ReID logic, no pool logic — pure math.
 """
+import os
+
 import numpy as np
 
-DEFAULT_MAX_SIZE = 8
-DEFAULT_EMA_ALPHA = 0.05
+DEFAULT_MAX_SIZE  = 8
+# R7 (M2-S4): EMA alpha 0.3 — responsive to appearance change while retaining history.
+# Configurable via CENTROID_EMA_ALPHA env var; override for calibration in specific environments.
+DEFAULT_EMA_ALPHA = float(os.environ.get("CENTROID_EMA_ALPHA", "0.3"))
 
 
 def _l2_normalize(v: np.ndarray) -> np.ndarray:

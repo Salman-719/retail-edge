@@ -1,111 +1,44 @@
-import argparse
+"""IEP2 daemon entrypoint — env vars only, no CLI args (R2 M2-S4)."""
 import asyncio
 import logging
 import os
 import sys
-import uuid as _uuid
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
-def _uuid_arg(value: str) -> str:
-    try:
-        _uuid.UUID(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"not a valid UUID: {value!r}")
-    return value
-
-
-def _parse_args():
-    parser = argparse.ArgumentParser(
-        description="IEP2 vision worker — one process per camera",
-    )
-    parser.add_argument("--store-id",          required=True,  type=_uuid_arg, help="Store identifier (UUID)")
-    parser.add_argument("--camera-id",         required=True,                  help="Camera identifier")
-    parser.add_argument("--camera-config-id",  default=None,   type=_uuid_arg,
-                        help="UUID of the camera_configs row. Required for floor projection. "
-                             "If omitted, floor_x/floor_y/zone_id are stored as NULL.")
-    parser.add_argument("--source",            choices=["video", "redis"],
-                        default="video",                                        help="Frame source: video (default) or redis")
-    parser.add_argument("--video",             default=None,                   help="Path to video file (required when --source video)")
-    parser.add_argument("--start-ms",          type=int, default=0,            help="Start timestamp offset ms (default: 0)")
-    return parser.parse_args()
-
-
-async def main():
+def main():
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
     )
-
-    args = _parse_args()
-
-    if args.source == "video" and not args.video:
-        print("error: --video is required when --source is video")
-        sys.exit(1)
+    log = logging.getLogger("iep2.main")
 
     _here = os.path.dirname(os.path.abspath(__file__))
     if _here not in sys.path:
         sys.path.insert(0, _here)
 
-    from runtime import IEP2Runtime, Iep2Settings
-
-    _db_url = os.environ.get("DATABASE_URL_SERVER", "")
-    if not _db_url:
-        print("ERROR: DATABASE_URL_SERVER is required", file=sys.stderr)
-        sys.exit(1)
-    if _db_url.startswith("postgresql+"):
-        print(
-            "ERROR: DATABASE_URL_SERVER must use plain postgresql:// not SQLAlchemy format",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    _window = os.environ.get("WINDOW_SECONDS", "")
-    if not _window:
-        print("ERROR: WINDOW_SECONDS is required", file=sys.stderr)
-        sys.exit(1)
     try:
-        _window_f = float(_window)
-        assert _window_f > 0
-    except (ValueError, AssertionError):
-        print("ERROR: WINDOW_SECONDS must be a positive number", file=sys.stderr)
+        from runtime import Settings, run_daemon
+    except ImportError:
+        from services.iep2_vision.runtime import Settings, run_daemon
+
+    try:
+        settings = Settings()
+    except Exception as exc:
+        log.error("Settings validation failed: %s", exc)
         sys.exit(1)
 
-    settings = Iep2Settings(
-        store_id=args.store_id,
-        camera_id=args.camera_id,
-        camera_config_id=args.camera_config_id,
-        database_url_server=_db_url,
-        window_seconds=_window_f,
-        redis_url=os.environ.get("REDIS_URL",        "redis://localhost:6379/0"),
-        s3_endpoint_url=os.environ.get("S3_ENDPOINT_URL", ""),
-        s3_access_key=os.environ.get("S3_ACCESS_KEY",   ""),
-        s3_secret_key=os.environ.get("S3_SECRET_KEY",   ""),
-        s3_bucket=os.environ.get("S3_BUCKET",       "retailvision"),
+    log.info(
+        "IEP2 starting  camera=%s  store=%s  window_seconds=%.1f",
+        settings.camera_id, settings.store_id, settings.window_seconds,
     )
 
-    logging.getLogger("iep2").info(
-        "IEP2 starting  camera=%s  window_seconds=%.1f  db_host=%s  redis=%s",
-        args.camera_id,
-        settings.window_seconds,
-        settings.database_url_server.split("@")[-1].split("/")[0],
-        settings.redis_url,
-    )
-
-    runtime = IEP2Runtime(settings)
-
-    if args.source == "redis":
-        ctx = runtime.run_from_iep1()
-    else:
-        ctx = runtime.run(args.video, start_ms=args.start_ms)
-
-    async with ctx as stream:
-        async for _ in stream:
-            pass
+    asyncio.run(run_daemon(settings))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

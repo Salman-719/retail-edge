@@ -171,6 +171,8 @@ services:
       JPEG_QUALITY: ${JPEG_QUALITY:-85}
     volumes:
       - iep1-sockets:/tmp/iep1-sockets
+      # Shared frame store: IEP1 writes JEPGs here; IEP2 reads them by tmpfs path.
+      - frame-store:/dev/shm/frames
     depends_on:
       redis:
         condition: service_healthy
@@ -225,32 +227,35 @@ services:
       context: ./services/iep2_vision
       dockerfile: Dockerfile
     environment:
-      <<: *shared-config
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
-      S3_BUCKET: ${S3_BUCKET:-retailvision}
-      LIVE_STREAM_ENABLED: "true"
+      # pydantic-settings reads these directly — no CLI args (R2 M2-S4)
+      CAMERA_ID: ${CAMERA_ID}
+      CAMERA_CONFIG_ID: ${CAMERA_CONFIG_ID:-}
+      STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
+      WINDOW_SECONDS: "${WINDOW_SECONDS:-60}"
+      DATABASE_URL_SERVER: "postgresql://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@pgbouncer:5432/${POSTGRES_DB:-retailvision}"
+      # In compose, local and server Redis are the same instance.
+      # In production: LOCAL_REDIS_URL points to edge-device Redis; SERVER_REDIS_URL to server Redis.
+      LOCAL_REDIS_URL: "redis://redis:6379/0"
+      SERVER_REDIS_URL: "redis://redis:6379/0"
       YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
       OSNET_INPUT_SOCK: "ipc:///tmp/sockets/osnet_input.sock"
+      TMPFS_FRAME_ROOT: /dev/shm/frames
+      YOLO_HEALTH_TCP_ADDR: yolo-service:50052
+      OSNET_HEALTH_TCP_ADDR: osnet-service:50053
     volumes:
       - ./testing-data:/workspace/testing-data:ro
       - ipc-sockets:/tmp/sockets
-    command: >
-      python services/iep2_vision/main.py
-      --store-id ${STORE_ID}
-      --camera-id ${CAMERA_ID}
-      --source redis
+      - frame-store:/dev/shm/frames
     depends_on:
       pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
       yolo-service:
         condition: service_started
       osnet-service:
+        condition: service_started
+      iep1-daemon:
         condition: service_started
 
   iep3_reconciliation:
@@ -330,9 +335,13 @@ services:
       <<: *shared-config
       YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
       OSNET_INPUT_SOCK: "ipc:///tmp/sockets/osnet_input.sock"
+      LOCAL_REDIS_URL: "redis://redis:6379/0"
+      SERVER_REDIS_URL: "redis://redis:6379/0"
     volumes:
       - ./testing-data:/workspace/testing-data:ro
       - ipc-sockets:/tmp/sockets
+      - frame-store:/dev/shm/frames
+    command: ["python", "-m", "uvicorn", "services.iep2_vision.app.main:app", "--host", "0.0.0.0", "--port", "8002"]
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -370,6 +379,15 @@ volumes:
   redis_data:
   minio_data:
   grafana_data:
+  # Shared tmpfs for JPEG frames produced by IEP1 daemon and consumed by IEP2.
+  # In production the edge device writes frames locally; in compose they share
+  # this volume so IEP2 can read the tmpfs paths IEP1 writes to manifests.
+  frame-store:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+
   # Shared tmpfs for IEP1 daemon gRPC control/health unix sockets.
   # Shared between iep1-daemon and edge_agent_dev containers.
   iep1-sockets:
