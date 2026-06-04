@@ -1,0 +1,31 @@
+# x86 / Intel CPU dev build — no TRT, no CUDA, no ARM base image.
+# Build context: repo root (set in docker-compose.dev.yml) so yolov8n.pt is accessible.
+# Do NOT use this in staging or production — use Dockerfile (Jetson TRT).
+
+FROM python:3.11-slim
+
+WORKDIR /workspace
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install CPU-only torch before ultralytics so pip does not pull a CUDA-enabled wheel.
+RUN pip install --no-cache-dir \
+    torch==2.3.1 \
+    torchvision==0.18.1 \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining deps (torch already satisfied above; pip will not reinstall it).
+COPY services/yolo_service/requirements.dev.txt requirements.dev.txt
+RUN pip install --no-cache-dir -r requirements.dev.txt
+
+# Copy service source — mirrors the module path services.yolo_service.*
+COPY services/yolo_service/ services/yolo_service/
+RUN touch services/__init__.py
+
+# Bake in the pre-trained weights so the container needs no internet access at runtime.
+COPY yolov8n.pt yolov8n.pt
+
+CMD ["python", "-m", "services.yolo_service.service_dev"]

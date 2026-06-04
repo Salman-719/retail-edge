@@ -1,10 +1,38 @@
-# Local development overrides.
-# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+# Local development overrides for x86 / Intel machines (no CUDA, no Jetson).
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d \
+#     postgres pgbouncer redis minio eep iep3_reconciliation live_bridge
 #
 # R5 (M1-S2): DEBUG_MODE=true must live only in this file.
 # Never commit this to CI, staging, or production pipelines.
 
 services:
+
   eep:
     environment:
       DEBUG_MODE: "true"
+      # Give CPU inference services more time to become SERVING before EEP
+      # considers the ML stack unhealthy (ultralytics model load ~30-60 s on CPU).
+      ML_SERVICES_TIMEOUT_S: "300"
+
+  # ── CPU dev replacements for Jetson-only inference services ─────────────────
+  # Both services implement the identical ZMQ wire protocol as their TRT
+  # counterparts. No changes to IEP2, IEP1, EEP, or IEP3 are required.
+
+  yolo-service:
+    build:
+      # Context is repo root so Dockerfile.dev can COPY yolov8n.pt.
+      context: .
+      dockerfile: services/yolo_service/Dockerfile.dev
+    environment:
+      # Smaller batches and longer timeout suit single-thread CPU inference.
+      YOLO_MAX_BATCH_SIZE: "4"
+      YOLO_BATCH_TIMEOUT_MS: "500"
+
+  osnet-service:
+    build:
+      context: ./services/osnet_service
+      dockerfile: Dockerfile.dev
+    environment:
+      OSNET_MAX_BATCH_SIZE: "8"
+      OSNET_BATCH_TIMEOUT_MS: "200"

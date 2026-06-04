@@ -1,0 +1,9 @@
+# CPU dev requirements — torch + torchvision pre-installed in Dockerfile.dev with CPU index URL.
+# No torchreid, tensorrt, or pycuda needed for the CPU dev stub.
+pyzmq==25.1.2
+msgpack==1.0.8
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+grpcio==1.64.0
+grpcio-health-checking==1.64.0
+protobuf==4.25.3
