@@ -1,3 +1,6 @@
+# DEPRECATED — M4-S1 removes Docker from EEP entirely.
+# IEP2 is now managed by Edge Agent via k3s. This file is retained for reference only.
+# Not imported by any EEP module.
 import logging
 import os
 import time

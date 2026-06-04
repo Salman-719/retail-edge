@@ -52,10 +52,6 @@ class Settings(BaseSettings):
     # Explicit false default — never rely on absence of this var.
     DEBUG_MODE: bool = False
 
-    # ── Docker ───────────────────────────────────────────────────────────────
-    IEP2_IMAGE: str = "retailvision-iep2:latest"
-    DOCKER_NETWORK: str = "retail-edge_default"
-
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

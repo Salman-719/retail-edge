@@ -1,24 +1,24 @@
-"""Camera schedule evaluator — runs every 60 s via APScheduler.
+"""Camera schedule evaluator — runs every WINDOW_SECONDS via APScheduler.
 
 Evaluates all active camera_schedules against the current local time in each
-store's timezone. Calls _on_camera_start / _on_camera_stop stubs when the
-running state changes. Phase 7 replaces the stubs with Docker SDK calls.
+store's timezone. Calls _on_camera_start / _on_camera_stop when the running
+state changes. Camera start/stop is delegated to orchestrator (gRPC to Edge Agent).
 """
-import asyncio
 import logging
+import time
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
-from app.core import iep2_docker, orchestrator
+from app.core import orchestrator
 from app.grpc_server import camera_status as _camera_status
 
 log = logging.getLogger(__name__)
 
 # In-memory set of currently-running (store_id, camera_config_id) pairs.
-# Resets on EEP restart. Phase 7 will replace this with a DB/Docker status query.
+# Rebuilt on EEP startup from Redis-backed camera_status via rebuild_running_cameras().
 _running_cameras: set[tuple[str, str]] = set()
 
 
@@ -48,69 +48,52 @@ WHERE cs.is_active = true
   AND s.status = 'active'
 """)
 
-# Extends _LOAD_SQL with physical_camera_id — used only at startup for Docker state rebuild.
-_REBUILD_SQL = text("""
-SELECT
-    cs.id              AS schedule_id,
-    cs.store_id,
-    cs.camera_config_id,
-    cs.days_of_week,
-    cs.start_time,
-    cs.end_time,
-    s.timezone         AS store_timezone,
-    pc.id              AS physical_camera_id
-FROM camera_schedules cs
-JOIN stores s                  ON s.id   = cs.store_id
-JOIN camera_configs cc         ON cc.id  = cs.camera_config_id
-JOIN store_config_versions scv ON scv.id = cc.version_id
-JOIN physical_cameras pc       ON pc.id  = cc.physical_camera_id
-WHERE cs.is_active = true
-  AND s.status = 'active'
-""")
 
 
 async def rebuild_running_cameras() -> None:
-    """Populate _running_cameras from live Docker state at EEP startup.
+    """Populate _running_cameras from Redis-backed camera_status at EEP startup.
 
-    IEP2 containers survive an EEP restart (they are detached Docker containers).
-    Without this, the first scheduler tick after restart would force-remove and
-    recreate every running IEP2 container — killing ByteTrack and ReID state
-    mid-session. We query Docker for each schedule that should currently be
-    running and pre-mark it so evaluate_schedules skips the unnecessary restart.
+    IEP2 pods survive an EEP restart (k3s keeps them running). Without this,
+    the first scheduler tick would send unnecessary StartCamera commands for
+    cameras that are already running. We check camera_status (rebuilt from
+    Redis in rebuild_running_cameras_on_startup) to avoid redundant commands.
+
+    Must be called AFTER rebuild_running_cameras_on_startup().
     """
     try:
         async with AsyncSessionLocal() as session:
-            result = await session.execute(_REBUILD_SQL)
+            result = await session.execute(_LOAD_SQL)
             rows = [dict(r._mapping) for r in result]
     except Exception:
         log.exception("rebuild_running_cameras: DB load failed, skipping")
         return
 
     now_utc = datetime.now(timezone.utc)
-    loop = asyncio.get_running_loop()
 
     for row in rows:
         try:
-            store_tz  = ZoneInfo(row["store_timezone"] or "UTC")
+            tz_str = row["store_timezone"] or "UTC"
+            try:
+                store_tz = ZoneInfo(tz_str)
+            except ZoneInfoNotFoundError:
+                log.error(
+                    "rebuild_running_cameras: invalid timezone %r for store %s — skipping",
+                    tz_str, row["store_id"],
+                )
+                continue
+
             now_local = now_utc.astimezone(store_tz)
             if not _should_run(row, now_local):
                 continue
 
-            status = await loop.run_in_executor(
-                None,
-                iep2_docker.get_iep2_status,
-                str(row["store_id"]),
-                str(row["physical_camera_id"]),
-            )
-            if status == "running":
-                key = (str(row["store_id"]), str(row["camera_config_id"]))
+            store_id  = str(row["store_id"])
+            phys_id   = str(row["physical_camera_id"])
+            if _camera_status.is_running(store_id, phys_id):
+                key = (store_id, str(row["camera_config_id"]))
                 _running_cameras.add(key)
                 log.info(
-                    "rebuild_running_cameras: IEP2 already running, pre-marked",
-                    extra={
-                        "store_id":         str(row["store_id"]),
-                        "camera_config_id": str(row["camera_config_id"]),
-                    },
+                    "rebuild_running_cameras: pre-marked running  store=%s  config=%s",
+                    store_id, row["camera_config_id"],
                 )
         except Exception:
             log.exception(
@@ -228,6 +211,8 @@ async def _activate_pending_versions(now_utc: datetime) -> None:
 
 async def evaluate_schedules() -> None:
     """APScheduler job: evaluate all active schedules and emit start/stop events."""
+    tick_start = time.monotonic()
+
     try:
         async with AsyncSessionLocal() as session:
             rows = await _load_schedules(session)
@@ -239,20 +224,28 @@ async def evaluate_schedules() -> None:
 
     for row in rows:
         try:
-            store_tz  = ZoneInfo(row["store_timezone"] or "UTC")
-            now_local = now_utc.astimezone(store_tz)
+            tz_str = row["store_timezone"] or "UTC"
+            try:
+                now_local = now_utc.astimezone(ZoneInfo(tz_str))
+            except ZoneInfoNotFoundError:
+                log.error(
+                    "evaluate_schedules: invalid timezone %r for store %s — skipping",
+                    tz_str, row["store_id"],
+                )
+                continue
+
             should_run = _should_run(row, now_local)
             key = (str(row["store_id"]), str(row["camera_config_id"]))
 
             if should_run and key not in _running_cameras:
-                # R6: don't race with Docker's own on-failure restart recovery
+                # Don't race with k3s/Docker on-failure restart recovery
                 phys_id = str(row.get("physical_camera_id", ""))
                 if phys_id:
                     cs = _camera_status.get(str(row["store_id"]), phys_id)
-                    if cs and cs["status"] == "restarting":
+                    if cs and cs["status"] in ("restarting", "starting", "pending"):
                         log.info(
-                            "camera %s restarting — skipping start  config=%s",
-                            phys_id, row["camera_config_id"],
+                            "camera %s status=%s — skipping start  config=%s",
+                            phys_id, cs["status"], row["camera_config_id"],
                         )
                         continue
                 await _on_camera_start(row)
@@ -269,3 +262,11 @@ async def evaluate_schedules() -> None:
             )
 
     await _activate_pending_versions(now_utc)
+
+    elapsed = time.monotonic() - tick_start
+    from app.core.scheduler import _WINDOW_SECONDS
+    if elapsed > _WINDOW_SECONDS * 0.5:
+        log.warning(
+            "evaluate_schedules took %.1fs — approaching %.0fs interval",
+            elapsed, _WINDOW_SECONDS,
+        )

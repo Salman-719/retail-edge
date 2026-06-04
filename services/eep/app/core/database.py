@@ -7,6 +7,7 @@ engine = create_async_engine(
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
+    pool_timeout=30,
     # PgBouncer transaction mode: disable asyncpg prepared-statement cache.
     # Without this, asyncpg caches prepared statements per logical connection;
     # PgBouncer may hand the same server connection to a different client whose
