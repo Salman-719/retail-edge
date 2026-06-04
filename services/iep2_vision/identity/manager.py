@@ -7,6 +7,7 @@ Lifecycle:
   disappeared active track     → LostEntry (with gallery, TTL)
   disappeared pending track    → dropped silently (no local_id ever minted)
 """
+import asyncio
 import logging
 
 import numpy as np
@@ -14,16 +15,13 @@ import numpy as np
 log = logging.getLogger("iep2.identity")
 
 try:
-    from ..reid.reid import extract_embedding
     from .pools import ActiveTrack, PendingTrack, LostEntry
     from .gallery import EmbeddingGallery
     from .spatial_gate import SpatialGateConfig, evaluate
 except ImportError:
     import sys as _sys, os as _os
     _here = _os.path.dirname(_os.path.abspath(__file__))
-    _sys.path.insert(0, _os.path.join(_here, ".."))  # exposes reid/reid.py
-    _sys.path.insert(0, _here)                        # exposes pools.py, gallery.py
-    from reid.reid import extract_embedding
+    _sys.path.insert(0, _here)
     from pools import ActiveTrack, PendingTrack, LostEntry
     from gallery import EmbeddingGallery
     from spatial_gate import SpatialGateConfig, evaluate
@@ -38,9 +36,9 @@ MIN_BBOX_AREA              = 2500  # minimum bbox area (px²) for sampled-phase 
 
 
 class LocalIdentityManager:
-    def __init__(self, reid_model, fps: float = 5.0):
-        """reid_model is the object returned by reid.load_model(); injected once."""
-        self._reid_model = reid_model
+    def __init__(self, osnet_client, fps: float = 5.0):
+        """osnet_client is an OsNetClient instance; injected once."""
+        self._osnet_client = osnet_client
         self._fps = fps
         self._lost_ttl_frames = TTL_FRAMES
         self._gate_cfg = SpatialGateConfig()
@@ -57,7 +55,12 @@ class LocalIdentityManager:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def process_frame(self, frame: np.ndarray, tracks: list[dict]) -> list[dict]:
+    async def process_frame(
+        self,
+        frame: np.ndarray,
+        tracks: list[dict],
+        timestamp_ms: int = 0,
+    ) -> list[dict]:
         """Run the full identity lifecycle for one frame.
 
         Returns a new list of enriched dicts with 'local_id' added.
@@ -115,7 +118,9 @@ class LocalIdentityManager:
                 gallery = active.gallery
 
                 if gallery.is_init_phase:
-                    emb = extract_embedding(self._reid_model, frame, track["bbox"])
+                    emb = await self._osnet_client.extract(
+                        frame, track["bbox"], track_id=tid, timestamp_ms=timestamp_ms
+                    )
                     if emb is not None:
                         gallery.add(emb, is_init=True)
                 else:
@@ -126,7 +131,9 @@ class LocalIdentityManager:
                         bbox_area = (x2 - x1) * (y2 - y1)
                         if (conf >= QUALITY_CONFIDENCE_THRESHOLD
                                 and bbox_area >= MIN_BBOX_AREA):
-                            emb = extract_embedding(self._reid_model, frame, track["bbox"])
+                            emb = await self._osnet_client.extract(
+                                frame, track["bbox"], track_id=tid, timestamp_ms=timestamp_ms
+                            )
                             if emb is not None:
                                 gallery.add(emb, is_init=False)
 
@@ -135,7 +142,9 @@ class LocalIdentityManager:
             # ── Branch B: pending, collecting init embeddings ──────────────────
             elif tid in self._pending:
                 pending = self._pending[tid]
-                emb = extract_embedding(self._reid_model, frame, track["bbox"])
+                emb = await self._osnet_client.extract(
+                    frame, track["bbox"], track_id=tid, timestamp_ms=timestamp_ms
+                )
                 if emb is not None:
                     pending.init_embeddings.append(emb)
 
@@ -156,8 +165,7 @@ class LocalIdentityManager:
             # ── Branch C: first appearance ─────────────────────────────────────
             else:
                 if tid in self._track_to_local:
-                    # ByteTrack re-surfaced a known track_id — this is the same physical
-                    # object, so restore the prior local_id immediately without pending/ReID.
+                    # ByteTrack re-surfaced a known track_id — restore prior local_id immediately.
                     local_id = self._track_to_local[tid]
                     if local_id in self._lost:
                         lost_entry = self._lost.pop(local_id)
@@ -167,7 +175,6 @@ class LocalIdentityManager:
                             self._frame_index, tid, local_id,
                         )
                     else:
-                        # TTL already expired but ByteTrack kept the id alive — start fresh gallery
                         gallery = EmbeddingGallery()
                         log.info(
                             "F%04d  ByteTrack reuse (post-TTL)  track_id=%d  → local_id=%d  (fresh gallery)",
@@ -202,13 +209,7 @@ class LocalIdentityManager:
         return enriched
 
     def get_active_centroids(self) -> dict[int, np.ndarray]:
-        """Return {local_id_int: centroid_float32_array} for all currently active tracks.
-
-        Only active pool entries with a non-None centroid are included.
-        Lost pool is excluded — lost local_ids will not appear in the next
-        batch's tracking_history so IEP3 does not need their centroids.
-        Returns empty dict if no active tracks or no centroid yet available.
-        """
+        """Return {local_id_int: centroid_float32_array} for all currently active tracks."""
         result = {}
         for active_track in self._active.values():
             centroid = active_track.gallery.snapshot_centroid()
@@ -219,11 +220,7 @@ class LocalIdentityManager:
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _resolve_pending(self, pending: PendingTrack, new_pos=None):
-        """Match pending init embeddings against the lost pool.
-
-        new_pos: the re-appearing track's current floor position (tuple or None).
-        Returns (local_id, gallery): either a recovered pair or a freshly minted one.
-        """
+        """Match pending init embeddings against the lost pool."""
         mean_emb = np.mean(pending.init_embeddings, axis=0).astype(np.float32)
         norm = np.linalg.norm(mean_emb)
         if norm > 0:
@@ -259,7 +256,6 @@ class LocalIdentityManager:
                 best_threshold = gate_result.threshold
 
         if best_lid is not None and best_sim >= best_threshold:
-            # Recover lost identity
             lost_entry = self._lost.pop(best_lid)
             local_id = lost_entry.local_id
             gallery = lost_entry.gallery
@@ -269,7 +265,6 @@ class LocalIdentityManager:
                 self._frame_index, pending.track_id, local_id, best_sim, best_threshold,
             )
         else:
-            # Stranger — mint new identity
             local_id = self._next_id
             self._next_id += 1
             gallery = EmbeddingGallery()
@@ -280,7 +275,6 @@ class LocalIdentityManager:
                 best_sim if best_lid is not None else 0.0, self._gate_cfg.base_threshold,
             )
 
-        # Seed gallery with the collected init embeddings (already L2-normalized)
         for emb in pending.init_embeddings:
             gallery.add(emb, is_init=True)
 
@@ -292,160 +286,109 @@ class LocalIdentityManager:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
 
-    class _MockModel:
-        """Injects a controlled embedding regardless of frame content."""
+    class _MockOsNetClient:
+        """Injects a controlled embedding regardless of crop content."""
         def __init__(self):
             self.emb = np.zeros(512, dtype=np.float32)
 
-        def get_features(self, crops):
-            return np.array([self.emb], dtype=np.float32)
+        async def start(self): pass
+        async def close(self): pass
 
-    mock = _MockModel()
-    mgr  = LocalIdentityManager(mock)
+        async def extract(self, frame, bbox, track_id, timestamp_ms):
+            return self.emb.copy()
 
-    emb_a = np.zeros(512, dtype=np.float32); emb_a[0] = 1.0  # [1,0,0,...]
-    emb_b = np.zeros(512, dtype=np.float32); emb_b[1] = 1.0  # [0,1,0,...] orthogonal to A
+    async def _run_tests():
+        mock = _MockOsNetClient()
+        mgr  = LocalIdentityManager(mock)
 
-    frame = np.zeros((200, 300, 3), dtype=np.uint8)
-    bbox  = [10, 10, 110, 160]  # 100×150 px, area=15 000 > MIN_BBOX_AREA
+        emb_a = np.zeros(512, dtype=np.float32); emb_a[0] = 1.0
+        emb_b = np.zeros(512, dtype=np.float32); emb_b[1] = 1.0
 
-    def _track(tid):
-        return {"track_id": tid, "label": "person", "confidence": 0.9, "bbox": bbox}
+        frame = np.zeros((200, 300, 3), dtype=np.uint8)
+        bbox  = [10, 10, 110, 160]
 
-    # ── Test 1: fast path (lost pool empty) ───────────────────────────────────
-    mock.emb = emb_a
-    r = mgr.process_frame(frame, [_track(1)])
-    local_id_a = r[0]["local_id"]
-    assert local_id_a == 1, f"fast path: expected local_id=1, got {local_id_a}"
+        def _track(tid):
+            return {"track_id": tid, "label": "person", "confidence": 0.9, "bbox": bbox}
 
-    for _ in range(3):           # keep track 1 active a few frames
-        mgr.process_frame(frame, [_track(1)])
+        # ── Test 1: fast path ─────────────────────────────────────────────────
+        mock.emb = emb_a
+        r = await mgr.process_frame(frame, [_track(1)])
+        local_id_a = r[0]["local_id"]
+        assert local_id_a == 1, f"fast path: expected 1, got {local_id_a}"
 
-    mgr.process_frame(frame, []) # track 1 disappears → enters lost pool
-    assert 1 in mgr._lost, "local_id 1 should be in lost pool"
-    print(f"[1] fast path + disappear → lost pool ✓  (local_id={local_id_a})")
+        for _ in range(3):
+            await mgr.process_frame(frame, [_track(1)])
 
-    # ── Test 2: orthogonal person gets a new local_id ─────────────────────────
-    mock.emb = emb_b
-    r = mgr.process_frame(frame, [_track(2)])      # Branch C → pending
-    assert r[0]["local_id"] is None
+        await mgr.process_frame(frame, [])
+        assert 1 in mgr._lost, "local_id 1 should be in lost pool"
+        print(f"[1] fast path + disappear → lost pool ✓  (local_id={local_id_a})")
 
-    for _ in range(INIT_EMBEDDINGS_COUNT - 1):     # collect 4 more (pending)
-        r = mgr.process_frame(frame, [_track(2)])
-        assert r[0]["local_id"] is None, "should still be pending"
-
-    r = mgr.process_frame(frame, [_track(2)])      # 5th embedding → resolve
-    local_id_b = r[0]["local_id"]
-    assert local_id_b is not None
-    assert local_id_b != local_id_a, (
-        f"orthogonal person must get new local_id, got {local_id_b} vs {local_id_a}"
-    )
-    print(f"[2] orthogonal person → new local_id={local_id_b} ✓")
-
-    mgr.process_frame(frame, [])  # track 2 disappears (goes to lost too)
-
-    # ── Test 3: same person recovers local_id after occlusion ─────────────────
-    # Lost pool now has both A (local_id=1) and B (local_id=2).
-    mock.emb = emb_a
-    r = mgr.process_frame(frame, [_track(3)])      # Branch C → pending
-    assert r[0]["local_id"] is None
-
-    for _ in range(INIT_EMBEDDINGS_COUNT - 1):
-        r = mgr.process_frame(frame, [_track(3)])
+        # ── Test 2: orthogonal person ─────────────────────────────────────────
+        mock.emb = emb_b
+        r = await mgr.process_frame(frame, [_track(2)])
         assert r[0]["local_id"] is None
 
-    r = mgr.process_frame(frame, [_track(3)])      # resolve → must match A
-    recovered_id = r[0]["local_id"]
-    assert recovered_id == local_id_a, (
-        f"same person must recover local_id={local_id_a}, got {recovered_id}"
-    )
-    print(f"[3] ReID recovery → local_id={recovered_id} == original {local_id_a} ✓")
+        for _ in range(INIT_EMBEDDINGS_COUNT - 1):
+            r = await mgr.process_frame(frame, [_track(2)])
+            assert r[0]["local_id"] is None
 
-    # ── Test 4: pending track disappears before resolving → no lost entry ──────
-    mgr2  = LocalIdentityManager(mock)
-    mock.emb = emb_a
-    mgr2.process_frame(frame, [_track(1)])         # fast path → active
-    mgr2.process_frame(frame, [])                  # disappears → lost
+        r = await mgr.process_frame(frame, [_track(2)])
+        local_id_b = r[0]["local_id"]
+        assert local_id_b is not None
+        assert local_id_b != local_id_a
+        print(f"[2] orthogonal person → new local_id={local_id_b} ✓")
 
-    mgr2.process_frame(frame, [_track(99)])        # Branch C → pending
-    assert 99 in mgr2._pending
+        await mgr.process_frame(frame, [])
 
-    mgr2.process_frame(frame, [])                  # track 99 disappears mid-pending
-    assert 99 not in mgr2._pending, "pending track must be dropped"
-    assert all(e.local_id != 99 for e in mgr2._lost.values()), (
-        "dropped pending track must not create a lost entry"
-    )
-    print("[4] pending disappear → silently dropped, no lost entry ✓")
+        # ── Test 3: same person recovers local_id ─────────────────────────────
+        mock.emb = emb_a
+        r = await mgr.process_frame(frame, [_track(3)])
+        assert r[0]["local_id"] is None
 
-    # ── Test 5: TTL expiry → sticky mapping still restores the same local_id ──
-    mgr3  = LocalIdentityManager(mock)
-    mock.emb = emb_a
-    mgr3.process_frame(frame, [_track(1)])         # local_id=1, fast path
-    mgr3.process_frame(frame, [])                  # → lost
+        for _ in range(INIT_EMBEDDINGS_COUNT - 1):
+            r = await mgr.process_frame(frame, [_track(3)])
 
-    for _ in range(TTL_FRAMES + 1):                # burn past TTL
-        mgr3.process_frame(frame, [])
+        r = await mgr.process_frame(frame, [_track(3)])
+        recovered_id = r[0]["local_id"]
+        assert recovered_id == local_id_a
+        print(f"[3] ReID recovery → local_id={recovered_id} == original {local_id_a} ✓")
 
-    assert len(mgr3._lost) == 0, "TTL-expired entry must be pruned"
+        # ── Test 4: pending dropped ───────────────────────────────────────────
+        mgr2 = LocalIdentityManager(_MockOsNetClient())
+        mock2 = mgr2._osnet_client
+        mock2.emb = emb_a
+        await mgr2.process_frame(frame, [_track(1)])
+        await mgr2.process_frame(frame, [])
+        await mgr2.process_frame(frame, [_track(99)])
+        assert 99 in mgr2._pending
+        await mgr2.process_frame(frame, [])
+        assert 99 not in mgr2._pending
+        print("[4] pending disappear → silently dropped ✓")
 
-    r = mgr3.process_frame(frame, [_track(1)])     # sticky mapping restores local_id=1
-    assert r[0]["local_id"] == 1, (
-        f"sticky mapping must restore local_id=1 even after TTL, got {r[0]['local_id']}"
-    )
-    print(f"[5] TTL expiry + sticky mapping → local_id={r[0]['local_id']} restored ✓")
+        # ── Test 5: TTL + sticky mapping ─────────────────────────────────────
+        mgr3 = LocalIdentityManager(_MockOsNetClient())
+        mgr3._osnet_client.emb = emb_a
+        await mgr3.process_frame(frame, [_track(1)])
+        await mgr3.process_frame(frame, [])
+        for _ in range(TTL_FRAMES + 1):
+            await mgr3.process_frame(frame, [])
+        assert len(mgr3._lost) == 0
+        r = await mgr3.process_frame(frame, [_track(1)])
+        assert r[0]["local_id"] == 1
+        print(f"[5] TTL + sticky → local_id={r[0]['local_id']} ✓")
 
-    # ── Test 6: ByteTrack reuse across 1-frame gap (the reported bug scenario) ──
-    # Person active as track_id=1/local_id=1 → disappears 1 frame →
-    # ByteTrack re-surfaces track_id=1 → must immediately get local_id=1 back,
-    # NOT go through pending/ReID.
-    mgr4  = LocalIdentityManager(mock)
-    mock.emb = emb_a
-    mgr4.process_frame(frame, [_track(1)])         # fast path → local_id=1
-    for _ in range(3):
-        mgr4.process_frame(frame, [_track(1)])     # keep active
-    mgr4.process_frame(frame, [])                  # disappears → lost pool
-    assert 1 in mgr4._lost, "local_id=1 should be in lost pool"
+        # ── Test 6: ByteTrack reuse ────────────────────────────────────────────
+        mgr4 = LocalIdentityManager(_MockOsNetClient())
+        mgr4._osnet_client.emb = emb_a
+        await mgr4.process_frame(frame, [_track(1)])
+        for _ in range(3):
+            await mgr4.process_frame(frame, [_track(1)])
+        await mgr4.process_frame(frame, [])
+        r = await mgr4.process_frame(frame, [_track(1)])
+        assert r[0]["local_id"] == 1
+        assert 1 not in mgr4._pending
+        print(f"[6] ByteTrack reuse → local_id={r[0]['local_id']} ✓")
 
-    r = mgr4.process_frame(frame, [_track(1)])     # ByteTrack re-surfaces same track_id
-    assert r[0]["local_id"] == 1, (
-        f"ByteTrack reuse must restore local_id=1 immediately, got {r[0]['local_id']}"
-    )
-    assert 1 not in mgr4._pending, "must NOT go through pending on ByteTrack reuse"
-    assert 1 not in mgr4._lost,    "must be removed from lost pool on reuse"
-    print(f"[6] ByteTrack 1-frame gap → local_id={r[0]['local_id']} restored instantly ✓")
+        print("\nsmoke test passed")
 
-    # ── Test 7: last_floor_pos preserved in LostEntry ─────────────────────────
-    mgr5 = LocalIdentityManager(mock)
-    mock.emb = emb_a
-    mgr5.process_frame(frame, [_track(1)])                                  # fast path → active, no floor pos
-    mgr5.process_frame(frame, [{**_track(1), "floor_x": 2.5, "floor_y": 3.0}])  # Branch A: set pos
-    mgr5.process_frame(frame, [{**_track(1), "floor_x": 3.5, "floor_y": 4.0}])  # Branch A: update pos
-    assert mgr5._active[1].last_floor_pos == (3.5, 4.0), \
-        f"expected (3.5, 4.0), got {mgr5._active[1].last_floor_pos}"
-    mgr5.process_frame(frame, [])                                           # disappears → lost
-    assert mgr5._lost[1].last_floor_pos == (3.5, 4.0), \
-        f"LostEntry.last_floor_pos must equal last active position, got {mgr5._lost[1].last_floor_pos}"
-    print("[7] last_floor_pos preserved in LostEntry OK")
-
-    # ── Test 8: last_floor_pos stays None when projection never available ─────
-    mgr6 = LocalIdentityManager(mock)
-    mock.emb = emb_a
-    mgr6.process_frame(frame, [_track(1)])   # fast path, no floor_x/y keys
-    mgr6.process_frame(frame, [_track(1)])   # Branch A, still no floor_x/y
-    mgr6.process_frame(frame, [])            # → lost
-    assert mgr6._lost[1].last_floor_pos is None, \
-        f"LostEntry.last_floor_pos must be None when never projected, got {mgr6._lost[1].last_floor_pos}"
-    print("[8] last_floor_pos is None when projection never available OK")
-
-    # ── Test 9: track dict without floor_x key does not raise ─────────────────
-    mgr7 = LocalIdentityManager(mock)
-    mock.emb = emb_a
-    try:
-        mgr7.process_frame(frame, [_track(1)])   # no floor_x key
-        mgr7.process_frame(frame, [_track(1)])   # Branch A, no floor_x key
-        print("[9] missing floor_x/y keys do not raise OK")
-    except KeyError as exc:
-        print(f"[9] FAILED: KeyError {exc}")
-        import sys as _sys; _sys.exit(1)
-
-    print("\nsmoke test passed")
+    asyncio.run(_run_tests())

@@ -27,7 +27,7 @@ from PIL import Image
 
 try:
     from .detector.detector import YoloClient
-    from .reid.reid import load_model as _load_reid
+    from .reid.reid import OsNetClient
     from .tracker.tracker import create_tracker, update
     from .video_ingestor.ingestor import extract_frames
     from .identity.manager import LocalIdentityManager
@@ -39,7 +39,7 @@ except ImportError:
     _root = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, _root)
     from detector.detector import YoloClient
-    from reid.reid import load_model as _load_reid
+    from reid.reid import OsNetClient
     from tracker.tracker import create_tracker, update
     from video_ingestor.ingestor import extract_frames
     from identity.manager import LocalIdentityManager
@@ -138,19 +138,21 @@ async def _load_projector(persistence: PostgresPersistence, camera_config_id: st
 
 class IEP2Runtime:
     def __init__(self, settings: Iep2Settings):
-        """Initialise models. YOLO is served by yolo-service via ZMQ (no local GPU load)."""
+        """Initialise service clients. No models loaded locally — both delegated via ZMQ."""
         self.settings = settings
-        self.yolo_client = YoloClient(camera_id=settings.camera_id)
-        log.info("YoloClient created  camera=%s  (inference delegated to yolo-service)",
-                 settings.camera_id)
-        log.info("Loading ReID model (osnet_x1_0)…")
-        self.reid_model = _load_reid()
-        log.info("ReID loaded.")
+        self.yolo_client  = YoloClient(camera_id=settings.camera_id)
+        self.osnet_client = OsNetClient(camera_id=settings.camera_id)
+        log.info(
+            "IEP2Runtime initialised  camera=%s  "
+            "(YOLO→yolo-service, OSNet→osnet-service via ZMQ)",
+            settings.camera_id,
+        )
 
     @asynccontextmanager
     async def run(self, video_path: str, start_ms: int = 0):
         """Async context manager that yields the frame stream from a video file."""
         await self.yolo_client.start()
+        await self.osnet_client.start()
         try:
             camera_id = self.settings.camera_id
             async with PostgresPersistence(
@@ -180,11 +182,13 @@ class IEP2Runtime:
                 yield self._stream_from_source(self._video_source(video_path), persistence, projector)
         finally:
             await self.yolo_client.close()
+            await self.osnet_client.close()
 
     @asynccontextmanager
     async def run_from_iep1(self):
         """Async context manager that yields the frame stream from IEP1 via Redis + S3."""
         await self.yolo_client.start()
+        await self.osnet_client.start()
         try:
             camera_id = self.settings.camera_id
             s3 = make_s3_client(
@@ -207,6 +211,7 @@ class IEP2Runtime:
                     yield self._stream_from_iep1(source, s3, self.settings.s3_bucket, persistence, projector, live_pub)
         finally:
             await self.yolo_client.close()
+            await self.osnet_client.close()
 
     @staticmethod
     def _video_source(video_path: str) -> Iterator[Tuple[int, str | None, np.ndarray]]:
@@ -323,7 +328,7 @@ class IEP2Runtime:
         camera_id = self.settings.camera_id
         log.info("Stream started  camera=%s", camera_id)
         tracker        = create_tracker()
-        manager        = LocalIdentityManager(reid_model=self.reid_model)
+        manager        = LocalIdentityManager(osnet_client=self.osnet_client)
         seen_ids: set  = set()
         frame_index    = 0
         db_rows_written = 0
@@ -332,7 +337,7 @@ class IEP2Runtime:
             detections = await self.yolo_client.detect(frame, _capture_ts_ms)
             tracks     = update(tracker, detections)
             _project_tracks(tracks, projector)
-            enriched   = manager.process_frame(frame, tracks)
+            enriched   = await manager.process_frame(frame, tracks, timestamp_ms=_capture_ts_ms)
 
             log.debug(
                 "Frame %4d  detections=%d  tracks=%d  confirmed=%d  pending=%d",
@@ -384,7 +389,7 @@ class IEP2Runtime:
         camera_id = self.settings.camera_id
         log.info("Stream started (IEP1)  camera=%s", camera_id)
         tracker        = create_tracker()
-        manager        = LocalIdentityManager(reid_model=self.reid_model)
+        manager        = LocalIdentityManager(osnet_client=self.osnet_client)
         seen_ids: set  = set()
         frame_index    = 0
         db_rows_written = 0
@@ -422,7 +427,7 @@ class IEP2Runtime:
                 detections = await self.yolo_client.detect(frame, capture_ts_ms)
                 tracks     = update(tracker, detections)
                 _project_tracks(tracks, projector)
-                enriched   = manager.process_frame(frame, tracks)
+                enriched   = await manager.process_frame(frame, tracks, timestamp_ms=capture_ts_ms)
 
                 log.debug(
                     "Frame %4d  detections=%d  tracks=%d  confirmed=%d  pending=%d",
@@ -494,7 +499,8 @@ if __name__ == "__main__":
     settings = Iep2Settings(
         store_id=os.environ.get("STORE_ID", "00000000-0000-0000-0000-000000000001"),
         camera_id="cam0",
-        database_url=os.environ.get("DATABASE_URL", ""),
+        database_url_server=os.environ.get("DATABASE_URL_SERVER", ""),
+        window_seconds=float(os.environ.get("WINDOW_SECONDS", "60")),
         camera_config_id=os.environ.get("CAMERA_CONFIG_ID"),
     )
 

@@ -6,11 +6,12 @@ import docker
 
 logger = logging.getLogger(__name__)
 
-IEP2_IMAGE          = os.environ.get("IEP2_IMAGE",           "retailvision-iep2:latest")
-DOCKER_NETWORK      = os.environ.get("DOCKER_NETWORK",       "retail-edge_default")
-IPC_SOCKETS_VOLUME  = os.environ.get("IPC_SOCKETS_VOLUME",   "retail-edge_ipc-sockets")
-YOLO_HEALTH_TCP     = os.environ.get("YOLO_HEALTH_TCP_ADDR", "yolo-service:50052")
-YOLO_HEALTH_TIMEOUT = int(os.environ.get("YOLO_HEALTH_TIMEOUT_S", "120"))
+IEP2_IMAGE          = os.environ.get("IEP2_IMAGE",             "retailvision-iep2:latest")
+DOCKER_NETWORK      = os.environ.get("DOCKER_NETWORK",         "retail-edge_default")
+IPC_SOCKETS_VOLUME  = os.environ.get("IPC_SOCKETS_VOLUME",     "retail-edge_ipc-sockets")
+YOLO_HEALTH_TCP     = os.environ.get("YOLO_HEALTH_TCP_ADDR",   "yolo-service:50052")
+OSNET_HEALTH_TCP    = os.environ.get("OSNET_HEALTH_TCP_ADDR",  "osnet-service:50053")
+ML_SERVICES_TIMEOUT = int(os.environ.get("ML_SERVICES_TIMEOUT_S", "120"))
 
 _client: docker.DockerClient | None = None
 
@@ -26,12 +27,11 @@ def container_name(store_id: str, physical_camera_id: str) -> str:
     return f"iep2_{store_id}_{physical_camera_id}"
 
 
-def _wait_for_yolo_serving(timeout_s: int = YOLO_HEALTH_TIMEOUT) -> None:
-    """Block until yolo-service gRPC health reports SERVING, or raise TimeoutError.
+def _wait_for_service_serving(addr: str, name: str, timeout_s: int) -> None:
+    """Block until the named gRPC service reports SERVING via TCP health endpoint.
 
-    R7: IEP2 containers must not start until YOLO service is SERVING.
-    Deviation from spec (Edge Agent checks): EEP checks via TCP health endpoint
-    since yolo-service unix socket is not accessible from the EEP container.
+    R7 (M2-S1/M2-S2): IEP2 containers must not start until both YOLO and OSNet
+    services are SERVING. EEP checks via TCP since unix sockets are not shared.
     """
     import grpc
     from grpc_health.v1 import health_pb2, health_pb2_grpc
@@ -40,24 +40,29 @@ def _wait_for_yolo_serving(timeout_s: int = YOLO_HEALTH_TIMEOUT) -> None:
     last_exc: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            with grpc.insecure_channel(YOLO_HEALTH_TCP) as channel:
+            with grpc.insecure_channel(addr) as channel:
                 stub = health_pb2_grpc.HealthStub(channel)
                 resp = stub.Check(
                     health_pb2.HealthCheckRequest(service=""),
                     timeout=3.0,
                 )
                 if resp.status == health_pb2.HealthCheckResponse.SERVING:
-                    logger.info("YOLO service is SERVING")
+                    logger.info("%s is SERVING", name)
                     return
-                logger.debug("YOLO service status=%s — waiting…", resp.status)
+                logger.debug("%s status=%s — waiting…", name, resp.status)
         except Exception as exc:
             last_exc = exc
-            logger.debug("YOLO health check failed: %s — retrying…", exc)
+            logger.debug("%s health check failed: %s — retrying…", name, exc)
         time.sleep(2)
     raise TimeoutError(
-        f"YOLO service did not become SERVING within {timeout_s}s "
-        f"(last error: {last_exc})"
+        f"{name} did not become SERVING within {timeout_s}s (last error: {last_exc})"
     )
+
+
+def _wait_for_ml_services() -> None:
+    """Wait for both YOLO and OSNet services to be SERVING before starting IEP2."""
+    _wait_for_service_serving(YOLO_HEALTH_TCP,  "yolo-service",  ML_SERVICES_TIMEOUT)
+    _wait_for_service_serving(OSNET_HEALTH_TCP, "osnet-service", ML_SERVICES_TIMEOUT)
 
 
 def start_iep2(
@@ -82,7 +87,7 @@ def start_iep2(
     except docker.errors.NotFound:
         pass
 
-    _wait_for_yolo_serving()
+    _wait_for_ml_services()
 
     client.containers.run(
         image=IEP2_IMAGE,

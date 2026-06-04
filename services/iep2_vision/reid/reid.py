@@ -1,90 +1,125 @@
-"""ReID Embedder — sole owner of OSNet model loading and embedding extraction.
+"""OSNet ReID client — delegates crop embedding to the shared osnet-service via ZMQ.
 
-Swap OSNet for another ReID model here and nothing outside this file changes.
-All model config lives in the constants below; nothing is buried in functions.
+IEP2 no longer loads or owns OSNet weights. It extracts the person crop from the
+full frame, JPEG-encodes it, and submits it to the osnet-service. The service
+handles all preprocessing (R3), runs TRT inference, L2-normalises (R5), and
+returns 512-dim float32 bytes.
+
+Transport: ipc:// only. Serialisation: msgpack only.
+Swap OSNet for another ReID model here — nothing outside this file changes.
 """
-import sys
-from pathlib import Path
+import asyncio
+import logging
+import os
+import uuid
 
 import cv2
+import msgpack
 import numpy as np
+import zmq.asyncio
 
-MODEL_NAME    = "osnet_x1_0"
-DEVICE        = "cpu"
+log = logging.getLogger("iep2.reid")
+
 EMBEDDING_DIM = 512
+OSNET_INPUT_SOCK = os.environ.get("OSNET_INPUT_SOCK", "ipc:///tmp/sockets/osnet_input.sock")
 
 
-def load_model(device: str = DEVICE):
-    """Load and return the OSNet ReID model via boxmot.
+def _result_sock_addr(camera_id: str) -> str:
+    """Per-camera result socket — IEP2 binds, osnet-service connects."""
+    return f"ipc:///tmp/sockets/osnet_output_{camera_id}.sock"
 
-    Call once; pass the returned object to extract_embedding — never call
-    load_model() per frame. boxmot handles weight download and caching.
+
+class OsNetClient:
+    """Async ZMQ client for the shared osnet-service.
+
+    Lifecycle: call start() before extract(), close() when done.
     """
-    from boxmot.reid.core.reid import ReID
 
-    return ReID(
-        weights=Path(f"{MODEL_NAME}.pt"),
-        device=device,
-        half=False,
-    )
+    def __init__(self, camera_id: str):
+        self._camera_id = camera_id
+        self._ctx  = zmq.asyncio.Context.instance()
 
+        self._push = self._ctx.socket(zmq.PUSH)
+        self._push.connect(OSNET_INPUT_SOCK)
 
-def extract_embedding(model, frame: np.ndarray, bbox: list[int]):
-    """Return an L2-normalized float32 embedding for the person crop.
+        # Bind per-camera result socket — osnet-service connects PUSH to this.
+        self._pull = self._ctx.socket(zmq.PULL)
+        self._pull.bind(_result_sock_addr(camera_id))
 
-    bbox: [x1, y1, x2, y2] in pixel coordinates (ints or floats).
-    Returns a (EMBEDDING_DIM,) float32 numpy vector, or None if the
-    clamped crop has zero area (fully out-of-bounds bbox).
+        self._pending: dict[str, asyncio.Future] = {}
+        self._reader_task: asyncio.Task | None = None
 
-    Crop resizing to model input dimensions is handled by boxmot internally.
-    """
-    x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-    h, w = frame.shape[:2]
+    async def start(self) -> None:
+        self._reader_task = asyncio.create_task(self._reader_loop())
 
-    # Clamp to frame boundaries — never crash on edge-touching boxes.
-    x1 = max(0, x1)
-    y1 = max(0, y1)
-    x2 = min(w, x2)
-    y2 = min(h, y2)
+    async def close(self) -> None:
+        if self._reader_task:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        self._push.close(linger=0)
+        self._pull.close(linger=0)
 
-    if x2 <= x1 or y2 <= y1:
-        return None
+    async def _reader_loop(self) -> None:
+        while True:
+            try:
+                raw  = await self._pull.recv()
+                resp = msgpack.unpackb(raw, raw=False)
+                req_id = resp.get("request_id")
+                fut = self._pending.pop(req_id, None)
+                if fut and not fut.done():
+                    emb_bytes = resp.get("embedding")
+                    if emb_bytes:
+                        emb = np.frombuffer(emb_bytes, dtype=np.float32).copy()
+                        fut.set_result(emb if emb.shape == (EMBEDDING_DIM,) else None)
+                    else:
+                        fut.set_result(None)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("OSNet reader loop error: %s", exc)
 
-    crop = frame[y1:y2, x1:x2]
+    async def extract(
+        self,
+        frame: np.ndarray,
+        bbox: list,
+        track_id: int,
+        timestamp_ms: int,
+    ) -> np.ndarray | None:
+        """Extract ReID embedding for the person at bbox.
 
-    # boxmot ReID handles crop preprocessing (resize, normalise) internally.
-    payload = model.preprocess([crop])
-    result  = model.process(payload)
+        Clamps bbox to frame boundaries; returns None for zero-area crops.
+        Returns (512,) float32 L2-normalised embedding from osnet-service.
+        """
+        h, w = frame.shape[:2]
+        x1 = max(0, int(bbox[0]))
+        y1 = max(0, int(bbox[1]))
+        x2 = min(w, int(bbox[2]))
+        y2 = min(h, int(bbox[3]))
+        if x2 <= x1 or y2 <= y1:
+            return None
 
-    if result is None:
-        return None
+        crop = frame[y1:y2, x1:x2]
+        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not ok:
+            log.warning("JPEG encode failed for crop  camera=%s  track=%d", self._camera_id, track_id)
+            return None
 
-    emb = result.cpu().numpy()[0].astype(np.float32)
-    norm = np.linalg.norm(emb)
-    if norm > 0:
-        emb = emb / norm
-    return emb
+        req_id = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self._pending[req_id] = fut
 
-
-if __name__ == "__main__":
-    if len(sys.argv) != 6:
-        print("usage: python reid.py <image_path> <x1> <y1> <x2> <y2>")
-        sys.exit(1)
-
-    image_path = sys.argv[1]
-    bbox = [int(a) for a in sys.argv[2:6]]
-
-    img = cv2.imread(image_path)
-    if img is None:
-        print(f"cannot read image: {image_path}")
-        sys.exit(1)
-
-    reid_model = load_model()
-    emb = extract_embedding(reid_model, img, bbox)
-
-    if emb is None:
-        print("zero-area bbox — no embedding produced")
-        sys.exit(1)
-
-    print(f"shape: {emb.shape}")
-    print(f"norm:  {np.linalg.norm(emb):.6f}")
+        payload = msgpack.packb(
+            {
+                "request_id":   req_id,
+                "camera_id":    self._camera_id,
+                "track_id":     track_id,
+                "timestamp_ms": timestamp_ms,
+                "crop":         buf.tobytes(),
+            },
+            use_bin_type=True,
+        )
+        await self._push.send(payload)
+        return await fut

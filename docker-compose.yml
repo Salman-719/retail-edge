@@ -139,7 +139,8 @@ services:
       DOCKER_NETWORK: ${DOCKER_NETWORK:-retail-edge_default}
       IPC_SOCKETS_VOLUME: ${IPC_SOCKETS_VOLUME:-retail-edge_ipc-sockets}
       YOLO_HEALTH_TCP_ADDR: yolo-service:50052
-      YOLO_HEALTH_TIMEOUT_S: ${YOLO_HEALTH_TIMEOUT_S:-120}
+      OSNET_HEALTH_TCP_ADDR: osnet-service:50053
+      ML_SERVICES_TIMEOUT_S: ${ML_SERVICES_TIMEOUT_S:-120}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -148,6 +149,8 @@ services:
       redis:
         condition: service_healthy
       yolo-service:
+        condition: service_started
+      osnet-service:
         condition: service_started
     restart: on-failure
 
@@ -198,6 +201,25 @@ services:
       - "50052:50052"
     restart: on-failure
 
+  # ── OSNet ReID embedding service ──────────────────────────────────────────────
+  # Single GPU process; batches person crops from all IEP2 workers into one TRT call.
+  # Returns L2-normalised 512-dim float32 embeddings. Jetson/ARM64 only.
+  osnet-service:
+    build:
+      context: ./services/osnet_service
+      dockerfile: Dockerfile
+    environment:
+      OSNET_MAX_BATCH_SIZE: ${OSNET_MAX_BATCH_SIZE:-64}
+      OSNET_BATCH_TIMEOUT_MS: ${OSNET_BATCH_TIMEOUT_MS:-50}
+      OSNET_INPUT_SOCK: "ipc:///tmp/sockets/osnet_input.sock"
+      OSNET_HEALTH_SOCK: "unix:///tmp/sockets/osnet_health.sock"
+      OSNET_HEALTH_TCP_ADDR: "[::]:50053"
+    volumes:
+      - ipc-sockets:/tmp/sockets
+    ports:
+      - "50053:50053"
+    restart: on-failure
+
   iep2_vision:
     build:
       context: ./services/iep2_vision
@@ -210,6 +232,7 @@ services:
       S3_BUCKET: ${S3_BUCKET:-retailvision}
       LIVE_STREAM_ENABLED: "true"
       YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
+      OSNET_INPUT_SOCK: "ipc:///tmp/sockets/osnet_input.sock"
     volumes:
       - ./testing-data:/workspace/testing-data:ro
       - ipc-sockets:/tmp/sockets
@@ -226,6 +249,8 @@ services:
       minio:
         condition: service_healthy
       yolo-service:
+        condition: service_started
+      osnet-service:
         condition: service_started
 
   iep3_reconciliation:
@@ -304,6 +329,7 @@ services:
     environment:
       <<: *shared-config
       YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
+      OSNET_INPUT_SOCK: "ipc:///tmp/sockets/osnet_input.sock"
     volumes:
       - ./testing-data:/workspace/testing-data:ro
       - ipc-sockets:/tmp/sockets
@@ -311,6 +337,8 @@ services:
       pgbouncer:
         condition: service_healthy
       yolo-service:
+        condition: service_started
+      osnet-service:
         condition: service_started
     profiles:
       - dev
