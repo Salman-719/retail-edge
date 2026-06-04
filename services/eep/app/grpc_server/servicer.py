@@ -9,6 +9,7 @@ from sqlalchemy import text
 from app.core.database import AsyncSessionLocal
 from app.grpc_generated import agent_pb2, agent_pb2_grpc
 from app.grpc_server import camera_status, registry
+from app.tasks import camera_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -74,21 +75,83 @@ async def _reader(request_iterator, store_id: str) -> None:
         if msg.HasField("heartbeat"):
             await _upsert_agent(store_id, msg.heartbeat.agent_version, status="online")
         elif msg.HasField("camera_status"):
-            rpt = msg.camera_status
-            logger.info(
-                "Camera status report",
-                extra={
-                    "store_id": store_id,
-                    "camera_id": rpt.camera_id,
-                    "status": rpt.container_status,
+            await _handle_camera_status_report(store_id, msg.camera_status)
+
+
+# ── CameraStatusReport handler (R4) ───────────────────────────────────────────
+
+_CAMERA_CONFIG_LOOKUP_SQL = text("""
+    SELECT cc.id AS camera_config_id
+    FROM camera_configs cc
+    JOIN store_config_versions scv ON scv.id = cc.version_id
+    WHERE cc.physical_camera_id = :physical_camera_id
+      AND scv.store_id           = :store_id
+      AND scv.status             = 'active'
+    LIMIT 1
+""")
+
+
+async def _handle_camera_status_report(store_id: str, rpt) -> None:
+    """Update in-memory status, Redis _running_cameras, and scheduler state (R4)."""
+    camera_id        = rpt.camera_id
+    container_status = rpt.container_status
+
+    # Always update in-memory status for REST endpoints
+    camera_status.update(
+        store_id=store_id,
+        camera_id=camera_id,
+        status=container_status,
+        timestamp_ms=rpt.timestamp_ms,
+    )
+
+    if container_status == "running":
+        await camera_status.mark_running(store_id, camera_id)
+
+    elif container_status in ("exited", "dead", "not_found"):
+        await camera_status.mark_stopped(store_id, camera_id)
+        # Bridge crash to the scheduler so it can restart on the next tick
+        await _mark_scheduler_stopped_by_physical_camera(store_id, camera_id)
+
+    elif container_status == "restarting":
+        # Docker is recovering — hold state, do not remove from _running_cameras (R6)
+        logger.info("camera %s restarting — holding state", camera_id)
+
+    logger.info(
+        "CameraStatusReport  store=%s  camera=%s  status=%s",
+        store_id, camera_id, container_status,
+    )
+
+
+async def _mark_scheduler_stopped_by_physical_camera(
+    store_id: str, physical_camera_id: str
+) -> None:
+    """Look up camera_config_id from physical_camera_id and call scheduler.mark_stopped.
+
+    The scheduler tracks _running_cameras by camera_config_id; this bridges the
+    physical-camera-based crash report to the scheduler's key space so the
+    scheduler can attempt a restart on the next tick.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                _CAMERA_CONFIG_LOOKUP_SQL,
+                {
+                    "physical_camera_id": uuid.UUID(physical_camera_id),
+                    "store_id":           uuid.UUID(store_id),
                 },
             )
-            camera_status.update(
-                store_id=store_id,
-                camera_id=rpt.camera_id,
-                status=rpt.container_status,
-                timestamp_ms=rpt.timestamp_ms,
-            )
+            row = result.fetchone()
+            if row:
+                camera_scheduler.mark_stopped(store_id, str(row.camera_config_id))
+                logger.info(
+                    "Crash bridged to scheduler  camera=%s  config=%s",
+                    physical_camera_id, row.camera_config_id,
+                )
+    except Exception as exc:
+        logger.warning(
+            "Failed to bridge crash to scheduler  camera=%s: %s",
+            physical_camera_id, exc,
+        )
 
 
 async def _writer(queue: asyncio.Queue, context) -> None:

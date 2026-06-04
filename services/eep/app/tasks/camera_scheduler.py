@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
 from app.core import iep2_docker, orchestrator
+from app.grpc_server import camera_status as _camera_status
 
 log = logging.getLogger(__name__)
 
@@ -36,9 +37,13 @@ SELECT
     cs.days_of_week,
     cs.start_time,
     cs.end_time,
-    s.timezone         AS store_timezone
+    s.timezone         AS store_timezone,
+    pc.id              AS physical_camera_id
 FROM camera_schedules cs
-JOIN stores s ON s.id = cs.store_id
+JOIN stores s                  ON s.id   = cs.store_id
+JOIN camera_configs cc         ON cc.id  = cs.camera_config_id
+JOIN store_config_versions scv ON scv.id = cc.version_id
+JOIN physical_cameras pc       ON pc.id  = cc.physical_camera_id
 WHERE cs.is_active = true
   AND s.status = 'active'
 """)
@@ -240,6 +245,16 @@ async def evaluate_schedules() -> None:
             key = (str(row["store_id"]), str(row["camera_config_id"]))
 
             if should_run and key not in _running_cameras:
+                # R6: don't race with Docker's own on-failure restart recovery
+                phys_id = str(row.get("physical_camera_id", ""))
+                if phys_id:
+                    cs = _camera_status.get(str(row["store_id"]), phys_id)
+                    if cs and cs["status"] == "restarting":
+                        log.info(
+                            "camera %s restarting — skipping start  config=%s",
+                            phys_id, row["camera_config_id"],
+                        )
+                        continue
                 await _on_camera_start(row)
                 _running_cameras.add(key)
 

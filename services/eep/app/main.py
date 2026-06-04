@@ -153,6 +153,8 @@ async def lifespan(app: FastAPI):
     await start_grpc_server()
     start_scheduler()
     from app.tasks.camera_scheduler import rebuild_running_cameras
+    from app.grpc_server.camera_status import rebuild_running_cameras_on_startup
+    await rebuild_running_cameras_on_startup()
     await rebuild_running_cameras()
     try:
         yield

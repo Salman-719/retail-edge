@@ -57,8 +57,9 @@ OSNET_HEALTH_SOCK = os.environ.get("OSNET_HEALTH_SOCK", "osnet-service:50053")
 
 # IEP2 environment variables forwarded from Edge Agent env
 LOCAL_REDIS_URL     = os.environ.get("LOCAL_REDIS_URL",     "redis://redis:6379/0")
-SERVER_REDIS_URL    = os.environ.get("SERVER_REDIS_URL",    "")
-DATABASE_URL_SERVER = os.environ.get("DATABASE_URL_SERVER", "")
+SERVER_REDIS_URL     = os.environ.get("SERVER_REDIS_URL",     "")
+DATABASE_URL_SERVER  = os.environ.get("DATABASE_URL_SERVER",  "")
+HEARTBEAT_INTERVAL_S = int(os.environ.get("HEARTBEAT_INTERVAL_S", "30"))
 
 # ── Module-level state ─────────────────────────────────────────────────────────
 
@@ -77,9 +78,12 @@ class CameraState:
 
 _tracked_cameras:  dict[str, CameraState] = {}
 _starting_cameras: set[str]               = set()
-_outgoing:         asyncio.Queue          = asyncio.Queue()
+# R7: bounded — status reports dropped (not stalled) if the stream is reconnecting
+_outgoing:         asyncio.Queue          = asyncio.Queue(maxsize=200)
+# R1/R8: one Watch task per active camera
+_health_watchers:  dict[str, asyncio.Task] = {}
 
-# R6: all Docker SDK calls run in this executor — never on the asyncio thread
+# M3-S1 R6: all Docker SDK calls run in this executor — never on the asyncio thread
 _docker_exec = ThreadPoolExecutor(max_workers=4, thread_name_prefix="edge-docker")
 
 # ── Inference service descriptors (R10) ────────────────────────────────────────
@@ -300,6 +304,39 @@ def _build_iep2_env(camera_id: str, store_id: str) -> dict:
     }
 
 
+# ── IEP2 health watcher (R1) ──────────────────────────────────────────────────
+
+async def _watch_iep2_health(camera_id: str) -> None:
+    """Open a Watch stream to IEP2's grpc.health.v1 service.
+
+    Sends an immediate status report whenever health changes or the stream
+    breaks. Exits cleanly when the camera is removed from _tracked_cameras.
+    This is the fast path — Docker status polling in the heartbeat is the slow path.
+    """
+    sock = f"unix:///tmp/sockets/iep2_health_{camera_id}.sock"
+    while camera_id in _tracked_cameras:
+        try:
+            async with grpc.aio.insecure_channel(sock) as ch:
+                stub = health_pb2_grpc.HealthStub(ch)
+                async for response in stub.Watch(
+                    health_pb2.HealthCheckRequest(service="")
+                ):
+                    if response.status != health_pb2.HealthCheckResponse.SERVING:
+                        # IEP2 degraded — report actual Docker status immediately
+                        await _send_immediate_status(camera_id)
+                    if camera_id not in _tracked_cameras:
+                        return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if camera_id not in _tracked_cameras:
+                return
+            # Container not reachable — report current Docker status
+            logger.debug("IEP2 Watch stream failed  camera=%s: %s", camera_id, exc)
+            await _send_immediate_status(camera_id)
+            await asyncio.sleep(5)
+
+
 # ── Command handlers ───────────────────────────────────────────────────────────
 
 async def _handle_start_camera(cmd) -> None:
@@ -344,6 +381,12 @@ async def _handle_start_camera(cmd) -> None:
         await _add_camera_to_daemon(cam)
         _tracked_cameras[camera_id] = cam
 
+        # Step 4: start per-camera health watcher (R1)
+        _health_watchers[camera_id] = asyncio.create_task(
+            _watch_iep2_health(camera_id),
+            name=f"iep2-watch-{camera_id}",
+        )
+
         await _send_immediate_status(camera_id)
         logger.info("StartCamera complete  camera=%s", camera_id)
 
@@ -367,6 +410,12 @@ async def _handle_stop_camera(cmd) -> None:
             store_id, STORE_ID,
         )
         return
+
+    # R8 (M3-S2): cancel health watcher before stopping container
+    watcher = _health_watchers.pop(camera_id, None)
+    if watcher:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
 
     loop = asyncio.get_running_loop()
     cam  = _tracked_cameras.get(camera_id)
@@ -406,8 +455,19 @@ async def _handle_control(ctrl_msg) -> None:
 
 # ── Status reporting ───────────────────────────────────────────────────────────
 
+def _enqueue_status(msg: AgentMessage) -> None:
+    """Non-blocking enqueue for status reports. Drops + warns if queue is full (R7)."""
+    try:
+        _outgoing.put_nowait(msg)
+    except asyncio.QueueFull:
+        camera_id = msg.camera_status.camera_id if msg.HasField("camera_status") else "?"
+        logger.warning(
+            "Outgoing queue full — dropping status report  camera=%s", camera_id
+        )
+
+
 async def _send_immediate_status(camera_id: str) -> None:
-    """Push a CameraStatusReport into the outgoing queue immediately."""
+    """Get Docker container status and enqueue a CameraStatusReport immediately (R2)."""
     loop = asyncio.get_running_loop()
     cam  = _tracked_cameras.get(camera_id)
     if cam:
@@ -415,7 +475,7 @@ async def _send_immediate_status(camera_id: str) -> None:
         status = await loop.run_in_executor(_docker_exec, dm.get_container_status, name)
     else:
         status = "not_found"
-    await _outgoing.put(AgentMessage(
+    _enqueue_status(AgentMessage(
         camera_status=CameraStatusReport(
             camera_id=camera_id,
             container_status=status,
@@ -425,28 +485,34 @@ async def _send_immediate_status(camera_id: str) -> None:
 
 
 async def _heartbeat_loop(store_id: str, agent_version: str) -> None:
+    """Slow path: heartbeat + full camera status sweep every HEARTBEAT_INTERVAL_S (R3)."""
     loop = asyncio.get_running_loop()
     while True:
-        await _outgoing.put(AgentMessage(
-            heartbeat=Heartbeat(
-                store_id=store_id,
-                agent_version=agent_version,
-                timestamp_ms=int(time.time() * 1000),
-            )
-        ))
+        # Heartbeat always gets through (queue bounded but not full under normal ops)
+        try:
+            _outgoing.put_nowait(AgentMessage(
+                heartbeat=Heartbeat(
+                    store_id=store_id,
+                    agent_version=agent_version,
+                    timestamp_ms=int(time.time() * 1000),
+                )
+            ))
+        except asyncio.QueueFull:
+            logger.warning("Outgoing queue full — dropping heartbeat")
+
         for camera_id, cam in list(_tracked_cameras.items()):
             name   = dm.iep2_container_name(cam.store_id, camera_id)
             status = await loop.run_in_executor(
                 _docker_exec, dm.get_container_status, name
             )
-            await _outgoing.put(AgentMessage(
+            _enqueue_status(AgentMessage(
                 camera_status=CameraStatusReport(
                     camera_id=camera_id,
                     container_status=status,
                     timestamp_ms=int(time.time() * 1000),
                 )
             ))
-        await asyncio.sleep(30)
+        await asyncio.sleep(HEARTBEAT_INTERVAL_S)
 
 
 async def _request_generator():
