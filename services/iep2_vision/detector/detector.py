@@ -1,62 +1,123 @@
-"""Detector — sole owner of: receive frame, return detections.
+"""YOLOv8 client — delegates frame inference to the shared yolo-service via ZMQ.
 
-Swap YOLO for another model here and nothing outside this file changes.
-The model variant lives in MODEL_VARIANT below — the only place model
-config is allowed to exist.
+IEP2 no longer loads or owns the YOLO model. It submits JPEG frames to the
+yolo-service over a ZMQ PUSH socket and receives person-only detections on a
+per-camera PULL socket.
+
+Transport: ipc:// only (R5). Serialisation: msgpack only (R8).
 """
-import json
-import sys
+import asyncio
+import logging
+import os
+import uuid
 
 import cv2
+import msgpack
 import numpy as np
+import zmq.asyncio
 
-MODEL_VARIANT = "yolov8n.pt"
-CONF_THRESHOLD = 0.5
+log = logging.getLogger("iep2.detector")
 
-
-def load_model():
-    """Load and return the YOLO model. Call once; pass to detect()."""
-    from ultralytics import YOLO
-    return YOLO(MODEL_VARIANT)
+# ── Socket addresses ──────────────────────────────────────────────────────────
+YOLO_INPUT_SOCK = os.environ.get("YOLO_INPUT_SOCK", "ipc:///tmp/sockets/yolo_input.sock")
 
 
-def detect(model, frame: np.ndarray) -> list[dict]:
-    """Run detection on a BGR numpy frame using the provided model.
+def _result_sock_addr(camera_id: str) -> str:
+    """Per-camera result socket — IEP2 binds, yolo-service connects."""
+    return f"ipc:///tmp/sockets/yolo_output_{camera_id}.sock"
 
-    Returns a list of {label, confidence, bbox: [x1, y1, x2, y2]} dicts.
+
+# ── Client ────────────────────────────────────────────────────────────────────
+
+class YoloClient:
+    """Async ZMQ client for the shared yolo-service.
+
+    Lifecycle: call start() before detect(), close() when done.
     """
-    results = model(frame, verbose=False, classes=[0])
 
-    detections: list[dict] = []
-    for result in results:
-        names = result.names
-        boxes = result.boxes
-        if boxes is None:
-            continue
-        for box in boxes:
-            conf = float(box.conf[0])
-            if conf < CONF_THRESHOLD:
-                continue
-            cls_id = int(box.cls[0])
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            detections.append(
-                {
-                    "label": names[cls_id],
-                    "confidence": conf,
-                    "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                }
-            )
-    return detections
+    def __init__(self, camera_id: str):
+        self._camera_id = camera_id
+        self._ctx  = zmq.asyncio.Context.instance()
 
+        # PUSH to shared yolo-service input (all cameras share this socket).
+        self._push = self._ctx.socket(zmq.PUSH)
+        self._push.connect(YOLO_INPUT_SOCK)
 
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("usage: python detector.py <image_path>")
-        sys.exit(1)
+        # PULL bound per camera — yolo-service connects PUSH to this address.
+        # Binding here ensures each IEP2 container gets exactly its own results.
+        self._pull = self._ctx.socket(zmq.PULL)
+        self._pull.bind(_result_sock_addr(camera_id))
 
-    image = cv2.imread(sys.argv[1])
-    if image is None:
-        print(f"cannot read image: {sys.argv[1]}")
-        sys.exit(1)
+        # In-flight requests: request_id → Future[detections]
+        self._pending: dict[str, asyncio.Future] = {}
+        self._reader_task: asyncio.Task | None = None
 
-    print(json.dumps(detect(load_model(), image), indent=2))
+    async def start(self) -> None:
+        """Start the background reader loop. Must be called inside a running event loop."""
+        self._reader_task = asyncio.create_task(self._reader_loop())
+
+    async def close(self) -> None:
+        if self._reader_task:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        self._push.close(linger=0)
+        self._pull.close(linger=0)
+
+    async def _reader_loop(self) -> None:
+        """Receive results from yolo-service and resolve pending Futures."""
+        while True:
+            try:
+                raw  = await self._pull.recv()
+                resp = msgpack.unpackb(raw, raw=False)
+                req_id = resp.get("request_id")
+                fut = self._pending.pop(req_id, None)
+                if fut and not fut.done():
+                    # Normalise yolo-service format → IEP2 pipeline format.
+                    detections = [
+                        {
+                            "label":      "person",
+                            "confidence": d["confidence"],
+                            "bbox":       d["bbox_xyxy"],
+                        }
+                        for d in resp.get("detections", [])
+                    ]
+                    fut.set_result(detections)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Reader loop error: %s", exc)
+
+    async def detect(
+        self,
+        frame: np.ndarray,
+        timestamp_ms: int,
+    ) -> list[dict]:
+        """Send frame to yolo-service and await person detections.
+
+        Returns list of {"label", "confidence", "bbox"} dicts compatible with
+        the existing ByteTrack pipeline.
+        """
+        req_id = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self._pending[req_id] = fut
+
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            log.warning("JPEG encode failed for camera %s — skipping frame", self._camera_id)
+            del self._pending[req_id]
+            return []
+
+        payload = msgpack.packb(
+            {
+                "request_id":   req_id,
+                "camera_id":    self._camera_id,
+                "timestamp_ms": timestamp_ms,
+                "frame":        buf.tobytes(),
+            },
+            use_bin_type=True,
+        )
+        await self._push.send(payload)
+        return await fut

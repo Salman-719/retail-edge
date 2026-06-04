@@ -137,6 +137,9 @@ services:
       DEBUG_MODE: ${DEBUG_MODE:-false}
       IEP2_IMAGE: ${IEP2_IMAGE:-retailvision-iep2:latest}
       DOCKER_NETWORK: ${DOCKER_NETWORK:-retail-edge_default}
+      IPC_SOCKETS_VOLUME: ${IPC_SOCKETS_VOLUME:-retail-edge_ipc-sockets}
+      YOLO_HEALTH_TCP_ADDR: yolo-service:50052
+      YOLO_HEALTH_TIMEOUT_S: ${YOLO_HEALTH_TIMEOUT_S:-120}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -144,6 +147,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      yolo-service:
+        condition: service_started
     restart: on-failure
 
   iep1_ingestion:
@@ -168,6 +173,31 @@ services:
       minio:
         condition: service_healthy
 
+  # ── YOLO inference service ────────────────────────────────────────────────────
+  # Single GPU process; batches frames from all IEP2 workers into one TRT call.
+  # IMPORTANT: The Dockerfile uses a Jetson JetPack base image (ARM64).
+  # On x86 dev machines, build with Dockerfile.dev (CPU fallback) instead.
+  yolo-service:
+    build:
+      context: ./services/yolo_service
+      dockerfile: Dockerfile
+      args:
+        MODEL_VARIANT: ${YOLO_MODEL_VARIANT:-n}
+    environment:
+      YOLO_MODEL_VARIANT: ${YOLO_MODEL_VARIANT:-n}
+      YOLO_MAX_BATCH_SIZE: ${YOLO_MAX_BATCH_SIZE:-32}
+      YOLO_BATCH_TIMEOUT_MS: ${YOLO_BATCH_TIMEOUT_MS:-20}
+      YOLO_CONF: ${YOLO_CONF:-0.25}
+      YOLO_IOU: ${YOLO_IOU:-0.45}
+      YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
+      YOLO_HEALTH_SOCK: "unix:///tmp/sockets/yolo_health.sock"
+      YOLO_HEALTH_TCP_ADDR: "[::]:50052"
+    volumes:
+      - ipc-sockets:/tmp/sockets
+    ports:
+      - "50052:50052"
+    restart: on-failure
+
   iep2_vision:
     build:
       context: ./services/iep2_vision
@@ -179,8 +209,10 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
       S3_BUCKET: ${S3_BUCKET:-retailvision}
       LIVE_STREAM_ENABLED: "true"
+      YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
     volumes:
       - ./testing-data:/workspace/testing-data:ro
+      - ipc-sockets:/tmp/sockets
     command: >
       python services/iep2_vision/main.py
       --store-id ${STORE_ID}
@@ -193,6 +225,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      yolo-service:
+        condition: service_started
 
   iep3_reconciliation:
     build:
@@ -269,11 +303,15 @@ services:
       - "8002:8002"
     environment:
       <<: *shared-config
+      YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
     volumes:
       - ./testing-data:/workspace/testing-data:ro
+      - ipc-sockets:/tmp/sockets
     depends_on:
       pgbouncer:
         condition: service_healthy
+      yolo-service:
+        condition: service_started
     profiles:
       - dev
 
@@ -303,3 +341,10 @@ volumes:
   redis_data:
   minio_data:
   grafana_data:
+  # Shared tmpfs for ZMQ IPC sockets between yolo-service and IEP2 containers.
+  # Lives in RAM — no disk I/O for inter-process frame delivery.
+  ipc-sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs

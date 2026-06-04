@@ -12,3 +12,5 @@ shapely==2.0.4
 python-dotenv==1.0.1
 redis==5.0.1
 boto3==1.34.0
+pyzmq==25.1.2
+msgpack==1.0.8

@@ -26,7 +26,7 @@ import numpy as np
 from PIL import Image
 
 try:
-    from .detector.detector import load_model as _load_yolo, detect
+    from .detector.detector import YoloClient
     from .reid.reid import load_model as _load_reid
     from .tracker.tracker import create_tracker, update
     from .video_ingestor.ingestor import extract_frames
@@ -38,7 +38,7 @@ try:
 except ImportError:
     _root = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, _root)
-    from detector.detector import load_model as _load_yolo, detect
+    from detector.detector import YoloClient
     from reid.reid import load_model as _load_reid
     from tracker.tracker import create_tracker, update
     from video_ingestor.ingestor import extract_frames
@@ -138,11 +138,11 @@ async def _load_projector(persistence: PostgresPersistence, camera_config_id: st
 
 class IEP2Runtime:
     def __init__(self, settings: Iep2Settings):
-        """Load all models once. All config fixed at construction via settings."""
+        """Initialise models. YOLO is served by yolo-service via ZMQ (no local GPU load)."""
         self.settings = settings
-        log.info("Loading YOLO model (%s)…", "yolov8n.pt")
-        self.yolo_model = _load_yolo()
-        log.info("YOLO loaded.")
+        self.yolo_client = YoloClient(camera_id=settings.camera_id)
+        log.info("YoloClient created  camera=%s  (inference delegated to yolo-service)",
+                 settings.camera_id)
         log.info("Loading ReID model (osnet_x1_0)…")
         self.reid_model = _load_reid()
         log.info("ReID loaded.")
@@ -150,55 +150,63 @@ class IEP2Runtime:
     @asynccontextmanager
     async def run(self, video_path: str, start_ms: int = 0):
         """Async context manager that yields the frame stream from a video file."""
-        camera_id = self.settings.camera_id
-        async with PostgresPersistence(
-            database_url=self.settings.database_url_server,
-            store_id=self.settings.store_id,
-            camera_id=camera_id,
-        ) as persistence:
-            projector = await _load_projector(persistence, self.settings.camera_config_id)
+        await self.yolo_client.start()
+        try:
+            camera_id = self.settings.camera_id
+            async with PostgresPersistence(
+                database_url=self.settings.database_url_server,
+                store_id=self.settings.store_id,
+                camera_id=camera_id,
+            ) as persistence:
+                projector = await _load_projector(persistence, self.settings.camera_config_id)
 
-            # Write stream resolution once before the processing loop starts.
-            # Open a brief cap solely to read dimensions — extract_frames owns its own cap.
-            _cap = cv2.VideoCapture(video_path)
-            if _cap.isOpened():
-                _w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                _h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                _cap.release()
-                if _w > 0 and _h > 0:
-                    await persistence.write_stream_resolution(camera_id, _w, _h)
-                else:
-                    log.warning(
-                        "Could not read stream resolution from source "
-                        "(width=%d height=%d) — stream_width/height not updated",
-                        _w, _h,
-                    )
+                # Write stream resolution once before the processing loop starts.
+                # Open a brief cap solely to read dimensions — extract_frames owns its own cap.
+                _cap = cv2.VideoCapture(video_path)
+                if _cap.isOpened():
+                    _w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    _h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    _cap.release()
+                    if _w > 0 and _h > 0:
+                        await persistence.write_stream_resolution(camera_id, _w, _h)
+                    else:
+                        log.warning(
+                            "Could not read stream resolution from source "
+                            "(width=%d height=%d) — stream_width/height not updated",
+                            _w, _h,
+                        )
 
-            self._start_ms = start_ms
-            yield self._stream_from_source(self._video_source(video_path), persistence, projector)
+                self._start_ms = start_ms
+                yield self._stream_from_source(self._video_source(video_path), persistence, projector)
+        finally:
+            await self.yolo_client.close()
 
     @asynccontextmanager
     async def run_from_iep1(self):
         """Async context manager that yields the frame stream from IEP1 via Redis + S3."""
-        camera_id = self.settings.camera_id
-        s3 = make_s3_client(
-            self.settings.s3_endpoint_url,
-            self.settings.s3_access_key,
-            self.settings.s3_secret_key,
-        )
-        live_pub = (
-            LivePublisher(camera_id, self.settings.redis_url, enabled=True)
-            if self.settings.live_stream_enabled
-            else None
-        )
-        async with PostgresPersistence(
-            database_url=self.settings.database_url_server,
-            store_id=self.settings.store_id,
-            camera_id=camera_id,
-        ) as persistence:
-            projector = await _load_projector(persistence, self.settings.camera_config_id)
-            async with RedisStreamFrameSource(camera_id, self.settings.redis_url, s3) as source:
-                yield self._stream_from_iep1(source, s3, self.settings.s3_bucket, persistence, projector, live_pub)
+        await self.yolo_client.start()
+        try:
+            camera_id = self.settings.camera_id
+            s3 = make_s3_client(
+                self.settings.s3_endpoint_url,
+                self.settings.s3_access_key,
+                self.settings.s3_secret_key,
+            )
+            live_pub = (
+                LivePublisher(camera_id, self.settings.redis_url, enabled=True)
+                if self.settings.live_stream_enabled
+                else None
+            )
+            async with PostgresPersistence(
+                database_url=self.settings.database_url_server,
+                store_id=self.settings.store_id,
+                camera_id=camera_id,
+            ) as persistence:
+                projector = await _load_projector(persistence, self.settings.camera_config_id)
+                async with RedisStreamFrameSource(camera_id, self.settings.redis_url, s3) as source:
+                    yield self._stream_from_iep1(source, s3, self.settings.s3_bucket, persistence, projector, live_pub)
+        finally:
+            await self.yolo_client.close()
 
     @staticmethod
     def _video_source(video_path: str) -> Iterator[Tuple[int, str | None, np.ndarray]]:
@@ -321,7 +329,7 @@ class IEP2Runtime:
         db_rows_written = 0
 
         for _capture_ts_ms, _s3_key, frame in source:
-            detections = detect(self.yolo_model, frame)
+            detections = await self.yolo_client.detect(frame, _capture_ts_ms)
             tracks     = update(tracker, detections)
             _project_tracks(tracks, projector)
             enriched   = manager.process_frame(frame, tracks)
@@ -411,7 +419,7 @@ class IEP2Runtime:
                         )
                     _resolution_written = True
 
-                detections = detect(self.yolo_model, frame)
+                detections = await self.yolo_client.detect(frame, capture_ts_ms)
                 tracks     = update(tracker, detections)
                 _project_tracks(tracks, projector)
                 enriched   = manager.process_frame(frame, tracks)

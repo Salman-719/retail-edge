@@ -116,7 +116,7 @@ async def upload(
     STATE["frames"] = []
     STATE["status"] = "processing"
 
-    db_url = os.getenv("DATABASE_URL", "")
+    db_url = os.getenv("DATABASE_URL_SERVER", "")
     _with_physical = use_physical_layer.lower() == 'true'
 
     def pipeline_thread():
@@ -153,7 +153,8 @@ async def upload(
                     store_id=store_id,
                     camera_id=physical_camera_id,   # stored as camera_id in tracking_history
                     camera_config_id=camera_config_id,
-                    database_url=db_url,
+                    database_url_server=db_url,
+                    window_seconds=float(os.getenv("WINDOW_SECONDS", "60")),
                 ))
                 frame_count = 0
                 async with runtime.run(dest) as stream:
