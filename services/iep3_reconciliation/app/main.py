@@ -72,13 +72,17 @@ async def _verify_redis(redis_client) -> None:
 async def _main() -> None:
     settings = get_settings()
     logger.info(
-        "IEP3 starting — store_id=%s expected_cameras=%s",
+        "IEP3 starting  store_id=%s  expected_cameras=%s  "
+        "window_seconds=%.1f  db_host=%s  redis=%s",
         settings.store_id,
         sorted(settings.expected_cameras),
+        settings.window_seconds,
+        settings.database_url_server.split("@")[-1].split("/")[0],
+        settings.redis_url,
     )
 
     # ── Infrastructure ────────────────────────────────────────────────────────
-    pool = await create_pool(settings.database_url)
+    pool = await create_pool(settings.database_url_server)
     await _verify_db(pool)
 
     redis_client = aioredis.from_url(

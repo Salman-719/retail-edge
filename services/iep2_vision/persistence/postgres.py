@@ -45,7 +45,10 @@ class PostgresPersistence:
     async def connect(self) -> None:
         log.info("Creating DB pool  camera=%s  dsn=%s", self._camera_id, _redact(self._database_url))
         self._pool = await asyncpg.create_pool(
-            self._database_url, min_size=1, max_size=5
+            self._database_url,
+            min_size=1,
+            max_size=2,           # R6: IEP2 is sequential per-frame; never needs more than 2
+            statement_cache_size=0,  # PgBouncer transaction mode: disable prepared-stmt cache
         )
         log.info("DB pool ready  camera=%s", self._camera_id)
 

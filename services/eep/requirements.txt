@@ -19,4 +19,8 @@ apscheduler==3.10.4
 grpcio==1.64.0
 grpcio-tools==1.64.0
 grpcio-reflection==1.64.0
+grpcio-health-checking==1.64.0
+protobuf==4.25.3
 docker==7.1.0
+alembic==1.13.1
+psycopg2-binary==2.9.9

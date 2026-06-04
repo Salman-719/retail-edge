@@ -17,13 +17,14 @@ from app.models.camera_runtime_session import CameraRuntimeSession
 
 logger = logging.getLogger(__name__)
 
-# EEP's own env vars — passed directly to IEP2 containers.
-_DATABASE_URL    = os.environ.get("DATABASE_URL",    "")
-_REDIS_URL       = os.environ.get("REDIS_URL",       "redis://redis:6379/0")
-_S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "")
-_S3_ACCESS_KEY   = os.environ.get("S3_ACCESS_KEY",   "")
-_S3_SECRET_KEY   = os.environ.get("S3_SECRET_KEY",   "")
-_S3_BUCKET       = os.environ.get("S3_BUCKET",       "retailvision")
+# Env vars forwarded to IEP2 containers.
+# DATABASE_URL_SERVER is plain postgresql:// — raw asyncpg, not SQLAlchemy format.
+_DATABASE_URL_SERVER = os.environ.get("DATABASE_URL_SERVER", "")
+_REDIS_URL           = os.environ.get("REDIS_URL",           "redis://redis:6379/0")
+_S3_ENDPOINT_URL     = os.environ.get("S3_ENDPOINT_URL",     "")
+_S3_ACCESS_KEY       = os.environ.get("S3_ACCESS_KEY",       "")
+_S3_SECRET_KEY       = os.environ.get("S3_SECRET_KEY",       "")
+_S3_BUCKET           = os.environ.get("S3_BUCKET",           "retailvision")
 
 # In-memory map: (store_id, physical_camera_id) → open session UUID.
 # Populated on camera start; drained on stop. Crash recovery re-populates from DB.
@@ -159,7 +160,7 @@ async def start_camera_workers(store_id: str, camera_config_id: str) -> None:
             store_id=store_id,
             rtsp_url=rtsp_url,
             target_fps=target_fps,
-            window_seconds=settings.CAMERA_WINDOW_SECONDS,
+            window_seconds=settings.WINDOW_SECONDS,
             redis_url=_REDIS_URL,
             s3_config=agent_pb2.S3Config(
                 endpoint_url=_S3_ENDPOINT_URL,
@@ -184,12 +185,13 @@ async def start_camera_workers(store_id: str, camera_config_id: str) -> None:
         store_id,
         physical_camera_id,
         camera_config_id,
-        _DATABASE_URL,
+        _DATABASE_URL_SERVER,
         _REDIS_URL,
         _S3_ENDPOINT_URL,
         _S3_ACCESS_KEY,
         _S3_SECRET_KEY,
         _S3_BUCKET,
+        settings.WINDOW_SECONDS,
     )
 
     # 3. Record the session start (after Docker confirms, so partial failures leave no orphan rows).

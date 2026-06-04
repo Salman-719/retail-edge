@@ -1,0 +1,10 @@
+# Local development overrides.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# R5 (M1-S2): DEBUG_MODE=true must live only in this file.
+# Never commit this to CI, staging, or production pipelines.
+
+services:
+  eep:
+    environment:
+      DEBUG_MODE: "true"

@@ -20,10 +20,18 @@ def _parse_args():
     parser.add_argument("--video",     default=None,
                         help="Path to a video file. Used instead of --rtsp for dev/test.")
     parser.add_argument("--fps",       type=float, default=5.0,      help="Target FPS (default: 5.0)")
-    parser.add_argument("--window",    type=float, default=60.0,     help="Batch window seconds (default: 60.0)")
+    # --window falls back to WINDOW_SECONDS env var; no hardcoded default.
+    _window_env = os.environ.get("WINDOW_SECONDS")
+    parser.add_argument("--window",    type=float,
+                        default=float(_window_env) if _window_env else None,
+                        help="Batch window seconds. Defaults to WINDOW_SECONDS env var.")
 
     args = parser.parse_args()
 
+    if args.window is None:
+        parser.error("--window or WINDOW_SECONDS env var is required")
+    if args.window <= 0:
+        parser.error("--window must be positive")
     if args.video is None and args.rtsp is None:
         parser.error("one of --rtsp or --video is required")
     if args.video is not None and args.rtsp is not None:
@@ -39,6 +47,17 @@ def main():
     )
 
     args = _parse_args()
+
+    logging.getLogger(__name__).info(
+        "IEP1 starting  store=%s  camera=%s  window_seconds=%.1f  fps=%.1f  "
+        "redis_host=%s  s3_endpoint=%s",
+        args.store_id,
+        args.camera_id,
+        args.window,
+        args.fps,
+        os.environ.get("REDIS_URL", "").split("@")[-1] or "default",
+        os.environ.get("S3_ENDPOINT_URL", ""),
+    )
 
     from services.iep1_ingestion.app.runtime import Iep1Settings, Iep1Runtime
     from services.iep1_ingestion.app.source.rtsp_source import RtspSource, RtspSourceExhausted

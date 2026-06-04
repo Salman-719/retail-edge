@@ -54,18 +54,20 @@ async def _recover_crashed_sessions() -> None:
     for row in sessions:
         store_id, physical_camera_id, camera_config_id, version_id, session_id = row
         try:
+            from app.core.config import settings as _cfg
             await loop.run_in_executor(
                 None,
                 iep2_docker.start_iep2,
                 str(store_id),
                 str(physical_camera_id),
                 str(camera_config_id),
-                orchestrator._DATABASE_URL,
+                orchestrator._DATABASE_URL_SERVER,
                 orchestrator._REDIS_URL,
                 orchestrator._S3_ENDPOINT_URL,
                 orchestrator._S3_ACCESS_KEY,
                 orchestrator._S3_SECRET_KEY,
                 orchestrator._S3_BUCKET,
+                _cfg.WINDOW_SECONDS,
             )
             # Re-adopt the existing open row so the normal stop path closes it.
             orchestrator._open_sessions[(str(store_id), str(physical_camera_id))] = session_id
@@ -107,9 +109,30 @@ async def _cleanup_deactivated_users():
             pass
 
 
+def _run_migrations() -> None:
+    """Run Alembic migrations synchronously. Called via run_in_executor."""
+    from alembic.config import Config
+    from alembic import command
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "head")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Add deactivated_at column if it doesn't exist (safe for existing DBs)
+    # Step 1: run schema migrations before accepting any traffic.
+    # Uses a thread executor because Alembic + psycopg2 are synchronous.
+    from app.core.config import settings as _settings
+    logger.info(
+        "EEP starting  window_seconds=%.1f  db_host=%s  debug_mode=%s",
+        _settings.WINDOW_SECONDS,
+        _settings.DATABASE_URL_EEP.split("@")[-1].split("/")[0],
+        _settings.DEBUG_MODE,
+    )
+
+    await asyncio.get_running_loop().run_in_executor(None, _run_migrations)
+
+    # Step 2: ORM safety net — ensures tables created by SQLAlchemy models
+    # but not yet covered by a migration exist on fresh deployments.
     async with engine.begin() as conn:
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ"

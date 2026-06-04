@@ -4,7 +4,7 @@
 import grpc
 import warnings
 
-from services.edge_agent.app.grpc_generated import agent_pb2 as agent__pb2
+from app.grpc_generated import agent_pb2 as agent__pb2
 
 GRPC_GENERATED_VERSION = '1.64.0'
 GRPC_VERSION = grpc.__version__

@@ -1,3 +1,6 @@
+// agent.proto
+// Version: 1.0.0
+// Last changed: establish canonical single source; extracted from service proto dirs
 syntax = "proto3";
 
 package retailvision.agent.v1;

@@ -55,7 +55,8 @@ _MAX_WIRE_WIDTH = 640
 class Iep2Settings:
     store_id:            str
     camera_id:           str
-    database_url:        str
+    database_url_server: str        # plain postgresql:// — raw asyncpg, not SQLAlchemy format
+    window_seconds:      float      # required — no default; must match IEP1 and IEP3
     camera_config_id:    str | None = None
     redis_url:           str        = "redis://localhost:6379/0"
     s3_endpoint_url:     str        = ""
@@ -151,7 +152,7 @@ class IEP2Runtime:
         """Async context manager that yields the frame stream from a video file."""
         camera_id = self.settings.camera_id
         async with PostgresPersistence(
-            database_url=self.settings.database_url,
+            database_url=self.settings.database_url_server,
             store_id=self.settings.store_id,
             camera_id=camera_id,
         ) as persistence:
@@ -191,7 +192,7 @@ class IEP2Runtime:
             else None
         )
         async with PostgresPersistence(
-            database_url=self.settings.database_url,
+            database_url=self.settings.database_url_server,
             store_id=self.settings.store_id,
             camera_id=camera_id,
         ) as persistence:

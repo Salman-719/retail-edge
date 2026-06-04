@@ -9,30 +9,33 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Iep3Settings:
-    # Database
-    database_url: str              # asyncpg DSN: postgresql://user:pass@host/db
+    # Database — plain postgresql:// (raw asyncpg, not SQLAlchemy format)
+    database_url_server: str
 
     # Redis
-    redis_url: str                 # redis://host:port/db
+    redis_url: str
 
     # Store identity
-    store_id: str                  # UUID of the store this IEP3 instance serves
+    store_id: str
+
+    # Shared pipeline timing — must match IEP1 --window and IEP2 WINDOW_SECONDS
+    window_seconds: float
 
     # Coordinator
-    expected_cameras: frozenset    # frozenset[str] of camera_id strings
-    coordinator_timeout_s: float   # seconds before partial reconciliation fires
+    expected_cameras: frozenset
+    coordinator_timeout_s: float
 
     # ReID
-    reid_threshold: float          # cosine similarity threshold
-    max_speed_mps: float           # spatial gate max walking speed
-    embedding_dim: int             # OSNet embedding dimension
+    reid_threshold: float
+    max_speed_mps: float
+    embedding_dim: int
 
     # Position selection weights
     selection_weight_area: float
     selection_weight_confidence: float
 
     # State machine
-    grace_seconds: float           # LOST → EXITED after this many seconds
+    grace_seconds: float
 
     # Resolution fallback
     default_frame_width: int
@@ -44,12 +47,12 @@ def get_settings() -> Iep3Settings:
     Raises ValueError on missing or invalid required vars.
     Called once at startup — result should be passed to all components.
     """
-    database_url = os.environ.get("DATABASE_URL", "")
-    if not database_url:
-        raise ValueError("DATABASE_URL is required")
-    if "+asyncpg" in database_url:
+    database_url_server = os.environ.get("DATABASE_URL_SERVER", "")
+    if not database_url_server:
+        raise ValueError("DATABASE_URL_SERVER is required")
+    if database_url_server.startswith("postgresql+"):
         raise ValueError(
-            "DATABASE_URL must use plain postgresql:// scheme, "
+            "DATABASE_URL_SERVER must use plain postgresql:// scheme, "
             "not postgresql+asyncpg:// — asyncpg is the direct driver here"
         )
 
@@ -58,6 +61,13 @@ def get_settings() -> Iep3Settings:
     store_id = os.environ.get("STORE_ID", "")
     if not store_id:
         raise ValueError("STORE_ID is required")
+
+    window_seconds_raw = os.environ.get("WINDOW_SECONDS", "")
+    if not window_seconds_raw:
+        raise ValueError("WINDOW_SECONDS is required — must match IEP1 --window and IEP2")
+    window_seconds = float(window_seconds_raw)
+    if window_seconds <= 0:
+        raise ValueError(f"WINDOW_SECONDS must be > 0, got {window_seconds}")
 
     cameras_raw = os.environ.get("EXPECTED_CAMERAS", "")
     if not cameras_raw:
@@ -70,9 +80,10 @@ def get_settings() -> Iep3Settings:
     )
 
     return Iep3Settings(
-        database_url=database_url,
+        database_url_server=database_url_server,
         redis_url=redis_url,
         store_id=store_id,
+        window_seconds=window_seconds,
         expected_cameras=expected_cameras,
         coordinator_timeout_s=float(os.environ.get("COORDINATOR_TIMEOUT_S", "120")),
         reid_threshold=float(os.environ.get("REID_THRESHOLD", "0.75")),

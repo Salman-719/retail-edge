@@ -52,16 +52,47 @@ async def main():
 
     from runtime import IEP2Runtime, Iep2Settings
 
+    _db_url = os.environ.get("DATABASE_URL_SERVER", "")
+    if not _db_url:
+        print("ERROR: DATABASE_URL_SERVER is required", file=sys.stderr)
+        sys.exit(1)
+    if _db_url.startswith("postgresql+"):
+        print(
+            "ERROR: DATABASE_URL_SERVER must use plain postgresql:// not SQLAlchemy format",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    _window = os.environ.get("WINDOW_SECONDS", "")
+    if not _window:
+        print("ERROR: WINDOW_SECONDS is required", file=sys.stderr)
+        sys.exit(1)
+    try:
+        _window_f = float(_window)
+        assert _window_f > 0
+    except (ValueError, AssertionError):
+        print("ERROR: WINDOW_SECONDS must be a positive number", file=sys.stderr)
+        sys.exit(1)
+
     settings = Iep2Settings(
         store_id=args.store_id,
         camera_id=args.camera_id,
         camera_config_id=args.camera_config_id,
-        database_url=os.environ["DATABASE_URL"],
-        redis_url=os.environ.get("REDIS_URL",         "redis://localhost:6379/0"),
-        s3_endpoint_url=os.environ.get("S3_ENDPOINT_URL",  ""),
-        s3_access_key=os.environ.get("S3_ACCESS_KEY",    ""),
-        s3_secret_key=os.environ.get("S3_SECRET_KEY",    ""),
-        s3_bucket=os.environ.get("S3_BUCKET",        "retailvision"),
+        database_url_server=_db_url,
+        window_seconds=_window_f,
+        redis_url=os.environ.get("REDIS_URL",        "redis://localhost:6379/0"),
+        s3_endpoint_url=os.environ.get("S3_ENDPOINT_URL", ""),
+        s3_access_key=os.environ.get("S3_ACCESS_KEY",   ""),
+        s3_secret_key=os.environ.get("S3_SECRET_KEY",   ""),
+        s3_bucket=os.environ.get("S3_BUCKET",       "retailvision"),
+    )
+
+    logging.getLogger("iep2").info(
+        "IEP2 starting  camera=%s  window_seconds=%.1f  db_host=%s  redis=%s",
+        args.camera_id,
+        settings.window_seconds,
+        settings.database_url_server.split("@")[-1].split("/")[0],
+        settings.redis_url,
     )
 
     runtime = IEP2Runtime(settings)

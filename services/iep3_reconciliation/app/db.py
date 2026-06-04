@@ -23,6 +23,7 @@ async def create_pool(database_url: str) -> asyncpg.Pool:
         min_size=2,
         max_size=10,
         command_timeout=30,
+        statement_cache_size=0,  # PgBouncer transaction mode: disable prepared-stmt cache
     )
     logger.info("asyncpg pool created (min=2, max=10)")
     return _pool
