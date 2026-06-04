@@ -154,27 +154,27 @@ services:
         condition: service_started
     restart: on-failure
 
-  iep1_ingestion:
+  # ── IEP1 ingestion daemon ─────────────────────────────────────────────────
+  # Single daemon for all cameras on this edge device.  Edge Agent controls it
+  # via gRPC AddCamera / RemoveCamera calls on the iep1-sockets unix socket.
+  # In production this container runs on the Jetson edge device; here it runs
+  # on the same machine as the rest of the stack for dev/test.
+  iep1-daemon:
     build:
       context: ./services/iep1_ingestion
       dockerfile: Dockerfile
     environment:
-      <<: *shared-config
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
-      S3_BUCKET: ${S3_BUCKET:-retailvision}
-    command: >
-      python -m services.iep1_ingestion.app.main
-      --store-id ${STORE_ID}
-      --camera-id ${CAMERA_ID}
-      --rtsp ${RTSP_URL}
-      --fps ${TARGET_FPS:-5.0}
+      REDIS_URL: "redis://redis:6379/0"
+      IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
+      IEP1_HEALTH_SOCK: "unix:///tmp/iep1-sockets/iep1_health.sock"
+      TMPFS_FRAME_ROOT: /dev/shm/frames
+      JPEG_QUALITY: ${JPEG_QUALITY:-85}
+    volumes:
+      - iep1-sockets:/tmp/iep1-sockets
     depends_on:
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+    restart: on-failure
 
   # ── YOLO inference service ────────────────────────────────────────────────────
   # Single GPU process; batches frames from all IEP2 workers into one TRT call.
@@ -355,12 +355,13 @@ services:
       EEP_GRPC_URL: eep:50051
       STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
       AGENT_VERSION: ${AGENT_VERSION:-0.1.0}
-      IEP1_IMAGE: ${IEP1_IMAGE:-retailvision-iep1:latest}
-      DOCKER_NETWORK: ${DOCKER_NETWORK:-retail-edge_default}
+      IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
+      IEP1_HEALTH_SOCK: "unix:///tmp/iep1-sockets/iep1_health.sock"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - iep1-sockets:/tmp/iep1-sockets
     depends_on:
       - eep
+      - iep1-daemon
     profiles:
       - edge
 
@@ -369,6 +370,14 @@ volumes:
   redis_data:
   minio_data:
   grafana_data:
+  # Shared tmpfs for IEP1 daemon gRPC control/health unix sockets.
+  # Shared between iep1-daemon and edge_agent_dev containers.
+  iep1-sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+
   # Shared tmpfs for ZMQ IPC sockets between yolo-service and IEP2 containers.
   # Lives in RAM — no disk I/O for inter-process frame delivery.
   ipc-sockets:

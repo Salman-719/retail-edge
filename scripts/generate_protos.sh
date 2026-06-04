@@ -1,6 +1,6 @@
 #!/bin/bash
 # scripts/generate_protos.sh
-# Regenerates gRPC stubs for all services from proto/agent.proto.
+# Regenerates gRPC stubs for all services from proto/*.proto.
 # Run via: bash scripts/generate_protos.sh  (or: make proto)
 # After generation, applies the package import fix that protoc gets wrong.
 set -euo pipefail
@@ -8,26 +8,23 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Sync service proto dirs from canonical source (idempotent copy).
-# On Linux/Mac with developer symlinks these are already linked; the copy is a no-op.
-# On Windows (Git Bash / WSL) the copy keeps them in sync.
-cp proto/agent.proto services/eep/proto/agent.proto
-cp proto/agent.proto services/edge_agent/proto/agent.proto
+# ── Sync service proto dirs from canonical source ─────────────────────────────
+cp proto/agent.proto       services/eep/proto/agent.proto
+cp proto/agent.proto       services/edge_agent/proto/agent.proto
+cp proto/iep1_control.proto services/iep1_ingestion/proto/iep1_control.proto
+cp proto/iep1_control.proto services/edge_agent/proto/iep1_control.proto
 
-# ── EEP stubs ────────────────────────────────────────────────────────────────
+# ── EEP: agent stubs ──────────────────────────────────────────────────────────
 python -m grpc_tools.protoc \
   -I proto \
   --python_out=services/eep/app/grpc_generated \
   --grpc_python_out=services/eep/app/grpc_generated \
   proto/agent.proto
 
-# Fix protoc-generated absolute import — broken inside the grpc_generated package.
-# protoc emits:  import agent_pb2 as agent__pb2
-# Required:      from app.grpc_generated import agent_pb2 as agent__pb2
 sed -i 's/^import agent_pb2/from app.grpc_generated import agent_pb2/' \
   services/eep/app/grpc_generated/agent_pb2_grpc.py
 
-# ── Edge Agent stubs ──────────────────────────────────────────────────────────
+# ── Edge Agent: agent stubs ───────────────────────────────────────────────────
 python -m grpc_tools.protoc \
   -I proto \
   --python_out=services/edge_agent/app/grpc_generated \
@@ -36,5 +33,28 @@ python -m grpc_tools.protoc \
 
 sed -i 's/^import agent_pb2/from app.grpc_generated import agent_pb2/' \
   services/edge_agent/app/grpc_generated/agent_pb2_grpc.py
+
+# ── Edge Agent: iep1_control stubs (client) ───────────────────────────────────
+python -m grpc_tools.protoc \
+  -I proto \
+  --python_out=services/edge_agent/app/grpc_generated \
+  --grpc_python_out=services/edge_agent/app/grpc_generated \
+  proto/iep1_control.proto
+
+sed -i 's/^import iep1_control_pb2/from app.grpc_generated import iep1_control_pb2/' \
+  services/edge_agent/app/grpc_generated/iep1_control_pb2_grpc.py
+
+# ── IEP1: iep1_control stubs (server) ────────────────────────────────────────
+mkdir -p services/iep1_ingestion/app/grpc_generated
+python -m grpc_tools.protoc \
+  -I proto \
+  --python_out=services/iep1_ingestion/app/grpc_generated \
+  --grpc_python_out=services/iep1_ingestion/app/grpc_generated \
+  proto/iep1_control.proto
+
+sed -i 's/^import iep1_control_pb2/from services.iep1_ingestion.app.grpc_generated import iep1_control_pb2/' \
+  services/iep1_ingestion/app/grpc_generated/iep1_control_pb2_grpc.py
+
+touch services/iep1_ingestion/app/grpc_generated/__init__.py
 
 echo "Proto generation complete."
