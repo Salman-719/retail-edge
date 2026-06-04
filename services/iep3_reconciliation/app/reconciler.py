@@ -27,6 +27,10 @@ class Reconciler:
         self._store_id = store_id
         self._pool     = get_pool()   # module-level pool — must be created before __init__
         self._settings = settings
+        self._repo     = repo
+
+        # R4: count batches to trigger periodic orphan sweep
+        self._batches_processed: int = 0
 
         # Sub-components constructed once, reused across all batches.
         # PositionSelector._resolution_cache is intentionally long-lived.
@@ -60,15 +64,8 @@ class Reconciler:
         handles any partial state.
         """
         window_start_ms, window_end_ms = window
-        partial = reporting_cameras < self._settings.expected_cameras
-
-        if partial:
-            missing = self._settings.expected_cameras - reporting_cameras
-            logger.warning(
-                "Partial reconciliation for batch=%d — "
-                "missing cameras=%s — using available DB data",
-                batch_number, sorted(missing),
-            )
+        # R1: partial logging moved to coordinator._fire (R6); reconciler
+        # always processes whatever cameras reported — no special-casing.
 
         logger.info(
             "Reconciler starting batch=%d window=[%d, %d] cameras=%s",
@@ -115,12 +112,12 @@ class Reconciler:
                 )
 
         # Transaction committed. Build and log stats.
+        self._batches_processed += 1
         stats = {
             "batch_number":        batch_number,
             "window_start_ms":     window_start_ms,
             "window_end_ms":       window_end_ms,
             "reporting_cameras":   sorted(reporting_cameras),
-            "partial":             partial,
             "known_locals":        len(known),
             "new_locals":          len(new),
             "new_globals_created": n_new_globals,
@@ -129,4 +126,23 @@ class Reconciler:
         }
 
         logger.info("Batch %d reconciled: %s", batch_number, stats)
+
+        # R4: periodic orphan sweep — every ORPHAN_SWEEP_INTERVAL_BATCHES batches
+        if self._batches_processed % self._settings.orphan_sweep_interval_batches == 0:
+            try:
+                deleted_globals, deleted_centroids = await self._repo.orphan_sweep(
+                    self._store_id
+                )
+                if deleted_globals or deleted_centroids:
+                    logger.warning(
+                        "Periodic orphan sweep  batch=%d  "
+                        "deleted_globals=%d  deleted_centroids=%d",
+                        batch_number, deleted_globals, deleted_centroids,
+                    )
+            except Exception:
+                logger.exception(
+                    "Periodic orphan sweep failed at batch=%d — skipping",
+                    batch_number,
+                )
+
         return stats

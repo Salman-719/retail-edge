@@ -3,95 +3,67 @@ Runtime never reads os.environ directly. Always use get_settings().
 """
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings
 
 
-@dataclass(frozen=True)
-class Iep3Settings:
-    # Database — plain postgresql:// (raw asyncpg, not SQLAlchemy format)
-    database_url_server: str
+class Iep3Settings(BaseSettings):
+    # ── Required ─────────────────────────────────────────────────────────────
+    store_id:            str   = Field(...)
+    window_seconds:      float = Field(..., gt=0)
+    database_url_server: str   = Field(...)
 
-    # Redis
-    redis_url: str
+    @field_validator("database_url_server")
+    @classmethod
+    def no_sqlalchemy_url(cls, v: str) -> str:
+        if v.startswith("postgresql+"):
+            raise ValueError(
+                "database_url_server must use plain postgresql:// scheme, "
+                "not postgresql+asyncpg:// — asyncpg is the direct driver here"
+            )
+        return v
 
-    # Store identity
-    store_id: str
+    # ── Redis (server-side, not local Jetson Redis) ───────────────────────────
+    redis_url: str = Field(default="redis://redis:6379/0")
 
-    # Shared pipeline timing — must match IEP1 --window and IEP2 WINDOW_SECONDS
-    window_seconds: float
+    # ── ReID parameters — every threshold configurable without code change ───
+    reid_threshold:     float = Field(default=0.75, ge=0.0, le=1.0)
+    max_speed_mps:      float = Field(default=1.5,  gt=0)
+    grace_seconds:      float = Field(default=300.0, gt=0)
+    embedding_dim:      int   = Field(default=512,  gt=0)
+    centroid_ema_alpha: float = Field(default=0.3,  ge=0.0, le=1.0)
 
-    # Coordinator
-    expected_cameras: frozenset
-    coordinator_timeout_s: float
+    # ── Coordinator ───────────────────────────────────────────────────────────
+    coordinator_timeout_s: float = Field(default=120.0, gt=0)
 
-    # ReID
-    reid_threshold: float
-    max_speed_mps: float
-    embedding_dim: int
+    # ── Position selection weights — must sum to 1.0 ─────────────────────────
+    position_weight_area: float = Field(default=0.7, ge=0.0, le=1.0)
+    position_weight_conf: float = Field(default=0.3, ge=0.0, le=1.0)
 
-    # Position selection weights
-    selection_weight_area: float
-    selection_weight_confidence: float
+    @model_validator(mode="after")
+    def weights_sum_to_one(self) -> "Iep3Settings":
+        total = self.position_weight_area + self.position_weight_conf
+        if abs(total - 1.0) > 0.01:
+            raise ValueError(
+                f"position_weight_area + position_weight_conf must equal 1.0, "
+                f"got {total:.3f}"
+            )
+        return self
 
-    # State machine
-    grace_seconds: float
+    # ── Resolution fallback ───────────────────────────────────────────────────
+    default_frame_width:  int = Field(default=1920, gt=0)
+    default_frame_height: int = Field(default=1080, gt=0)
 
-    # Resolution fallback
-    default_frame_width: int
-    default_frame_height: int
+    # ── Operational cadence ───────────────────────────────────────────────────
+    expected_cameras_refresh_batches: int = Field(default=10, gt=0)
+    orphan_sweep_interval_batches:    int = Field(default=50, gt=0)
+
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 def get_settings() -> Iep3Settings:
-    """Build Iep3Settings from environment variables.
-    Raises ValueError on missing or invalid required vars.
-    Called once at startup — result should be passed to all components.
+    """Construct and validate settings from environment variables.
+    Raises ValidationError on missing or invalid required vars.
+    Called once at startup — result passed to all components.
     """
-    database_url_server = os.environ.get("DATABASE_URL_SERVER", "")
-    if not database_url_server:
-        raise ValueError("DATABASE_URL_SERVER is required")
-    if database_url_server.startswith("postgresql+"):
-        raise ValueError(
-            "DATABASE_URL_SERVER must use plain postgresql:// scheme, "
-            "not postgresql+asyncpg:// — asyncpg is the direct driver here"
-        )
-
-    redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
-
-    store_id = os.environ.get("STORE_ID", "")
-    if not store_id:
-        raise ValueError("STORE_ID is required")
-
-    window_seconds_raw = os.environ.get("WINDOW_SECONDS", "")
-    if not window_seconds_raw:
-        raise ValueError("WINDOW_SECONDS is required — must match IEP1 --window and IEP2")
-    window_seconds = float(window_seconds_raw)
-    if window_seconds <= 0:
-        raise ValueError(f"WINDOW_SECONDS must be > 0, got {window_seconds}")
-
-    cameras_raw = os.environ.get("EXPECTED_CAMERAS", "")
-    if not cameras_raw:
-        raise ValueError(
-            "EXPECTED_CAMERAS is required — "
-            "comma-separated list of camera_id strings"
-        )
-    expected_cameras = frozenset(
-        c.strip() for c in cameras_raw.split(",") if c.strip()
-    )
-
-    return Iep3Settings(
-        database_url_server=database_url_server,
-        redis_url=redis_url,
-        store_id=store_id,
-        window_seconds=window_seconds,
-        expected_cameras=expected_cameras,
-        coordinator_timeout_s=float(os.environ.get("COORDINATOR_TIMEOUT_S", "120")),
-        reid_threshold=float(os.environ.get("REID_THRESHOLD", "0.75")),
-        max_speed_mps=float(os.environ.get("MAX_SPEED_MPS", "1.5")),
-        embedding_dim=int(os.environ.get("EMBEDDING_DIM", "512")),
-        selection_weight_area=float(os.environ.get("SELECTION_WEIGHT_AREA", "0.7")),
-        selection_weight_confidence=float(os.environ.get("SELECTION_WEIGHT_CONFIDENCE", "0.3")),
-        grace_seconds=float(os.environ.get("GRACE_SECONDS", "300.0")),
-        default_frame_width=int(os.environ.get("DEFAULT_FRAME_WIDTH", "1920")),
-        default_frame_height=int(os.environ.get("DEFAULT_FRAME_HEIGHT", "1080")),
-    )
+    return Iep3Settings()

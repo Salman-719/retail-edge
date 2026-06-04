@@ -1,22 +1,27 @@
 """BatchCoordinator — consumes stream:iep2:batch_complete.
 Fires reconciliation when all expected cameras report the same batch,
 or after coordinator_timeout_s when at least one camera is missing.
+
+R1: Expected cameras sourced from DB (not env var) and refreshed periodically.
+R8: Batches grouped by window_start_ms rounded to window boundary — restart-safe.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+import uuid
 from collections import defaultdict
 from typing import Awaitable, Callable
 
+import asyncpg
 import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
 
 # Type alias for the reconciliation callback
 OnReadyCallback = Callable[
-    [int, tuple[int, int], frozenset],   # batch, window, reporting_cameras
+    [int, tuple[int, int], frozenset],   # batch_key, window, reporting_cameras
     Awaitable[None],
 ]
 
@@ -29,25 +34,44 @@ class BatchCoordinator:
         self,
         redis_client: aioredis.Redis,
         store_id: str,
-        expected_cameras: frozenset,
+        expected_cameras: int,
         on_ready: OnReadyCallback,
         coordinator_timeout_s: float = 120.0,
+        pool: asyncpg.Pool | None = None,
+        window_seconds: float = 60.0,
+        expected_cameras_refresh_batches: int = 10,
     ) -> None:
         self._redis    = redis_client
         self._store_id = store_id
-        self._expected = expected_cameras
         self._on_ready = on_ready
         self._timeout_s = coordinator_timeout_s
+        self._pool      = pool
+        self._window_seconds = window_seconds
+        self._refresh_batches = expected_cameras_refresh_batches
+
+        # R1: count-based expected cameras (refreshed from DB periodically)
+        self._expected_cameras: int = expected_cameras
+        self._batches_since_refresh: int = 0
 
         # Consumer group scoped to this store — each IEP3 instance gets a
         # full independent copy of the stream via its own group.
         self._group    = f"iep3-{store_id}"
         self._consumer = "coordinator-1"
 
-        # Batch tracking state — keyed by batch_number (int)
-        self._seen:           dict[int, set[str]]       = defaultdict(set)
+        # R8: batch tracking keyed by _batch_key(window_start_ms), not batch_number
+        self._seen:           dict[int, set[str]]        = defaultdict(set)
         self._windows:        dict[int, tuple[int, int]] = {}
         self._first_received: dict[int, float]           = {}  # time.monotonic()
+
+    def _batch_key(self, window_start_ms: int) -> int:
+        """Round window_start_ms to the nearest window boundary.
+
+        Groups cameras that report slightly different window_start_ms values
+        (due to clock skew) into the same batch. Restart-safe: batch_number
+        resets to 0 on IEP1 restart, but window_start_ms is monotonic.
+        """
+        window_ms = int(self._window_seconds * 1000)
+        return int(round(window_start_ms / window_ms) * window_ms)
 
     async def run(self) -> None:
         """Main coordination loop. Runs until cancelled.
@@ -55,10 +79,10 @@ class BatchCoordinator:
         """
         await self._ensure_group()
         logger.info(
-            "BatchCoordinator started — store=%s group=%s expecting cameras=%s",
+            "BatchCoordinator started — store=%s group=%s expecting cameras=%d",
             self._store_id,
             self._group,
-            sorted(self._expected),
+            self._expected_cameras,
         )
 
         while True:
@@ -100,16 +124,10 @@ class BatchCoordinator:
                 raise
 
     async def _handle(self, msg_id: bytes, fields: dict) -> None:
-        """Process one batch_complete message.
-
-        XACK fires before the callback to avoid redelivery on reconciliation
-        crash. State cleanup also happens before the callback so that a slow
-        callback does not cause _check_timeouts to double-fire.
-        """
+        """Process one batch_complete message."""
         try:
             store_id  = fields[b"store_id"].decode()
             camera_id = fields[b"camera_id"].decode()
-            batch     = int(fields[b"batch_number"])
             start_ms  = int(fields[b"window_start_ms"])
             end_ms    = int(fields[b"window_end_ms"])
         except (KeyError, ValueError) as exc:
@@ -117,36 +135,49 @@ class BatchCoordinator:
             await self._redis.xack(STREAM, self._group, msg_id)
             return
 
-        # XACK immediately — before any state change or callback
+        # XACK fires here — BEFORE on_ready / reconciliation.
+        #
+        # Trade-off: if IEP3 crashes after XACK but before reconciliation
+        # completes, the batch is lost (no retry). The compensating control
+        # is orphan_sweep(), which runs on IEP3 startup and every
+        # ORPHAN_SWEEP_INTERVAL_BATCHES batches to clean partial state.
+        #
+        # The alternative (XACK after reconciliation) risks duplicate
+        # reconciliation on restart if batch_complete was already processed
+        # but XACK was not sent — IEP3 has no idempotency guard for
+        # full reconciliation replays. XACK-before is the lesser evil.
         await self._redis.xack(STREAM, self._group, msg_id)
 
         # Filter: silently discard messages from other stores
         if store_id != self._store_id:
             return
 
-        # Deduplication: same camera reporting same batch twice (IEP2 replay)
-        if camera_id in self._seen[batch]:
+        # R8: group by window_start_ms rounded to window boundary (restart-safe)
+        batch_key = self._batch_key(start_ms)
+
+        # Deduplication: same camera reporting same batch_key twice (IEP2 replay)
+        if camera_id in self._seen[batch_key]:
             logger.debug(
-                "Duplicate batch_complete: camera=%s batch=%d — ignored",
-                camera_id, batch,
+                "Duplicate batch_complete: camera=%s batch_key=%d — ignored",
+                camera_id, batch_key,
             )
             return
 
         # Record first arrival time for timeout guard (monotonic, not timestamp_ms)
-        if batch not in self._first_received:
-            self._first_received[batch] = time.monotonic()
-            self._windows[batch] = (start_ms, end_ms)
+        if batch_key not in self._first_received:
+            self._first_received[batch_key] = time.monotonic()
+            self._windows[batch_key] = (start_ms, end_ms)
 
-        self._seen[batch].add(camera_id)
+        self._seen[batch_key].add(camera_id)
 
         logger.info(
-            "batch_complete: camera=%s batch=%d (%d/%d cameras reported)",
-            camera_id, batch,
-            len(self._seen[batch]), len(self._expected),
+            "batch_complete: camera=%s batch_key=%d (%d/%d cameras reported)",
+            camera_id, batch_key,
+            len(self._seen[batch_key]), self._expected_cameras,
         )
 
-        if self._expected.issubset(self._seen[batch]):
-            await self._fire(batch, full=True)
+        if len(self._seen[batch_key]) >= self._expected_cameras:
+            await self._fire(batch_key)
 
     async def _check_timeouts(self) -> None:
         """Fire partial reconciliation for batches that have waited too long.
@@ -156,45 +187,84 @@ class BatchCoordinator:
         """
         now = time.monotonic()
         timed_out = [
-            batch
-            for batch, first_ts in list(self._first_received.items())
+            batch_key
+            for batch_key, first_ts in list(self._first_received.items())
             if (now - first_ts) >= self._timeout_s
-            and not self._expected.issubset(self._seen[batch])
+            and len(self._seen[batch_key]) < self._expected_cameras
         ]
-        for batch in timed_out:
-            missing = self._expected - self._seen[batch]
+        for batch_key in timed_out:
             logger.warning(
-                "Coordinator timeout for batch=%d after %.0fs — "
-                "missing cameras=%s — firing partial reconciliation",
-                batch, self._timeout_s, sorted(missing),
+                "Coordinator timeout for batch_key=%d after %.0fs — "
+                "cameras_reported=%d expected=%d — firing partial reconciliation",
+                batch_key, self._timeout_s,
+                len(self._seen[batch_key]), self._expected_cameras,
             )
-            await self._fire(batch, full=False)
+            await self._fire(batch_key)
 
-    async def _fire(self, batch: int, full: bool) -> None:
+    async def _fire(self, batch_key: int) -> None:
         """Fire the reconciliation callback and clean up batch tracking state.
 
         State cleanup happens before awaiting the callback — prevents
         _check_timeouts from double-firing if the callback is slow.
         """
-        window    = self._windows.get(batch, (0, 0))
-        reporting = frozenset(self._seen[batch])
+        window    = self._windows.get(batch_key, (0, 0))
+        reporting = frozenset(self._seen[batch_key])
+
+        # R6: structured partial batch logging
+        is_partial = len(reporting) < self._expected_cameras
+        if is_partial:
+            logger.warning(
+                "Partial batch fired",
+                extra={
+                    "batch_key":        batch_key,
+                    "store_id":         self._store_id,
+                    "cameras_reported": len(reporting),
+                    "cameras_expected": self._expected_cameras,
+                    "missing_cameras":  self._expected_cameras - len(reporting),
+                },
+            )
 
         # Clean up before awaiting callback
-        self._seen.pop(batch, None)
-        self._windows.pop(batch, None)
-        self._first_received.pop(batch, None)
+        self._seen.pop(batch_key, None)
+        self._windows.pop(batch_key, None)
+        self._first_received.pop(batch_key, None)
+
+        # R1: periodically refresh expected cameras count from DB
+        self._batches_since_refresh += 1
+        if self._pool is not None and self._batches_since_refresh >= self._refresh_batches:
+            try:
+                async with self._pool.acquire() as conn:
+                    count = await conn.fetchval(
+                        """
+                        SELECT COUNT(cc.id)
+                        FROM camera_configs cc
+                        JOIN store_config_versions scv ON scv.id = cc.version_id
+                        WHERE scv.store_id = $1
+                          AND scv.status   = 'active'
+                        """,
+                        uuid.UUID(self._store_id),
+                        timeout=10.0,
+                    )
+                    self._expected_cameras = int(count or 0)
+                    logger.info("Expected cameras refreshed: %d", self._expected_cameras)
+            except Exception:
+                logger.warning(
+                    "Failed to refresh expected_cameras — keeping current value=%d",
+                    self._expected_cameras,
+                )
+            self._batches_since_refresh = 0
 
         logger.info(
-            "Firing reconciliation: batch=%d window=[%d,%d] cameras=%s full=%s",
-            batch, window[0], window[1], sorted(reporting), full,
+            "Firing reconciliation: batch_key=%d window=[%d,%d] cameras=%s partial=%s",
+            batch_key, window[0], window[1], sorted(reporting), is_partial,
         )
 
         try:
-            await self._on_ready(batch, window, reporting)
+            await self._on_ready(batch_key, window, reporting)
         except Exception as exc:
             logger.error(
-                "Reconciliation failed for batch=%d: %s",
-                batch, exc, exc_info=True,
+                "Reconciliation failed for batch_key=%d: %s",
+                batch_key, exc, exc_info=True,
             )
             # Do not re-raise. A failed batch is logged and skipped.
             # The next batch will run normally.

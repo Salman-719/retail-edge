@@ -13,6 +13,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+_QUERY_TIMEOUT   = 120.0   # transactional queries — inside batch transaction
+_STANDALONE_TIMEOUT = 30.0 # standalone queries — acquire own connection
+
 
 # =============================================================================
 # Data structures — imported by all IEP3 components
@@ -91,6 +94,24 @@ class Iep3Repository:
     # STANDALONE — acquire own connection
     # =========================================================================
 
+    async def get_expected_cameras_count(self, store_id: str) -> int:
+        """Return count of active camera_configs for this store.
+        Used by R1: expected cameras derived from DB, not env var.
+        """
+        async with self._pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(cc.id)
+                FROM camera_configs cc
+                JOIN store_config_versions scv ON scv.id = cc.version_id
+                WHERE scv.store_id = $1
+                  AND scv.status   = 'active'
+                """,
+                uuid.UUID(store_id),
+                timeout=_STANDALONE_TIMEOUT,
+            )
+        return int(count or 0)
+
     async def get_camera_resolution(
         self,
         camera_id: str,
@@ -128,6 +149,7 @@ class Iep3Repository:
                 LIMIT 1
                 """,
                 camera_id,
+                timeout=_STANDALONE_TIMEOUT,
             )
 
         if row is None:
@@ -144,33 +166,65 @@ class Iep3Repository:
             camera_config_id=row["camera_config_id"],
         )
 
-    async def orphan_sweep(self) -> int:
-        """Delete GlobalIDs created but never had a position written.
+    async def orphan_sweep(self, store_id: str) -> tuple[int, int]:
+        """Remove partial state left by IEP3 crashes.
 
-        Condition: last_seen_ts == first_seen_ts AND no global_tracking_history row.
-        Targets transactions that crashed between Process 1 (ReID) and Process 2
-        (position write). Called once at IEP3 startup before the coordinator loop.
-        Returns count of deleted rows.
+        Cleans two categories in one transaction:
+          1. global_identities created but never tracked (Process 1 committed,
+             Process 2 crashed before writing global_tracking_history).
+             FK CASCADE on global_local_mapping and global_embeddings cleans
+             rows referencing deleted globals.
+          2. local_centroids with no active global_local_mapping
+             (mapping was deactivated but centroid row was not deleted).
+
+        Returns (deleted_globals, deleted_centroids).
+        Called on IEP3 startup and every ORPHAN_SWEEP_INTERVAL_BATCHES batches.
         """
+        store_uuid = uuid.UUID(store_id)
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                DELETE FROM global_identities
-                WHERE last_seen_ts = first_seen_ts
-                  AND NOT EXISTS (
-                      SELECT 1 FROM global_tracking_history gth
-                      WHERE gth.global_id = global_identities.global_id
-                  )
-                """
-            )
-        count = int(result.split()[-1])
-        if count > 0:
+            async with conn.transaction():
+                deleted_globals = await conn.fetchval(
+                    """
+                    WITH deleted AS (
+                        DELETE FROM global_identities
+                        WHERE store_id = $1
+                          AND last_seen_ts = first_seen_ts
+                          AND NOT EXISTS (
+                              SELECT 1 FROM global_tracking_history gth
+                              WHERE gth.global_id = global_identities.global_id
+                          )
+                        RETURNING global_id
+                    )
+                    SELECT COUNT(*) FROM deleted
+                    """,
+                    store_uuid,
+                    timeout=_STANDALONE_TIMEOUT,
+                )
+                deleted_centroids = await conn.fetchval(
+                    """
+                    WITH deleted AS (
+                        DELETE FROM local_centroids lc
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM global_local_mapping glm
+                            WHERE glm.local_id  = lc.local_id
+                              AND glm.is_active = TRUE
+                        )
+                        RETURNING local_id
+                    )
+                    SELECT COUNT(*) FROM deleted
+                    """,
+                    timeout=_STANDALONE_TIMEOUT,
+                )
+
+        deleted_globals   = int(deleted_globals or 0)
+        deleted_centroids = int(deleted_centroids or 0)
+
+        if deleted_globals or deleted_centroids:
             logger.warning(
-                "Orphan sweep removed %d incomplete GlobalIDs "
-                "(created but never had a position written — prior crash)",
-                count,
+                "Orphan sweep store=%s deleted_globals=%d deleted_centroids=%d",
+                store_id, deleted_globals, deleted_centroids,
             )
-        return count
+        return deleted_globals, deleted_centroids
 
     # =========================================================================
     # TRANSACTION — caller passes asyncpg Connection
@@ -208,6 +262,7 @@ class Iep3Repository:
             """,
             window_start_ms,
             window_end_ms,
+            timeout=_QUERY_TIMEOUT,
         )
         if not rows:
             return []
@@ -245,6 +300,7 @@ class Iep3Repository:
             WHERE local_id = $1 AND is_active = TRUE
             """,
             local_id,
+            timeout=_QUERY_TIMEOUT,
         )
         if row is None:
             return None
@@ -272,6 +328,7 @@ class Iep3Repository:
             """,
             last_seen_ts,
             local_id,
+            timeout=_QUERY_TIMEOUT,
         )
 
     async def load_local_centroid(
@@ -288,6 +345,7 @@ class Iep3Repository:
         row = await conn.fetchrow(
             "SELECT centroid FROM local_centroids WHERE local_id = $1",
             local_id,
+            timeout=_QUERY_TIMEOUT,
         )
         if row is None or row["centroid"] is None:
             return None
@@ -322,6 +380,7 @@ class Iep3Repository:
                      gi.last_floor_x, gi.last_floor_y, gi.last_seen_ts
             """,
             store_id,
+            timeout=_QUERY_TIMEOUT,
         )
         return [
             GlobalCandidate(
@@ -349,6 +408,7 @@ class Iep3Repository:
         rows = await conn.fetch(
             "SELECT camera_id, centroid FROM global_embeddings WHERE global_id = $1",
             global_id,
+            timeout=_QUERY_TIMEOUT,
         )
         return [
             (r["camera_id"], np.frombuffer(r["centroid"], dtype=np.float32).copy())
@@ -380,6 +440,7 @@ class Iep3Repository:
             first_seen_ts,
             last_floor_x,
             last_floor_y,
+            timeout=_QUERY_TIMEOUT,
         )
         return row["global_id"]
 
@@ -409,6 +470,7 @@ class Iep3Repository:
             linked_at_ts,
             global_id,
             camera_id,
+            timeout=_QUERY_TIMEOUT,
         )
         await conn.execute(
             """
@@ -421,6 +483,7 @@ class Iep3Repository:
             camera_id,
             local_id,
             linked_at_ts,
+            timeout=_QUERY_TIMEOUT,
         )
 
     async def deactivate_mapping(
@@ -438,6 +501,7 @@ class Iep3Repository:
             """,
             unlinked_at_ts,
             local_id,
+            timeout=_QUERY_TIMEOUT,
         )
 
     async def upsert_embedding(
@@ -462,6 +526,7 @@ class Iep3Repository:
             camera_id,
             centroid_bytes,
             updated_at_ts,
+            timeout=_QUERY_TIMEOUT,
         )
 
     async def reactivate_global(
@@ -494,6 +559,7 @@ class Iep3Repository:
             last_floor_x,
             last_floor_y,
             global_id,
+            timeout=_QUERY_TIMEOUT,
         )
         await self.link_local(conn, global_id, camera_id, local_id, linked_at_ts)
 
@@ -537,6 +603,7 @@ class Iep3Repository:
             store_id,
             window_start_ms,
             window_end_ms,
+            timeout=_QUERY_TIMEOUT,
         )
         return [
             PositionRow(
@@ -588,6 +655,7 @@ class Iep3Repository:
             source_camera,
             source_local_id,
             float(selection_score),
+            timeout=_QUERY_TIMEOUT,
         )
 
     async def update_global_last_seen(
@@ -618,6 +686,7 @@ class Iep3Repository:
                 WHERE global_id = $5
                 """,
                 last_seen_ts, floor_x, floor_y, zone_id, global_id,
+                timeout=_QUERY_TIMEOUT,
             )
         else:
             await conn.execute(
@@ -630,6 +699,7 @@ class Iep3Repository:
                 WHERE global_id = $5
                 """,
                 last_seen_ts, floor_x, floor_y, zone_id, global_id,
+                timeout=_QUERY_TIMEOUT,
             )
 
     async def transition_active_to_lost(
@@ -662,6 +732,7 @@ class Iep3Repository:
             window_end_ms,
             store_id,
             window_start_ms,
+            timeout=_QUERY_TIMEOUT,
         )
         return [r["global_id"] for r in rows]
 
@@ -690,6 +761,7 @@ class Iep3Repository:
             store_id,
             window_end_ms,
             grace_ms,
+            timeout=_QUERY_TIMEOUT,
         )
         return [r["global_id"] for r in rows]
 
@@ -712,6 +784,7 @@ class Iep3Repository:
             """,
             unlinked_at_ts,
             global_ids,
+            timeout=_QUERY_TIMEOUT,
         )
 
     async def delete_centroids_for_globals(
@@ -734,6 +807,7 @@ class Iep3Repository:
             )
             """,
             global_ids,
+            timeout=_QUERY_TIMEOUT,
         )
 
     async def get_active_mappings_bulk(
@@ -757,6 +831,7 @@ class Iep3Repository:
               AND is_active = TRUE
             """,
             local_ids,
+            timeout=_QUERY_TIMEOUT,
         )
         return {
             row["local_id"]: MappingRow(
@@ -796,6 +871,7 @@ class Iep3Repository:
             """,
             local_ids,
             timestamps,
+            timeout=_QUERY_TIMEOUT,
         )
 
     async def get_embeddings_bulk(
@@ -819,6 +895,7 @@ class Iep3Repository:
             WHERE global_id = ANY($1)
             """,
             global_ids,
+            timeout=_QUERY_TIMEOUT,
         )
         result: dict = {}
         for row in rows:
@@ -854,6 +931,7 @@ class Iep3Repository:
                   AND physical_camera_id IS NOT NULL
                 """,
                 camera_ids,
+                timeout=_STANDALONE_TIMEOUT,
             )
         return {
             row["camera_id"]: CameraBatchInfo(

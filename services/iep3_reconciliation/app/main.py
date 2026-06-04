@@ -72,10 +72,8 @@ async def _verify_redis(redis_client) -> None:
 async def _main() -> None:
     settings = get_settings()
     logger.info(
-        "IEP3 starting  store_id=%s  expected_cameras=%s  "
-        "window_seconds=%.1f  db_host=%s  redis=%s",
+        "IEP3 starting  store_id=%s  window_seconds=%.1f  db_host=%s  redis=%s",
         settings.store_id,
-        sorted(settings.expected_cameras),
         settings.window_seconds,
         settings.database_url_server.split("@")[-1].split("/")[0],
         settings.redis_url,
@@ -94,12 +92,16 @@ async def _main() -> None:
     # ── Repository ────────────────────────────────────────────────────────────
     repo = Iep3Repository(get_pool(), embedding_dim=settings.embedding_dim)
 
-    # ── Startup orphan sweep ──────────────────────────────────────────────────
-    swept = await repo.orphan_sweep()
-    if swept > 0:
+    # ── R1: expected cameras from DB ──────────────────────────────────────────
+    expected_cameras = await repo.get_expected_cameras_count(settings.store_id)
+    logger.info("Expected cameras from DB: %d", expected_cameras)
+
+    # ── Startup orphan sweep (R4) ─────────────────────────────────────────────
+    deleted_globals, deleted_centroids = await repo.orphan_sweep(settings.store_id)
+    if deleted_globals or deleted_centroids:
         logger.warning(
-            "Orphan sweep removed %d incomplete GlobalIDs from prior crash.",
-            swept,
+            "Startup orphan sweep: deleted_globals=%d deleted_centroids=%d",
+            deleted_globals, deleted_centroids,
         )
 
     # ── Reconciler ────────────────────────────────────────────────────────────
@@ -124,9 +126,12 @@ async def _main() -> None:
     coordinator = BatchCoordinator(
         redis_client=redis_client,
         store_id=settings.store_id,
-        expected_cameras=settings.expected_cameras,
+        expected_cameras=expected_cameras,
         on_ready=reconciler.process_batch,
         coordinator_timeout_s=settings.coordinator_timeout_s,
+        pool=pool,
+        window_seconds=settings.window_seconds,
+        expected_cameras_refresh_batches=settings.expected_cameras_refresh_batches,
     )
 
     logger.info("IEP3 ready — listening on stream:iep2:batch_complete")

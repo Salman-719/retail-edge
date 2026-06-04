@@ -136,12 +136,11 @@ class ReidMatcher:
             if obs.camera_id not in c.active_camera_ids
         ]
 
-        # Step 2: spatial-temporal gate — exclude physically impossible movements
+        # Step 2: spatial-temporal gate — exclude physically impossible movements.
+        # NULL coordinates (uncalibrated camera) are handled inside the gate
+        # (R5): gate passes and relies on appearance similarity only.
         survivors = []
         for candidate in eligible:
-            if candidate.last_floor_x is None or candidate.last_floor_y is None:
-                survivors.append(candidate)
-                continue
             if cross_camera_gate(
                 new_x=obs.last_floor_x,
                 new_y=obs.last_floor_y,

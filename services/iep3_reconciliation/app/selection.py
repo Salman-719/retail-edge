@@ -153,8 +153,8 @@ class PositionSelector:
                 bbox_confidence=report.bbox_confidence,
                 frame_width=w,
                 frame_height=h,
-                weight_area=self._settings.selection_weight_area,
-                weight_confidence=self._settings.selection_weight_confidence,
+                weight_area=self._settings.position_weight_area,
+                weight_confidence=self._settings.position_weight_conf,
             )
             if score > best_score:
                 best_score = score
