@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = ""
 
+    # ── gRPC TLS / Auth ──────────────────────────────────────────────────────
+    GRPC_PORT: int = Field(default=50051)
+    GRPC_SERVER_CERT_PATH: str = Field(...)   # path to PEM server certificate
+    GRPC_SERVER_KEY_PATH:  str = Field(...)   # path to PEM server private key
+    AGENT_SECRET: str = Field(...)            # shared secret; edge agents present via x-agent-token
+
     # ── Feature flags ────────────────────────────────────────────────────────
     # Explicit false default — never rely on absence of this var.
     DEBUG_MODE: bool = False

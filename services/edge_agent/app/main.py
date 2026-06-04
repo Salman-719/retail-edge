@@ -5,7 +5,7 @@ import sys
 
 from services.edge_agent.app.agent import run_agent
 
-_REQUIRED_VARS = ["EEP_GRPC_URL", "STORE_ID", "DATABASE_URL_SERVER", "SERVER_REDIS_URL"]
+_REQUIRED_VARS = ["EEP_GRPC_URL", "STORE_ID", "DATABASE_URL_SERVER", "SERVER_REDIS_URL", "AGENT_SECRET"]
 
 
 def main():

@@ -47,10 +47,15 @@ async def send_agent_command(body: SendCommandRequest):
     else:
         raise HTTPException(status_code=400, detail="action must be start or stop")
 
-    sent = await registry.send_command(body.store_id, msg)
-    if not sent:
+    result = await registry.send_command(body.store_id, msg)
+    if result == "disconnected":
         raise HTTPException(
             status_code=404,
             detail=f"No agent connected for store {body.store_id}",
+        )
+    if result == "queue_full":
+        raise HTTPException(
+            status_code=429,
+            detail=f"Command queue full for store {body.store_id}",
         )
     return {"status": "sent", "action": body.action, "camera_id": body.camera_id}

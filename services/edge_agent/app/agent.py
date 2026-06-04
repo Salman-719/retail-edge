@@ -60,6 +60,11 @@ SERVER_REDIS_URL     = os.environ.get("SERVER_REDIS_URL",    "")
 DATABASE_URL_SERVER  = os.environ.get("DATABASE_URL_SERVER", "")
 HEARTBEAT_INTERVAL_S = int(os.environ.get("HEARTBEAT_INTERVAL_S", "30"))
 
+# TLS — CA cert used to verify EEP server certificate
+GRPC_CA_CERT_PATH = os.environ.get("GRPC_CA_CERT_PATH", "/etc/retailvision/certs/ca.crt")
+# Shared secret sent as x-agent-token metadata on every RPC
+AGENT_SECRET = os.environ.get("AGENT_SECRET", "")
+
 # Host-side path for k3s hostPath volume (/dev/shm/sockets → /tmp/sockets in pods).
 IPC_SOCKETS_HOST_PATH = os.environ.get("IPC_SOCKETS_HOST_PATH", "/dev/shm/sockets")
 
@@ -452,13 +457,29 @@ async def _request_generator():
 
 # ── EEP connection ─────────────────────────────────────────────────────────────
 
+def _load_channel_credentials() -> grpc.ChannelCredentials:
+    with open(GRPC_CA_CERT_PATH, "rb") as f:
+        ca_cert = f.read()
+    return grpc.ssl_channel_credentials(root_certificates=ca_cert)
+
+
+_CHANNEL_OPTIONS = [
+    ("grpc.keepalive_time_ms",              20000),
+    ("grpc.keepalive_timeout_ms",           10000),
+    ("grpc.keepalive_permit_without_calls",     1),
+    ("grpc.http2.max_pings_without_data",       0),
+]
+
+
 async def _connect_to_eep(grpc_url: str, store_id: str, agent_version: str) -> None:
-    async with grpc.aio.insecure_channel(grpc_url) as channel:
-        stub    = AgentServiceStub(channel)
-        hb_task = asyncio.create_task(_heartbeat_loop(store_id, agent_version))
-        wt_task = asyncio.create_task(_iep1_health_watcher())
+    credentials = _load_channel_credentials()
+    async with grpc.aio.secure_channel(grpc_url, credentials, options=_CHANNEL_OPTIONS) as channel:
+        stub     = AgentServiceStub(channel)
+        metadata = (("x-agent-token", AGENT_SECRET),)
+        hb_task  = asyncio.create_task(_heartbeat_loop(store_id, agent_version))
+        wt_task  = asyncio.create_task(_iep1_health_watcher())
         try:
-            async for ctrl_msg in stub.Connect(_request_generator()):
+            async for ctrl_msg in stub.Connect(_request_generator(), metadata=metadata):
                 await _handle_control(ctrl_msg)
         finally:
             for task in (hb_task, wt_task):

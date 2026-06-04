@@ -54,3 +54,7 @@ htmlcov/
 
 #file
 docsme/
+
+# TLS private keys — never commit
+*.key
+certs/*.key
