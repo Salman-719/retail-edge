@@ -1,17 +1,17 @@
-"""Edge Agent — local orchestrator for the edge pipeline.
+"""Edge Agent — thin gRPC relay: translates EEP commands into k3s API operations.
 
-Startup sequence (R1):
-  1. Ensure YOLO-service and OSNet-service containers running
+Startup sequence:
+  1. Init k8s clients (load kubeconfig)
   2. Wait for YOLO + OSNet grpc.health.v1 = SERVING
-  3. Ensure IEP1-daemon container running
-  4. Wait for IEP1 grpc.health.v1 = SERVING
-  5. Rebuild _tracked_cameras from running Docker containers (R2)
-  6. Re-add active cameras to IEP1 (R2)
-  7. Connect gRPC stream to EEP
+  3. Wait for IEP1 grpc.health.v1 = SERVING
+  4. Restore active cameras from k3s Deployments
+  5. Connect gRPC stream to EEP
 
-Per-camera lifecycle (R4/R5):
-  StartCamera: start IEP2 → wait IEP2 SERVING → AddCamera to IEP1
-  StopCamera:  RemoveCamera from IEP1 → stop IEP2
+Per-camera lifecycle:
+  StartCamera: apply ConfigMap + Deployment → wait IEP2 SERVING → AddCamera to IEP1
+  StopCamera:  cancel health watcher → RemoveCamera from IEP1 → delete k3s resources
+
+k3s is the source of truth for container state. No _tracked_cameras dict.
 """
 import asyncio
 import logging
@@ -19,13 +19,12 @@ import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 
 import grpc
 import grpc.aio
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
-from services.edge_agent.app import docker_manager as dm
+from services.edge_agent.app import k8s_manager as km
 from services.edge_agent.app.grpc_generated.agent_pb2 import (
     AgentMessage,
     CameraStatusReport,
@@ -34,7 +33,6 @@ from services.edge_agent.app.grpc_generated.agent_pb2 import (
 from services.edge_agent.app.grpc_generated.agent_pb2_grpc import AgentServiceStub
 from services.edge_agent.app.grpc_generated.iep1_control_pb2 import (
     CameraConfig,
-    Empty,
     RemoveCameraRequest,
 )
 from services.edge_agent.app.grpc_generated.iep1_control_pb2_grpc import Iep1ControlStub
@@ -45,73 +43,36 @@ logger = logging.getLogger(__name__)
 STORE_ID       = os.environ["STORE_ID"]
 WINDOW_SECONDS = float(os.environ.get("WINDOW_SECONDS", "60"))
 
+# Edge Agent runs as a systemd service on the host and accesses IEP1 via the
+# hostPath volume (/dev/shm/sockets), not the pod-internal /tmp/sockets mount.
 IEP1_CONTROL_SOCK = os.environ.get(
-    "IEP1_CONTROL_SOCK", "unix:///tmp/iep1-sockets/iep1_control.sock"
+    "IEP1_CONTROL_SOCK", "unix:///dev/shm/sockets/iep1_control.sock"
 )
 IEP1_HEALTH_SOCK = os.environ.get(
-    "IEP1_HEALTH_SOCK", "unix:///tmp/iep1-sockets/iep1_health.sock"
+    "IEP1_HEALTH_SOCK", "unix:///dev/shm/sockets/iep1_health.sock"
 )
-# TCP addresses for YOLO/OSNet health — containers share a Docker network
-YOLO_HEALTH_SOCK  = os.environ.get("YOLO_HEALTH_SOCK",  "yolo-service:50052")
-OSNET_HEALTH_SOCK = os.environ.get("OSNET_HEALTH_SOCK", "osnet-service:50053")
+# Inference services expose their gRPC health via hostPort on the node.
+YOLO_HEALTH_SOCK  = os.environ.get("YOLO_HEALTH_SOCK",  "localhost:50052")
+OSNET_HEALTH_SOCK = os.environ.get("OSNET_HEALTH_SOCK", "localhost:50053")
 
-# IEP2 environment variables forwarded from Edge Agent env
-LOCAL_REDIS_URL     = os.environ.get("LOCAL_REDIS_URL",     "redis://redis:6379/0")
-SERVER_REDIS_URL     = os.environ.get("SERVER_REDIS_URL",     "")
-DATABASE_URL_SERVER  = os.environ.get("DATABASE_URL_SERVER",  "")
+LOCAL_REDIS_URL      = os.environ.get("LOCAL_REDIS_URL",     "redis://localhost:6379/0")
+SERVER_REDIS_URL     = os.environ.get("SERVER_REDIS_URL",    "")
+DATABASE_URL_SERVER  = os.environ.get("DATABASE_URL_SERVER", "")
 HEARTBEAT_INTERVAL_S = int(os.environ.get("HEARTBEAT_INTERVAL_S", "30"))
+
+# Host-side path for k3s hostPath volume (/dev/shm/sockets → /tmp/sockets in pods).
+IPC_SOCKETS_HOST_PATH = os.environ.get("IPC_SOCKETS_HOST_PATH", "/dev/shm/sockets")
 
 # ── Module-level state ─────────────────────────────────────────────────────────
 
-@dataclass
-class CameraState:
-    camera_id:      str
-    store_id:       str
-    iep2_running:   bool
-    iep1_added:     bool
-    # Populated from StartCamera commands; may be "" when rebuilt from Docker on startup.
-    # _restore_active_cameras skips cameras with empty rtsp_url (no config to restore).
-    rtsp_url:       str   = ""
-    target_fps:     float = 0.0
-    window_seconds: float = 0.0
-
-
-_tracked_cameras:  dict[str, CameraState] = {}
-_starting_cameras: set[str]               = set()
+_starting_cameras: set[str]                = set()
 # R7: bounded — status reports dropped (not stalled) if the stream is reconnecting
-_outgoing:         asyncio.Queue          = asyncio.Queue(maxsize=200)
-# R1/R8: one Watch task per active camera
+_outgoing:         asyncio.Queue           = asyncio.Queue(maxsize=200)
+# One Watch task per active camera
 _health_watchers:  dict[str, asyncio.Task] = {}
 
-# M3-S1 R6: all Docker SDK calls run in this executor — never on the asyncio thread
-_docker_exec = ThreadPoolExecutor(max_workers=4, thread_name_prefix="edge-docker")
-
-# ── Inference service descriptors (R10) ────────────────────────────────────────
-_INFERENCE_SERVICES = [
-    {
-        "name":    "yolo-service",
-        "image":   dm.YOLO_IMAGE,
-        "volumes": {dm.IPC_SOCKETS_VOLUME: {"bind": "/tmp/sockets", "mode": "rw"}},
-        "runtime": "nvidia",
-    },
-    {
-        "name":    "osnet-service",
-        "image":   dm.OSNET_IMAGE,
-        "volumes": {dm.IPC_SOCKETS_VOLUME: {"bind": "/tmp/sockets", "mode": "rw"}},
-        "runtime": "nvidia",
-    },
-]
-
-_IEP1_DAEMON_VOLUMES = {
-    dm.IEP1_SOCKETS_VOLUME: {"bind": "/tmp/iep1-sockets", "mode": "rw"},
-    dm.FRAME_STORE_VOLUME:   {"bind": "/dev/shm/frames",  "mode": "rw"},
-}
-_IEP1_DAEMON_ENV = {
-    "REDIS_URL":         LOCAL_REDIS_URL,
-    "IEP1_CONTROL_SOCK": "unix:///tmp/iep1-sockets/iep1_control.sock",
-    "IEP1_HEALTH_SOCK":  "unix:///tmp/iep1-sockets/iep1_health.sock",
-    "TMPFS_FRAME_ROOT":  "/dev/shm/frames",
-}
+# All K8s API calls run in this executor — never on the asyncio thread
+_k8s_exec = ThreadPoolExecutor(max_workers=4, thread_name_prefix="edge-k8s")
 
 
 # ── Health helpers ─────────────────────────────────────────────────────────────
@@ -135,105 +96,83 @@ async def _wait_for_health(name: str, sock: str, timeout: int) -> None:
     raise RuntimeError(f"{name} did not become SERVING within {timeout}s")
 
 
-async def _wait_for_iep2_health(camera_id: str, timeout: int = 30) -> None:
-    sock = f"unix:///tmp/sockets/iep2_health_{camera_id}.sock"
+async def _wait_for_iep2_health(camera_id: str, timeout: int = 60) -> None:
+    sock = f"unix://{IPC_SOCKETS_HOST_PATH}/iep2_health_{camera_id}.sock"
     await _wait_for_health(f"iep2-{camera_id}", sock, timeout)
 
 
-# ── Startup (R1) ──────────────────────────────────────────────────────────────
+# ── Startup ────────────────────────────────────────────────────────────────────
 
 async def _startup() -> None:
     loop = asyncio.get_running_loop()
 
-    # 1+2: inference services first
-    for svc in _INFERENCE_SERVICES:
-        await loop.run_in_executor(
-            _docker_exec,
-            dm.ensure_service_running,
-            svc["name"], svc["image"], svc["volumes"],
-            svc.get("env"), svc.get("runtime"),
-        )
+    # Init K8s API clients (reads kubeconfig — blocking file I/O)
+    await loop.run_in_executor(_k8s_exec, km.init_k8s_clients)
 
+    # Wait for inference services (exposed via hostPort from their k3s pods)
     await _wait_for_health("yolo",  YOLO_HEALTH_SOCK,  timeout=120)
     await _wait_for_health("osnet", OSNET_HEALTH_SOCK, timeout=120)
 
-    # 3+4: IEP1 daemon
-    await loop.run_in_executor(
-        _docker_exec,
-        dm.ensure_service_running,
-        "iep1-daemon", dm.IEP1_IMAGE, _IEP1_DAEMON_VOLUMES,
-        _IEP1_DAEMON_ENV, None,
-    )
+    # Wait for IEP1 daemon (unix socket via hostPath /dev/shm/sockets)
     await _wait_for_health("iep1", IEP1_HEALTH_SOCK, timeout=60)
 
-    # 5+6: rebuild state and restore active cameras
-    await _rebuild_tracked_cameras()
+    # Re-add cameras that survived this Edge Agent restart
     await _restore_active_cameras()
 
 
-# ── Startup rebuild (R2) ──────────────────────────────────────────────────────
-
-async def _rebuild_tracked_cameras() -> None:
-    """Scan running iep2_* containers and confirm against IEP1 GetStatus."""
-    loop = asyncio.get_running_loop()
-    _tracked_cameras.clear()
-
-    running = await loop.run_in_executor(_docker_exec, dm.list_running_iep2_containers)
-    for store_id, camera_id in running:
-        _tracked_cameras[camera_id] = CameraState(
-            camera_id=camera_id,
-            store_id=store_id,
-            iep2_running=True,
-            iep1_added=False,
-        )
-
-    if not _tracked_cameras:
-        logger.info("Rebuilt tracking: no IEP2 containers running")
-        return
-
-    # Confirm which cameras IEP1 already knows about
-    try:
-        async with grpc.aio.insecure_channel(IEP1_CONTROL_SOCK) as ch:
-            stub = Iep1ControlStub(ch)
-            status = await stub.GetStatus(Empty(), timeout=5.0)
-            for cam in status.cameras:
-                if cam.camera_id in _tracked_cameras:
-                    _tracked_cameras[cam.camera_id].iep1_added = True
-    except Exception as exc:
-        logger.warning("GetStatus failed during startup rebuild: %s", exc)
-
-    n_added = sum(1 for c in _tracked_cameras.values() if c.iep1_added)
-    logger.info(
-        "Rebuilt tracking: %d cameras  (iep1_confirmed: %d)",
-        len(_tracked_cameras), n_added,
-    )
-
+# ── Startup restore ────────────────────────────────────────────────────────────
 
 async def _restore_active_cameras() -> None:
-    """Re-add cameras to IEP1 that have IEP2 running but are missing from IEP1."""
-    for cam in list(_tracked_cameras.values()):
-        if cam.iep1_added:
+    """Re-add all active IEP2 cameras to IEP1 by reading k3s Deployments + ConfigMaps.
+
+    RTSP_URL and TARGET_FPS are persisted in each camera's ConfigMap by
+    _handle_start_camera, so restart recovery no longer requires EEP resync.
+    Cameras whose ConfigMap lacks RTSP_URL are skipped with a warning.
+    """
+    loop = asyncio.get_running_loop()
+    deployments = await loop.run_in_executor(_k8s_exec, km.list_active_iep2_deployments)
+
+    restored = 0
+    for data in deployments:
+        camera_id = data.get("camera_id", "")
+        if not camera_id:
             continue
-        if not cam.rtsp_url:
-            # Deviation from spec: CameraState has no rtsp_url when rebuilt
-            # from Docker containers on startup — cannot restore without config.
-            # EEP will re-send StartCamera after reconnect if needed.
+
+        rtsp_url = data.get("RTSP_URL", "")
+        if not rtsp_url:
             logger.warning(
-                "Cannot restore camera %s to IEP1 — no RTSP config "
-                "(Edge Agent restarted after IEP1 lost state; EEP will resync)",
-                cam.camera_id,
+                "Cannot restore camera %s to IEP1 — no RTSP_URL in ConfigMap "
+                "(EEP will resync if needed)",
+                camera_id,
             )
             continue
-        await _add_camera_to_daemon(cam)
+
+        store_id = data.get("STORE_ID", STORE_ID)
+        try:
+            target_fps     = float(data.get("TARGET_FPS", "0"))
+            window_seconds = float(data.get("WINDOW_SECONDS", str(WINDOW_SECONDS)))
+        except ValueError:
+            target_fps, window_seconds = 0.0, WINDOW_SECONDS
+
+        await _add_camera_to_iep1(camera_id, store_id, rtsp_url, target_fps, window_seconds)
+
+        if camera_id not in _health_watchers:
+            _health_watchers[camera_id] = asyncio.create_task(
+                _watch_iep2_health(camera_id),
+                name=f"iep2-watch-{camera_id}",
+            )
+        restored += 1
+
+    logger.info("Restored %d / %d cameras from k3s", restored, len(deployments))
 
 
-# ── IEP1 health watcher (R3) ──────────────────────────────────────────────────
+# ── IEP1 health watcher ────────────────────────────────────────────────────────
 
 async def _iep1_health_watcher() -> None:
-    """Detect IEP1 restart via Watch stream and re-add all tracked cameras.
+    """Detect IEP1 restart via Watch stream and re-add all active cameras.
 
-    Watch is event-driven (no polling). Outer loop reconnects if the stream
-    is broken by a container restart.
+    On SERVING→NOT_SERVING→SERVING transition, IEP1 has lost all camera state.
+    _restore_active_cameras reads k3s to rebuild the full set.
     """
     was_serving = False
     while True:
@@ -249,51 +188,65 @@ async def _iep1_health_watcher() -> None:
                     if is_serving and not was_serving:
                         logger.info(
                             "IEP1 recovered — restoring %d cameras",
-                            len(_tracked_cameras),
+                            len(_health_watchers),
                         )
-                        for cam in list(_tracked_cameras.values()):
-                            cam.iep1_added = False
                         await _restore_active_cameras()
                     was_serving = is_serving
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("IEP1 health Watch disconnected: %s — retrying in 5s", exc)
-            was_serving = False  # treat reconnect as potential restart
+            was_serving = False
             await asyncio.sleep(5)
 
 
-# ── IEP1 gRPC helpers ─────────────────────────────────────────────────────────
+# ── IEP1 gRPC helper ───────────────────────────────────────────────────────────
 
-async def _add_camera_to_daemon(cam: CameraState) -> None:
+async def _add_camera_to_iep1(
+    camera_id: str,
+    store_id: str,
+    rtsp_url: str,
+    target_fps: float,
+    window_seconds: float,
+) -> bool:
     try:
         async with grpc.aio.insecure_channel(IEP1_CONTROL_SOCK) as ch:
             stub = Iep1ControlStub(ch)
             resp = await stub.AddCamera(
                 CameraConfig(
-                    camera_id=cam.camera_id,
-                    rtsp_url=cam.rtsp_url,
-                    target_fps=cam.target_fps,
-                    window_seconds=cam.window_seconds or WINDOW_SECONDS,
-                    store_id=cam.store_id,
+                    camera_id=camera_id,
+                    rtsp_url=rtsp_url,
+                    target_fps=target_fps,
+                    window_seconds=window_seconds or WINDOW_SECONDS,
+                    store_id=store_id,
                 ),
                 timeout=5.0,
             )
             if resp.success:
-                cam.iep1_added = True
-                logger.info("AddCamera ok  camera=%s", cam.camera_id)
+                logger.info("AddCamera ok  camera=%s", camera_id)
             else:
                 logger.warning(
-                    "AddCamera rejected  camera=%s  error=%s",
-                    cam.camera_id, resp.error,
+                    "AddCamera rejected  camera=%s  error=%s", camera_id, resp.error
                 )
+            return resp.success
     except Exception as exc:
-        logger.warning("AddCamera RPC failed  camera=%s: %s", cam.camera_id, exc)
+        logger.warning("AddCamera RPC failed  camera=%s: %s", camera_id, exc)
+        return False
 
 
-# ── IEP2 env builder ──────────────────────────────────────────────────────────
+# ── ConfigMap data builder ─────────────────────────────────────────────────────
 
-def _build_iep2_env(camera_id: str, store_id: str) -> dict:
+def _build_configmap_data(
+    camera_id: str,
+    store_id: str,
+    rtsp_url: str,
+    target_fps: float,
+) -> dict:
+    """Build the ConfigMap payload for an IEP2 pod.
+
+    RTSP_URL and TARGET_FPS are stored for Edge Agent restart recovery.
+    IEP2 does not use them directly.
+    """
     return {
         "CAMERA_ID":           camera_id,
         "STORE_ID":            store_id,
@@ -301,20 +254,21 @@ def _build_iep2_env(camera_id: str, store_id: str) -> dict:
         "LOCAL_REDIS_URL":     LOCAL_REDIS_URL,
         "SERVER_REDIS_URL":    SERVER_REDIS_URL,
         "DATABASE_URL_SERVER": DATABASE_URL_SERVER,
+        "RTSP_URL":            rtsp_url,
+        "TARGET_FPS":          str(target_fps),
     }
 
 
-# ── IEP2 health watcher (R1) ──────────────────────────────────────────────────
+# ── IEP2 health watcher ────────────────────────────────────────────────────────
 
 async def _watch_iep2_health(camera_id: str) -> None:
     """Open a Watch stream to IEP2's grpc.health.v1 service.
 
-    Sends an immediate status report whenever health changes or the stream
-    breaks. Exits cleanly when the camera is removed from _tracked_cameras.
-    This is the fast path — Docker status polling in the heartbeat is the slow path.
+    Exits only on CancelledError (task cancelled by _handle_stop_camera).
+    Sends an immediate status report on NOT_SERVING or stream failure.
     """
-    sock = f"unix:///tmp/sockets/iep2_health_{camera_id}.sock"
-    while camera_id in _tracked_cameras:
+    sock = f"unix://{IPC_SOCKETS_HOST_PATH}/iep2_health_{camera_id}.sock"
+    while True:
         try:
             async with grpc.aio.insecure_channel(sock) as ch:
                 stub = health_pb2_grpc.HealthStub(ch)
@@ -322,16 +276,10 @@ async def _watch_iep2_health(camera_id: str) -> None:
                     health_pb2.HealthCheckRequest(service="")
                 ):
                     if response.status != health_pb2.HealthCheckResponse.SERVING:
-                        # IEP2 degraded — report actual Docker status immediately
                         await _send_immediate_status(camera_id)
-                    if camera_id not in _tracked_cameras:
-                        return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if camera_id not in _tracked_cameras:
-                return
-            # Container not reachable — report current Docker status
             logger.debug("IEP2 Watch stream failed  camera=%s: %s", camera_id, exc)
             await _send_immediate_status(camera_id)
             await asyncio.sleep(5)
@@ -340,11 +288,10 @@ async def _watch_iep2_health(camera_id: str) -> None:
 # ── Command handlers ───────────────────────────────────────────────────────────
 
 async def _handle_start_camera(cmd) -> None:
-    """R4: IEP2 must be SERVING before IEP1 begins publishing."""
+    """Apply ConfigMap + Deployment to k3s, wait IEP2 SERVING, then add to IEP1."""
     camera_id = cmd.camera_id
     store_id  = cmd.store_id
 
-    # R8: reject commands for other stores
     if store_id != STORE_ID:
         logger.error(
             "StartCamera for wrong store %s (this device is %s) — ignoring",
@@ -352,7 +299,6 @@ async def _handle_start_camera(cmd) -> None:
         )
         return
 
-    # Dedup in-flight starts
     if camera_id in _starting_cameras:
         logger.warning("StartCamera for %s already in flight — ignoring", camera_id)
         return
@@ -361,27 +307,24 @@ async def _handle_start_camera(cmd) -> None:
     try:
         loop = asyncio.get_running_loop()
 
-        # Step 1: start IEP2 container (blocking Docker call in executor)
-        env = _build_iep2_env(camera_id, store_id)
-        await loop.run_in_executor(_docker_exec, dm.start_iep2, store_id, camera_id, env)
+        # Step 1: write ConfigMap and Deployment to k3s
+        cm_data = _build_configmap_data(camera_id, store_id, cmd.rtsp_url, cmd.target_fps)
+        await loop.run_in_executor(_k8s_exec, km.apply_camera_configmap, camera_id, cm_data)
+        await loop.run_in_executor(_k8s_exec, km.apply_iep2_deployment, camera_id)
 
-        # Step 2: wait for IEP2 health SERVING
-        await _wait_for_iep2_health(camera_id, timeout=30)
+        # Step 2: wait for IEP2 to report SERVING on its unix health socket
+        await _wait_for_iep2_health(camera_id, timeout=60)
 
-        # Step 3: add camera to IEP1 daemon (IEP2 is ready to consume)
-        cam = CameraState(
-            camera_id=camera_id,
-            store_id=store_id,
-            iep2_running=True,
-            iep1_added=False,
-            rtsp_url=cmd.rtsp_url,
-            target_fps=cmd.target_fps,
-            window_seconds=cmd.window_seconds or WINDOW_SECONDS,
+        # Step 3: add to IEP1 — IEP2 is now ready to consume from the Redis stream
+        window_seconds = cmd.window_seconds or WINDOW_SECONDS
+        await _add_camera_to_iep1(
+            camera_id, store_id, cmd.rtsp_url, cmd.target_fps, window_seconds
         )
-        await _add_camera_to_daemon(cam)
-        _tracked_cameras[camera_id] = cam
 
-        # Step 4: start per-camera health watcher (R1)
+        # Step 4: start per-camera health watcher (replace any stale task)
+        if camera_id in _health_watchers:
+            _health_watchers[camera_id].cancel()
+            await asyncio.gather(_health_watchers[camera_id], return_exceptions=True)
         _health_watchers[camera_id] = asyncio.create_task(
             _watch_iep2_health(camera_id),
             name=f"iep2-watch-{camera_id}",
@@ -391,19 +334,16 @@ async def _handle_start_camera(cmd) -> None:
         logger.info("StartCamera complete  camera=%s", camera_id)
 
     except Exception as exc:
-        logger.error(
-            "StartCamera failed  camera=%s: %s", camera_id, exc, exc_info=True
-        )
+        logger.error("StartCamera failed  camera=%s: %s", camera_id, exc, exc_info=True)
     finally:
         _starting_cameras.discard(camera_id)
 
 
 async def _handle_stop_camera(cmd) -> None:
-    """R5: IEP1 stops publishing before IEP2 stops consuming."""
+    """Cancel watcher, remove from IEP1, then delete k3s Deployment + ConfigMap."""
     camera_id = cmd.camera_id
     store_id  = cmd.store_id
 
-    # R8: reject commands for other stores
     if store_id != STORE_ID:
         logger.error(
             "StopCamera for wrong store %s (this device is %s) — ignoring",
@@ -411,40 +351,34 @@ async def _handle_stop_camera(cmd) -> None:
         )
         return
 
-    # R8 (M3-S2): cancel health watcher before stopping container
+    # Cancel health watcher before stopping (avoids spurious status reports)
     watcher = _health_watchers.pop(camera_id, None)
     if watcher:
         watcher.cancel()
         await asyncio.gather(watcher, return_exceptions=True)
 
     loop = asyncio.get_running_loop()
-    cam  = _tracked_cameras.get(camera_id)
 
     # Step 1: remove from IEP1 (stops publishing immediately)
-    if cam and cam.iep1_added:
-        try:
-            async with grpc.aio.insecure_channel(IEP1_CONTROL_SOCK) as ch:
-                stub = Iep1ControlStub(ch)
-                await stub.RemoveCamera(
-                    RemoveCameraRequest(camera_id=camera_id), timeout=5.0
-                )
-            logger.info("RemoveCamera ok  camera=%s", camera_id)
-        except Exception as exc:
-            logger.warning("RemoveCamera failed  camera=%s: %s", camera_id, exc)
+    try:
+        async with grpc.aio.insecure_channel(IEP1_CONTROL_SOCK) as ch:
+            stub = Iep1ControlStub(ch)
+            await stub.RemoveCamera(
+                RemoveCameraRequest(camera_id=camera_id), timeout=5.0
+            )
+        logger.info("RemoveCamera ok  camera=%s", camera_id)
+    except Exception as exc:
+        logger.warning("RemoveCamera failed  camera=%s: %s", camera_id, exc)
 
-    # Step 2: stop IEP2 container (drains remaining manifests then exits)
-    effective_store_id = cam.store_id if cam else store_id
-    await loop.run_in_executor(
-        _docker_exec, dm.stop_iep2, effective_store_id, camera_id
-    )
-    _tracked_cameras.pop(camera_id, None)
+    # Step 2: delete k3s Deployment + ConfigMap
+    await loop.run_in_executor(_k8s_exec, km.delete_iep2, camera_id)
 
     await _send_immediate_status(camera_id)
     logger.info("StopCamera complete  camera=%s", camera_id)
 
 
 async def _handle_control(ctrl_msg) -> None:
-    # Dispatch as tasks so slow Docker operations don't block the EEP stream reader
+    # Dispatch as tasks so K8s operations don't block the EEP stream reader
     if ctrl_msg.HasField("start_camera"):
         logger.info("StartCamera received  camera=%s", ctrl_msg.start_camera.camera_id)
         asyncio.create_task(_handle_start_camera(ctrl_msg.start_camera))
@@ -456,7 +390,7 @@ async def _handle_control(ctrl_msg) -> None:
 # ── Status reporting ───────────────────────────────────────────────────────────
 
 def _enqueue_status(msg: AgentMessage) -> None:
-    """Non-blocking enqueue for status reports. Drops + warns if queue is full (R7)."""
+    """Non-blocking enqueue. Drops and warns if queue is full (R7)."""
     try:
         _outgoing.put_nowait(msg)
     except asyncio.QueueFull:
@@ -467,14 +401,9 @@ def _enqueue_status(msg: AgentMessage) -> None:
 
 
 async def _send_immediate_status(camera_id: str) -> None:
-    """Get Docker container status and enqueue a CameraStatusReport immediately (R2)."""
-    loop = asyncio.get_running_loop()
-    cam  = _tracked_cameras.get(camera_id)
-    if cam:
-        name   = dm.iep2_container_name(cam.store_id, camera_id)
-        status = await loop.run_in_executor(_docker_exec, dm.get_container_status, name)
-    else:
-        status = "not_found"
+    """Query K8s pod status and enqueue a CameraStatusReport immediately."""
+    loop   = asyncio.get_running_loop()
+    status = await loop.run_in_executor(_k8s_exec, km.get_camera_k8s_status, camera_id)
     _enqueue_status(AgentMessage(
         camera_status=CameraStatusReport(
             camera_id=camera_id,
@@ -485,10 +414,9 @@ async def _send_immediate_status(camera_id: str) -> None:
 
 
 async def _heartbeat_loop(store_id: str, agent_version: str) -> None:
-    """Slow path: heartbeat + full camera status sweep every HEARTBEAT_INTERVAL_S (R3)."""
+    """Heartbeat + per-camera K8s status sweep every HEARTBEAT_INTERVAL_S."""
     loop = asyncio.get_running_loop()
     while True:
-        # Heartbeat always gets through (queue bounded but not full under normal ops)
         try:
             _outgoing.put_nowait(AgentMessage(
                 heartbeat=Heartbeat(
@@ -500,10 +428,11 @@ async def _heartbeat_loop(store_id: str, agent_version: str) -> None:
         except asyncio.QueueFull:
             logger.warning("Outgoing queue full — dropping heartbeat")
 
-        for camera_id, cam in list(_tracked_cameras.items()):
-            name   = dm.iep2_container_name(cam.store_id, camera_id)
+        # Query k3s for current camera list (source of truth)
+        active = await loop.run_in_executor(_k8s_exec, km.get_active_camera_ids)
+        for camera_id in active:
             status = await loop.run_in_executor(
-                _docker_exec, dm.get_container_status, name
+                _k8s_exec, km.get_camera_k8s_status, camera_id
             )
             _enqueue_status(AgentMessage(
                 camera_status=CameraStatusReport(
@@ -525,14 +454,14 @@ async def _request_generator():
 
 async def _connect_to_eep(grpc_url: str, store_id: str, agent_version: str) -> None:
     async with grpc.aio.insecure_channel(grpc_url) as channel:
-        stub = AgentServiceStub(channel)
-        hb_task    = asyncio.create_task(_heartbeat_loop(store_id, agent_version))
-        watch_task = asyncio.create_task(_iep1_health_watcher())
+        stub    = AgentServiceStub(channel)
+        hb_task = asyncio.create_task(_heartbeat_loop(store_id, agent_version))
+        wt_task = asyncio.create_task(_iep1_health_watcher())
         try:
             async for ctrl_msg in stub.Connect(_request_generator()):
                 await _handle_control(ctrl_msg)
         finally:
-            for task in (hb_task, watch_task):
+            for task in (hb_task, wt_task):
                 task.cancel()
                 try:
                     await task

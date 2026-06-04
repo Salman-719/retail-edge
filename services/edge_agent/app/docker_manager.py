@@ -1,5 +1,8 @@
 """Docker lifecycle management for the edge pipeline.
 
+DEPRECATED — superseded by k8s_manager.py in the M3-S4 k3s deployment model.
+Retained for reference. Not imported by agent.py.
+
 Manages:
   - yolo-service / osnet-service  (long-lived, one per device, GPU)
   - iep1-daemon                   (long-lived, one per device)

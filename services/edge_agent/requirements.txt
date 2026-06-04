@@ -2,4 +2,4 @@ grpcio==1.64.0
 grpcio-tools==1.64.0
 grpcio-health-checking==1.64.0
 protobuf==4.25.3
-docker==7.1.0
+kubernetes==29.0.0
