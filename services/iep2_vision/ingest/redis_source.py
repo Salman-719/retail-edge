@@ -7,7 +7,6 @@ and handle S3 themselves.
 import json
 import logging
 
-import boto3
 import redis.asyncio as aioredis
 
 log = logging.getLogger("iep2.redis_source")
@@ -19,6 +18,7 @@ READ_COUNT    = 10
 
 
 def make_s3_client(endpoint_url: str, access_key: str, secret_key: str):
+    import boto3  # lazy — boto3 is not in IEP2 requirements; only needed for S3 mode (not tmpfs daemon mode)
     kwargs = dict(
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,

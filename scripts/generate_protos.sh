@@ -9,8 +9,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # ── Sync service proto dirs from canonical source ─────────────────────────────
-cp proto/agent.proto       services/eep/proto/agent.proto
-cp proto/agent.proto       services/edge_agent/proto/agent.proto
+mkdir -p services/eep/proto services/edge_agent/proto services/iep1_ingestion/proto
+cp proto/agent.proto        services/eep/proto/agent.proto
+cp proto/agent.proto        services/edge_agent/proto/agent.proto
 cp proto/iep1_control.proto services/iep1_ingestion/proto/iep1_control.proto
 cp proto/iep1_control.proto services/edge_agent/proto/iep1_control.proto
 
@@ -23,6 +24,8 @@ python -m grpc_tools.protoc \
 
 sed -i 's/^import agent_pb2/from app.grpc_generated import agent_pb2/' \
   services/eep/app/grpc_generated/agent_pb2_grpc.py
+sed -i '1s/^/# AUTO-GENERATED — see proto\/agent.proto. Regenerate via: make proto\n/' \
+  services/eep/app/grpc_generated/agent_pb2_grpc.py
 
 # ── Edge Agent: agent stubs ───────────────────────────────────────────────────
 python -m grpc_tools.protoc \
@@ -32,6 +35,8 @@ python -m grpc_tools.protoc \
   proto/agent.proto
 
 sed -i 's/^import agent_pb2/from app.grpc_generated import agent_pb2/' \
+  services/edge_agent/app/grpc_generated/agent_pb2_grpc.py
+sed -i '1s/^/# AUTO-GENERATED — see proto\/agent.proto. Regenerate via: make proto\n/' \
   services/edge_agent/app/grpc_generated/agent_pb2_grpc.py
 
 # ── Edge Agent: iep1_control stubs (client) ───────────────────────────────────

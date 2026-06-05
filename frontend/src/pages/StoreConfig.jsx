@@ -781,8 +781,7 @@ export default function StoreConfig() {
                     </p>
                   )}
                 </div>
-              ))
-              })}
+              ))}
             </div>
           </div>
         )}

@@ -19,7 +19,11 @@ from sqlalchemy import pool
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False is required: the default True would disable
+    # all loggers not listed in alembic.ini (including uvicorn, uvicorn.access)
+    # because Alembic runs inside the uvicorn process via run_in_executor.
+    # Without this flag, uvicorn logs go permanently silent after migrations run.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 
 def _resolve_url() -> str:

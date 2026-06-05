@@ -24,4 +24,4 @@ EXPOSE 8002
 
 # Daemon mode (production): reads env vars, no CLI args.
 # Dev mode: override CMD with uvicorn for the FastAPI upload UI (see iep2_dev in docker-compose).
-CMD ["python", "services/iep2_vision/main.py"]
+CMD ["python", "-m", "services.iep2_vision.main"]

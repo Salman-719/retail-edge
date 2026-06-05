@@ -137,18 +137,24 @@ class CameraWorker:
             consecutive_failures = 0
             self._status = "capturing"
             ts = now_ms()
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._frame_queue.put_nowait((ts, frame)),
-                    self._loop,
-                )
-            except asyncio.QueueFull:
-                self._frames_dropped += 1
-                if self._frames_dropped % 100 == 0:
-                    logger.warning(
-                        "camera=%s dropped %d frames (queue full)",
-                        self._config.camera_id, self._frames_dropped,
-                    )
+            # Schedule put_nowait on the event loop thread — the only correct
+            # way to call asyncio.Queue methods from a non-async thread.
+            # put_nowait is NOT a coroutine; passing it to run_coroutine_threadsafe
+            # evaluates it immediately and then passes None, raising TypeError.
+            item = (ts, frame)
+
+            def _enqueue(q=self._frame_queue, it=item):
+                try:
+                    q.put_nowait(it)
+                except asyncio.QueueFull:
+                    self._frames_dropped += 1
+                    if self._frames_dropped % 100 == 0:
+                        logger.warning(
+                            "camera=%s dropped %d frames (queue full)",
+                            self._config.camera_id, self._frames_dropped,
+                        )
+
+            self._loop.call_soon_threadsafe(_enqueue)
 
         cap.release()
         logger.info("camera=%s capture thread exiting", self._config.camera_id)

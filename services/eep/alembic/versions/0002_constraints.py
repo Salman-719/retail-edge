@@ -23,30 +23,42 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # ADD CONSTRAINT IF NOT EXISTS is not valid PostgreSQL syntax in any released version.
+    # Use DO $$ ... EXCEPTION WHEN duplicate_object THEN NULL; END; $$ instead —
+    # the canonical PostgreSQL idiom for idempotent constraint addition.
+
     # Unique constraint: prevents double-writing the same frame observation.
     op.execute(sa.text(
+        "DO $$ BEGIN "
         "ALTER TABLE tracking_history "
-        "ADD CONSTRAINT IF NOT EXISTS uq_tracking_history_observation "
-        "UNIQUE (camera_id, local_id, timestamp_ms)"
+        "ADD CONSTRAINT uq_tracking_history_observation "
+        "UNIQUE (camera_id, local_id, timestamp_ms); "
+        "EXCEPTION WHEN duplicate_object THEN NULL; END; $$"
     ))
 
     # centroid BYTEA must hold exactly 512 float32 values = 512 * 4 = 2048 bytes.
     op.execute(sa.text(
+        "DO $$ BEGIN "
         "ALTER TABLE local_centroids "
-        "ADD CONSTRAINT IF NOT EXISTS chk_centroid_size "
-        "CHECK (octet_length(centroid) = 2048)"
+        "ADD CONSTRAINT chk_centroid_size "
+        "CHECK (octet_length(centroid) = 2048); "
+        "EXCEPTION WHEN duplicate_object THEN NULL; END; $$"
     ))
     op.execute(sa.text(
+        "DO $$ BEGIN "
         "ALTER TABLE global_embeddings "
-        "ADD CONSTRAINT IF NOT EXISTS chk_embedding_size "
-        "CHECK (octet_length(centroid) = 2048)"
+        "ADD CONSTRAINT chk_embedding_size "
+        "CHECK (octet_length(centroid) = 2048); "
+        "EXCEPTION WHEN duplicate_object THEN NULL; END; $$"
     ))
 
     # Enforce schedule time ordering at DB level (also validated in Pydantic schema).
     op.execute(sa.text(
+        "DO $$ BEGIN "
         "ALTER TABLE camera_schedules "
-        "ADD CONSTRAINT IF NOT EXISTS chk_schedule_time "
-        "CHECK (start_time < end_time)"
+        "ADD CONSTRAINT chk_schedule_time "
+        "CHECK (start_time < end_time); "
+        "EXCEPTION WHEN duplicate_object THEN NULL; END; $$"
     ))
 
     # Zone display priority — 0 = default render order.

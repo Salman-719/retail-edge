@@ -12,7 +12,7 @@ services:
   # ─── Infrastructure ───────────────────────────────────────────────────────────
 
   postgres:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-retailvision}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-retailvision_dev}
