@@ -135,39 +135,67 @@ The defaults in `.env` work for local development — no edits needed. All servi
 
 ### 3. Build images
 
-```bash
-docker compose build
+**Windows (PowerShell):**
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 ```
 
-First build takes several minutes (YOLO, OpenCV, grpcio, k8s client).
+**macOS / Linux:**
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml build
+```
+
+> **Why the dev overlay?** The base `docker-compose.yml` builds YOLO and OSNet
+> from Jetson/ARM64 JetPack base images that cannot build or run on x86.
+> `docker-compose.dev.yml` overrides both to CPU-only variants (ultralytics
+> YOLOv8n on CPU for YOLO; ResNet-18 + avgpool + L2-norm for OSNet). The dev
+> override must always be included on any non-Jetson machine.
+
+First build takes several minutes (model download, OpenCV, grpcio, k8s client).
 
 ### 4. Start infrastructure + server services
 
+**Windows (PowerShell):**
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge
+```
+
+**macOS / Linux:**
 ```bash
-docker compose up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge
 ```
 
 Wait for healthy status:
 
-```bash
-docker compose ps
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 ```
 
-EEP first startup automatically runs schema migrations and creates the MinIO bucket.
+EEP first startup automatically runs Alembic schema migrations. Allow 30–60 s for YOLO model load.
 
-### 5. Start the edge stack (dev mode — same machine)
+### 5. Start the edge inference services
 
-```bash
-docker compose --profile edge up -d iep1-daemon yolo-service osnet-service edge_agent_dev
+YOLO and OSNet must be running before IEP1 or IEP2 can start.
+
+**Windows (PowerShell):**
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d yolo-service osnet-service iep1-daemon
 ```
 
-### 6. Start the frontend
-
+**macOS / Linux:**
 ```bash
-cd frontend && npm install && npm run dev
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d yolo-service osnet-service iep1-daemon
 ```
 
-Open **http://localhost:5173**. API docs at **http://localhost:8000/docs**.
+> The Edge Agent (`edge_agent_dev`) requires a valid kubeconfig to init the k3s
+> API client. On dev machines without k3s, start it only if you need to test the
+> gRPC stream to EEP: `docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile edge up -d edge_agent_dev`
+
+### 6. Open the web UI
+
+The frontend is served by the compose `frontend` service:
+
+Open **http://localhost:3000**. API docs at **http://localhost:8000/docs**.
 
 ---
 
@@ -279,23 +307,32 @@ docker compose run --rm eep pytest services/eep/tests/ -v
 docker compose up iep1-daemon
 ```
 
-**Process a local video file directly (CLI mode):**
+**Add a camera via the gRPC control socket (all camera operations go through gRPC):**
 ```bash
-docker compose run --rm \
-  -e LOCAL_REDIS_URL=redis://redis:6379/0 \
-  -e STORE_ID=00000000-0000-0000-0000-000000000001 \
-  -v $(pwd)/testing-data:/testing-data:ro \
-  iep1-daemon \
-  python -m services.iep1_ingestion.app.main \
-    --source video \
-    --file /testing-data/sample.mp4 \
-    --camera-id 00000000-0000-0000-0000-000000000002
+# IEP1 has no CLI args for cameras — all operations are gRPC AddCamera / RemoveCamera.
+# Use a video file path as the rtsp_url for dev testing; cv2.VideoCapture accepts file paths.
+docker compose -f docker-compose.yml -f docker-compose.dev.yml exec iep1-daemon python -c "
+import grpc
+from services.iep1_ingestion.app.grpc_generated import iep1_control_pb2 as pb2
+ch = grpc.insecure_channel('unix:///tmp/iep1-sockets/iep1_control.sock')
+ac = ch.unary_unary('/retailvision.iep1.v1.Iep1Control/AddCamera',
+    request_serializer=pb2.CameraConfig.SerializeToString,
+    response_deserializer=pb2.AddCameraResponse.FromString)
+r = ac(pb2.CameraConfig(
+    camera_id='<physical_camera_uuid>',
+    rtsp_url='/workspace/testing-data/sample.mp4',
+    target_fps=5.0,
+    window_seconds=60.0,
+    store_id='<store_uuid>',
+), timeout=5.0)
+print('success:', r.success, r.error)
+"
 ```
 
 **Verify Redis stream after one window (60 s):**
 ```bash
-docker compose exec redis redis-cli XLEN stream:iep1:00000000-0000-0000-0000-000000000002
-# > 1 (one batch manifest)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml exec redis redis-cli XLEN stream:iep1:<physical_camera_uuid>
+# > 0 means at least one manifest published
 ```
 
 **Logs:**
@@ -309,21 +346,30 @@ docker compose logs -f iep1-daemon
 
 **What it does:** Per-camera YOLO → ByteTrack → OSNet ReID → homography → `tracking_history`. One Deployment per active camera (created by Edge Agent on k3s; one compose service in dev).
 
-**Start with Compose (requires `CAMERA_ID`):**
-```bash
-CAMERA_ID=<physical_camera_uuid> docker compose up iep2_vision
+**Start with Compose (requires `CAMERA_ID`, `STORE_ID`, Redis URLs, and DB URL):**
+
+**Windows (PowerShell):**
+```powershell
+$env:CAMERA_ID = "<physical_camera_uuid>"
+$env:STORE_ID  = "<store_uuid>"
+$env:WINDOW_SECONDS = "60"
+$env:LOCAL_REDIS_URL  = "redis://redis:6379/0"
+$env:SERVER_REDIS_URL = "redis://redis:6379/0"
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev up -d iep2_vision
 ```
 
-**Process a local video file (daemon mode reading from Redis):**
+**macOS / Linux:**
 ```bash
-docker compose run --rm \
-  -e CAMERA_ID=00000000-0000-0000-0000-000000000002 \
-  -e STORE_ID=00000000-0000-0000-0000-000000000001 \
-  -e LOCAL_REDIS_URL=redis://redis:6379/0 \
-  -e SERVER_REDIS_URL=redis://redis:6379/0 \
-  -e DATABASE_URL_SERVER=postgresql://retailvision:retailvision_dev@pgbouncer:5432/retailvision \
-  iep2_vision
+CAMERA_ID=<physical_camera_uuid> \
+STORE_ID=<store_uuid> \
+WINDOW_SECONDS=60 \
+LOCAL_REDIS_URL=redis://redis:6379/0 \
+SERVER_REDIS_URL=redis://redis:6379/0 \
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev up -d iep2_vision
 ```
+
+IEP2 reads IEP1 manifests from the Redis stream for `CAMERA_ID` and processes each
+frame batch through YOLO → ByteTrack → OSNet → homography → `tracking_history`.
 
 **Verify tracking rows after one batch:**
 ```bash
@@ -451,7 +497,7 @@ docker compose --profile edge up -d iep1-daemon yolo-service osnet-service edge_
 
 ### Step 2 — Create a store, add cameras, configure schedules
 
-Use the frontend at **http://localhost:5173** (onboarding wizard steps 1–9) or the API at **http://localhost:8000/docs**.
+Use the frontend at **http://localhost:3000** (onboarding wizard steps 1–9) or the API at **http://localhost:8000/docs**.
 
 ### Step 3 — Trigger a camera manually
 
@@ -487,10 +533,17 @@ docker compose exec postgres psql -U retailvision -d retailvision \
 
 ## Testing
 
-### Unit tests — IEP3 (no infrastructure)
+### Unit tests — IEP3 (no infrastructure required)
+
+Tests run using the project `tests/` Dockerfile so the correct deps are installed:
 
 ```bash
-docker compose run --rm iep3_reconciliation pytest tests/unit/iep3/ -v
+# Build the test image (one-time)
+docker build -t retailvision-tests tests/
+
+# Run IEP3 unit tests — no postgres, redis, or any running service needed
+docker run --rm -v $(pwd):/workspace -w /workspace retailvision-tests \
+  pytest tests/unit/iep3/ -v
 ```
 
 | Test file | What it tests | Count |
@@ -500,40 +553,24 @@ docker compose run --rm iep3_reconciliation pytest tests/unit/iep3/ -v
 | `test_selector.py` | `PositionSelector` scoring + canonical position | 5 |
 | `test_state.py` | `StateManager` ACTIVE→LOST→EXITED transitions | 6 |
 
-### Integration test — IEP3 3-camera reconciliation (requires Postgres)
+### Integration test — IEP3 3-camera reconciliation (requires Postgres only)
 
 ```bash
-docker compose up -d postgres pgbouncer
-docker compose run --rm \
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres pgbouncer
+docker run --rm \
+  --network retail-edge_default \
+  -v $(pwd):/workspace -w /workspace \
   -e DATABASE_URL_SERVER=postgresql://retailvision:retailvision_dev@pgbouncer:5432/retailvision \
-  iep3_reconciliation pytest tests/e2e/test_iep3_reconciler.py -v -s
+  retailvision-tests pytest tests/e2e/test_iep3_reconciler.py -v -s
 ```
 
 No Redis, IEP1, IEP2, or EEP needed. Test data is cleaned up via CASCADE delete.
 
-### End-to-end test — full pipeline (requires running stack)
+### End-to-end pipeline test
 
-**Prerequisites:**
-- Full stack running (step 1 of full pipeline above)
-- Edge Agent online (`status = online` in `edge_agents`)
-- A camera triggered and running for at least 60 seconds
-
-```bash
-docker compose run --rm \
-  -e DATABASE_URL=postgresql+asyncpg://retailvision:retailvision_dev@pgbouncer:5432/retailvision \
-  -e REDIS_URL=redis://redis:6379/0 \
-  -e S3_ENDPOINT_URL=http://minio:9000 \
-  -e S3_ACCESS_KEY=retailvision \
-  -e S3_SECRET_KEY=retailvision_dev \
-  -e S3_BUCKET=retailvision \
-  -e E2E_CAMERA_ID=<physical_camera_uuid> \
-  -e E2E_STORE_ID=<store_uuid> \
-  eep pytest tests/e2e/test_full_pipeline.py -v
-```
-
-> `E2E_CAMERA_ID` is `physical_cameras.id` — not `camera_configs.id`. These are different UUIDs.
-
-**Expected output: 10 tests pass** — rows exist, IDs are UUIDs, floor coords populated, S3 frames present, consumer group exists, no pending messages.
+See `docs/TESTING_GUIDE.md` Phases 3–6 for the full, platform-accurate E2E
+testing procedure (UI-driven store setup → edge pipeline → accuracy validation),
+with separate Windows (PowerShell) and Linux/Jetson command variants.
 
 ---
 
@@ -691,8 +728,9 @@ journalctl -u retailvision-edge-agent -f
 ### Updating edge images (zero-downtime rolling update)
 
 ```bash
+# Image tag convention: retail-edge-{service}:latest (or a pinned digest for production)
 k3s kubectl set image deployment/yolo-service \
-  yolo-service=retailvision-yolo-service:1.1.0 \
+  yolo-service=retail-edge-yolo-service:latest \
   -n retailvision
 k3s kubectl rollout status deployment/yolo-service -n retailvision
 ```
@@ -785,7 +823,10 @@ Camera (RTSP / video file)
                               └─ StateManager: ACTIVE→LOST→EXITED
 ```
 
-`local_id` is a UUID derived from the ByteTrack integer: `uuid.UUID(int=track_id)`.
+`local_id` is a stable UUID minted by `LocalIdentityManager` using an atomic Redis counter
+(`iep2:id_counter:{camera_id}`). The `track_id → local_id` binding is stored in-process
+and survives across batches within one IEP2 instance lifetime. The counter survives IEP2
+restarts because it lives in Redis.
 `floor_x`/`floor_y`/`zone_id` are `NULL` until a homography calibration exists.
 
 ---
@@ -824,16 +865,16 @@ First message from any agent **must** be a `Heartbeat`. EEP aborts with `INVALID
 
 Auth: each RPC carries `x-agent-token: <shared_secret>` metadata. Empty `AGENT_SECRET` disables auth (dev mode).
 
-Regenerate stubs after editing `services/eep/proto/agent.proto`:
+Regenerate stubs after editing `proto/agent.proto` or `proto/iep1_control.proto`:
 
 ```bash
-docker compose run --rm eep python -m grpc_tools.protoc \
-  -I services/eep/proto \
-  --python_out=services/eep/app/grpc_generated \
-  --grpc_python_out=services/eep/app/grpc_generated \
-  services/eep/proto/agent.proto
-# Then fix the relative import in agent_pb2_grpc.py and repeat for services/edge_agent/
+# Runs protoc in a grpcio-tools container, applies import fixes, and touches __init__.py
+bash scripts/generate_protos.sh
 ```
+
+The script regenerates stubs for all three consumers (EEP, Edge Agent, IEP1) in one
+pass and applies the correct package-relative import path fix for each service.
+After regeneration, stage and commit the updated `*_pb2.py` / `*_pb2_grpc.py` files.
 
 ---
 
