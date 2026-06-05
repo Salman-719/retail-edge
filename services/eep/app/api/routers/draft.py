@@ -1557,9 +1557,9 @@ async def activate_draft(
                 FloorPlan.version_id == draft.id,
                 FloorPlan.section_id == section.id,
                 FloorPlan.image_uploaded == True,
-            )
+            ).limit(1)
         )
-        if fp_r.scalar_one_or_none():
+        if fp_r.scalars().first():
             has_floor_plan = True
             break
 
@@ -1574,9 +1574,9 @@ async def activate_draft(
         select(CameraConfig).where(
             CameraConfig.version_id == draft.id,
             CameraConfig.status == "verified",
-        )
+        ).limit(1)
     )
-    if not verified_result.scalar_one_or_none():
+    if not verified_result.scalars().first():
         raise HTTPException(
             status_code=422,
             detail={

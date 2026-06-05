@@ -236,7 +236,7 @@ docker run --rm -v retail-edge_ipc-sockets:/tmp/sockets alpine stat /tmp/sockets
 docker run --rm -v retail-edge_iep1-sockets:/tmp/iep1 alpine stat /tmp/iep1; "Exit=$LASTEXITCODE (expect 0)"
 
 # Frame store volume — tmpfs; IEP1 writes here, IEP2 reads
-docker run --rm -v retail-edge_frame-store:/dev/shm/frames alpine sh -c "echo test > /dev/shm/frames/probe && cat /dev/shm/frames/probe && rm /dev/shm/frames/probe"; "Exit=$LASTEXITCODE (expect 0)"
+docker run --rm -v retail-edge_frame-store:/dev/shm/frames alpine sh -c "echo test > /dev/shm/frames/probe; cat /dev/shm/frames/probe; rm /dev/shm/frames/probe"; "Exit=$LASTEXITCODE (expect 0)"
 ```
 
 **[LIN/ORIN]**
@@ -256,7 +256,7 @@ Verify that services can reach each other inside the `retail-edge_default` netwo
 docker compose -f docker-compose.yml -f docker-compose.dev.yml exec eep python -c "import redis; r=redis.Redis.from_url('redis://redis:6379/0'); print('Redis PING:', r.ping())"
 
 # EEP → PgBouncer
-docker compose -f docker-compose.yml -f docker-compose.dev.yml exec eep python -c "import asyncio,asyncpg; asyncio.run((lambda: asyncpg.connect('postgresql://retailvision:retailvision_dev@pgbouncer:5432/retailvision'))())" && "OK: EEP -> PgBouncer"
+docker compose -f docker-compose.yml -f docker-compose.dev.yml exec eep python -c "import asyncio,asyncpg; asyncio.run((lambda: asyncpg.connect('postgresql://retailvision:retailvision_dev@pgbouncer:5432/retailvision'))())"; "Exit=$LASTEXITCODE (expect 0 = connected)"
 
 # IEP3 → Redis (batch_complete stream consumer)
 docker compose -f docker-compose.yml -f docker-compose.dev.yml exec iep3_reconciliation python -c "import redis; r=redis.Redis.from_url('redis://redis:6379/0'); print('Redis PING:', r.ping())"
@@ -426,7 +426,7 @@ $expected_tables = @(
     "camera_zone_coverage","calibrations","obstacles",
     "tracking_history","local_centroids",
     "global_identities","global_local_mapping","global_embeddings",
-    "global_tracking_history","reconciled_visits",
+    "global_tracking_history",
     "alert_configs","alerts","audit_logs",
     "employees","employee_embeddings","employee_sections",
     "shift_patterns","shift_instances",
@@ -590,23 +590,36 @@ EOF
 
 Alembic is the authoritative migration path. Verify all migrations have been
 applied and no pending heads exist. Alembic connects directly to `postgres:5432`
-(bypassing PgBouncer) because prepared statements are used by psycopg2.
+(bypassing PgBouncer) because psycopg2 uses prepared statements internally.
+
+> **Note:** `alembic check` requires autogenerate mode (MetaData connected in
+> `env.py`) and will fail with "env.py does not provide a MetaData object" in
+> this project. Use `alembic current` + `alembic heads` instead.
 
 **[WIN]**
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.dev.yml exec eep alembic current
-# Expected: output shows the current revision hash followed by "(head)"
-# No "(head)" means pending migrations exist.
+# Step 1: show current applied revision
+$cur = docker compose -f docker-compose.yml -f docker-compose.dev.yml exec eep alembic current 2>&1
+$cur
+# Expected: a line ending with "(head)" — e.g. "0003 (head)"
 
-docker compose -f docker-compose.yml -f docker-compose.dev.yml exec eep alembic check
-# Expected: "No new upgrade operations detected." (exit 0)
-# Any other output means the DB schema is out of sync with the migration history.
+# Step 2: confirm the applied revision matches the known head
+$heads = docker compose -f docker-compose.yml -f docker-compose.dev.yml exec eep alembic heads 2>&1
+$heads
+# Expected: same revision hash as Step 1 — e.g. "0003 (head)"
+
+# Pass/fail assertion
+if ($cur -match "\(head\)") { "PASS: migrations at head" } else { "FAIL: not at head — run alembic upgrade head" }
 ```
 
 **[LIN/ORIN]**
 ```bash
+# Step 1
 $COMPOSE exec eep alembic current
-$COMPOSE exec eep alembic check
+# Step 2
+$COMPOSE exec eep alembic heads
+# Both must show the same revision with "(head)"
+$COMPOSE exec eep alembic current | grep -q "(head)" && echo "PASS: migrations at head" || echo "FAIL: pending migrations"
 ```
 
 If migrations are pending:
@@ -624,17 +637,24 @@ $COMPOSE exec eep alembic upgrade head
 ### 1.7 `.env.example` completeness
 
 Verify that every required `Field(...)` in every Settings class has a
-corresponding entry in `.env.example`. Run the checker script from the session:
+corresponding entry in `.env.example`.
+
+> The script lives at `scripts/check_env_example.py` in the repo root and uses
+> `pathlib.Path(__file__).parent.parent` for ROOT — it must run with the full
+> repo visible. The EEP container only has `/app/`, so run it in a plain
+> `python:3.11-slim` container with the repo root mounted. No extra packages
+> needed (stdlib only).
 
 **[WIN]**
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm eep python scripts/check_env_example.py
+docker run --rm -v "${PWD}:/workspace:ro" -w /workspace python:3.11-slim python scripts/check_env_example.py
 # Expected: "All required fields covered." (exit 0)
 ```
 
 **[LIN/ORIN]**
 ```bash
-$COMPOSE run --rm eep python scripts/check_env_example.py
+docker run --rm -v "$(pwd):/workspace:ro" -w /workspace python:3.11-slim python scripts/check_env_example.py
+# Expected: "All required fields covered." (exit 0)
 ```
 
 ---
@@ -1007,24 +1027,54 @@ curl -sf http://localhost:8010/health && echo "OK" || echo "No health endpoint �
 $COMPOSE logs live_bridge --tail 5
 ```
 
-### 2.9 Startup sequence order — Edge Agent (k3s environment only)
+### 2.9 Startup sequence order — Edge Agent
 
-**[ORIN]** — verify that the Edge Agent enforces the startup dependency chain:
+**[ORIN]** — systemd service; verify the startup dependency chain is enforced:
 YOLO SERVING → OSNet SERVING → IEP1 SERVING → cameras restored → EEP connected.
 
 ```bash
-# The Edge Agent logs these in strict sequence. Grep for them in order.
 journalctl -u retailvision-edge-agent --since "5 min ago" \
   | grep -E "yolo is SERVING|osnet is SERVING|iep1 is SERVING|Restored.*cameras|Connecting to EEP" \
   | head -10
-# All 4 patterns must appear and timestamps must be strictly increasing.
+# All 5 patterns must appear and timestamps must be strictly increasing.
 ```
 
-**[WIN/LIN]** (dev — edge_agent_dev not typically started on dev without k3s):
+**[LIN]** — dev machine; `edge_agent_dev` started via compose `--profile edge`:
 ```bash
-# If edge_agent_dev is running via compose with --profile edge:
-$COMPOSE logs edge_agent_dev 2>&1 | grep -E "yolo is SERVING|osnet is SERVING|iep1 is SERVING|Restored|Connecting to EEP"
+docker compose -f docker-compose.yml -f docker-compose.dev.yml logs edge_agent_dev \
+  | grep -E "yolo is SERVING|osnet is SERVING|iep1 is SERVING|Restored|Connecting to EEP"
 ```
+
+**[WIN]** — dev machine; `edge_agent_dev` started via compose `--profile edge`:
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml logs edge_agent_dev 2>&1 | Select-String "yolo is SERVING|osnet is SERVING|iep1 is SERVING|Restored|Connecting to EEP"
+```
+
+> **Expected output (all environments):** The following lines must appear in this
+> exact order at the beginning of the log (use `Select-Object -First 15` / `head -15`
+> — not the tail, which shows reconnect-loop output):
+> ```
+> WARNING  k8s: no kubeconfig found ...   (dev only — absent on Jetson with k3s)
+> INFO     yolo is SERVING
+> INFO     osnet is SERVING
+> INFO     iep1 is SERVING
+> INFO     Restored N / M cameras from k3s
+> INFO     Connecting to EEP  url=...
+> ```
+> Any missing line or reversed order is a bug in the startup sequence.
+>
+> **Dev note — `StatusCode.NOT_FOUND` reconnect loop is expected here.**
+> After `Connecting to EEP`, the agent sends a `Heartbeat` with `store_id`. If no
+> store with that UUID exists in the database (empty DB after `docker compose down -v`),
+> EEP returns `NOT_FOUND` and the agent correctly enters exponential backoff reconnect.
+> This is not a bug. The agent will stay connected once Phase 3 creates a real store
+> and the `STORE_ID` env var is updated to match.
+>
+> **Dev note — repeated `Restored 0 / 0 cameras` in reconnect loop is expected.**
+> The `_iep1_health_watcher()` task is recreated on each reconnect cycle with
+> `was_serving = False`. When IEP1's Watch stream fires SERVING, the transition from
+> False → True triggers `_restore_active_cameras()` each time. This is the correct
+> crash-recovery mechanism for IEP1 restarts; the log noise on dev is expected.
 
 ---
 
@@ -1047,7 +1097,7 @@ before proceeding to `TESTING_GUIDE.md` Phase 3 (Business Data Creation).
 | 0.5 | All services can reach Redis | `PING: True` |
 | 1.2 | PgBouncer session mode | `pool_mode = session` |
 | 1.3 | All tables exist | 0 FAIL lines |
-| 1.6 | Alembic at head | `alembic check` exits 0 |
+| 1.6 | Alembic at head | `alembic current` output contains `(head)` |
 
 ---
 

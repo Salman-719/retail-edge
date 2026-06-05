@@ -168,6 +168,19 @@ async def _upsert_agent(
     """Returns False if the store doesn't exist (FK violation); True on success."""
     from sqlalchemy.exc import IntegrityError
 
+    # Validate before hitting the DB — uuid.UUID() raises ValueError on any
+    # whitespace, empty string, or malformed value, which would crash the whole
+    # gRPC stream. Fail fast here with a clear log instead.
+    store_id_clean = (store_id or "").strip()
+    try:
+        store_uuid = uuid.UUID(store_id_clean)
+    except ValueError:
+        logger.error(
+            "Agent sent malformed store_id — check STORE_ID env var in edge agent container",
+            extra={"store_id_raw": repr(store_id)},
+        )
+        return False
+
     now = datetime.now(timezone.utc)
     try:
         async with AsyncSessionLocal() as session:
@@ -181,7 +194,7 @@ async def _upsert_agent(
                         agent_version     = COALESCE(EXCLUDED.agent_version, edge_agents.agent_version),
                         updated_at        = EXCLUDED.updated_at
                 """),
-                {"store_id": uuid.UUID(store_id), "status": status, "now": now, "version": agent_version},
+                {"store_id": store_uuid, "status": status, "now": now, "version": agent_version},
             )
             await session.commit()
         return True

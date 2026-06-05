@@ -32,6 +32,11 @@ def init_k8s_clients() -> None:
 
     Tries the k3s kubeconfig path first (systemd service case), then falls back
     to in-cluster service-account config (pod case).
+
+    On dev machines without k3s (no kubeconfig, not inside a pod): logs a
+    warning and returns without raising. Clients stay None. The Edge Agent will
+    still start and connect to EEP; StartCamera/StopCamera will fail gracefully
+    with a clear error rather than crashing the process at startup.
     """
     global _apps_v1, _core_v1
     kubeconfig = os.environ.get("KUBECONFIG", "/etc/rancher/k3s/k3s.yaml")
@@ -39,10 +44,31 @@ def init_k8s_clients() -> None:
         k8s_config.load_kube_config(config_file=kubeconfig)
         logger.info("k8s: loaded kubeconfig from %s", kubeconfig)
     except Exception:
-        k8s_config.load_incluster_config()
-        logger.info("k8s: loaded in-cluster config")
+        try:
+            k8s_config.load_incluster_config()
+            logger.info("k8s: loaded in-cluster config")
+        except Exception as exc:
+            logger.warning(
+                "k8s: no kubeconfig found at %s and not running inside a pod (%s). "
+                "StartCamera/StopCamera unavailable. "
+                "Set KUBECONFIG env var to a valid kubeconfig to enable k3s operations.",
+                kubeconfig, exc,
+            )
+            return  # leave _apps_v1 and _core_v1 as None — agent still starts
     _apps_v1 = k8s.AppsV1Api()
     _core_v1 = k8s.CoreV1Api()
+
+
+def _require_k8s(operation: str) -> None:
+    """Raise RuntimeError with a clear message if k8s clients are not initialised."""
+    if _apps_v1 is None or _core_v1 is None:
+        raise RuntimeError(
+            f"k8s_manager.{operation}: Kubernetes clients not initialised — "
+            "no kubeconfig or in-cluster config was available at startup. "
+            "StartCamera/StopCamera require k3s. "
+            "On Jetson: ensure k3s is running and KUBECONFIG is set. "
+            "On dev: this operation is not supported without k3s."
+        )
 
 
 # ── Resource naming ────────────────────────────────────────────────────────────
@@ -59,6 +85,7 @@ def _configmap_name(camera_id: str) -> str:
 
 def apply_camera_configmap(camera_id: str, env_data: dict) -> None:
     """Create or update the ConfigMap that supplies env vars to the IEP2 pod."""
+    _require_k8s("apply_camera_configmap")
     cm = k8s.V1ConfigMap(
         metadata=k8s.V1ObjectMeta(
             name=_configmap_name(camera_id),
@@ -82,6 +109,7 @@ def apply_camera_configmap(camera_id: str, env_data: dict) -> None:
 
 def apply_iep2_deployment(camera_id: str) -> None:
     """Create or replace the IEP2 Deployment for a camera."""
+    _require_k8s("apply_iep2_deployment")
     deployment = _build_iep2_deployment(camera_id)
     try:
         _apps_v1.create_namespaced_deployment(NAMESPACE, deployment)
@@ -169,6 +197,7 @@ def _build_iep2_deployment(camera_id: str) -> k8s.V1Deployment:
 
 def delete_iep2(camera_id: str) -> None:
     """Delete IEP2 Deployment and ConfigMap. Idempotent — safe if already gone."""
+    _require_k8s("delete_iep2")
     for delete_fn, name in [
         (_apps_v1.delete_namespaced_deployment, _deployment_name(camera_id)),
         (_core_v1.delete_namespaced_config_map, _configmap_name(camera_id)),
@@ -189,6 +218,9 @@ def list_active_iep2_deployments() -> list[dict]:
     Each dict contains all ConfigMap keys plus 'camera_id'.
     Used by _restore_active_cameras on Edge Agent startup.
     """
+    if _apps_v1 is None:
+        logger.warning("k8s not initialised — no cameras to restore")
+        return []
     result = []
     try:
         deployments = _apps_v1.list_namespaced_deployment(
@@ -214,6 +246,8 @@ def list_active_iep2_deployments() -> list[dict]:
 
 def get_active_camera_ids() -> list[str]:
     """Return camera_ids for all active IEP2 Deployments in k3s."""
+    if _apps_v1 is None:
+        return []
     try:
         deployments = _apps_v1.list_namespaced_deployment(
             NAMESPACE, label_selector="component=iep2"
@@ -234,6 +268,8 @@ def get_camera_k8s_status(camera_id: str) -> str:
     Return values mirror M3-S3 Docker statuses so EEP's R4 handler needs
     no changes: "running" | "starting" | "pending" | "failed" | "not_found" | "unknown"
     """
+    if _core_v1 is None:
+        return "unknown"
     try:
         pods = _core_v1.list_namespaced_pod(
             NAMESPACE,

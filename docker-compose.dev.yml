@@ -36,3 +36,57 @@ services:
     environment:
       OSNET_MAX_BATCH_SIZE: "8"
       OSNET_BATCH_TIMEOUT_MS: "200"
+
+  # ── RTSP stream simulator (dev only) ─────────────────────────────────────────
+  # mediamtx acts as an RTSP server; FFmpeg publishers push test videos to it
+  # at the encoded FPS (e.g. 25 fps from a real recording), throttling delivery
+  # to a realistic rate. IEP1 connects as an RTSP client — no frame flood.
+  #
+  # Usage:
+  #   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  #     --profile rtsp up -d rtsp-server rtsp-cam1 rtsp-cam2
+  #
+  # Then register cameras in EEP with:
+  #   Camera 1 stream URL: rtsp://rtsp-server:8554/cam1
+  #   Camera 2 stream URL: rtsp://rtsp-server:8554/cam2
+
+  rtsp-server:
+    image: bluenviron/mediamtx:latest
+    ports:
+      - "8554:8554"
+    # No network alias needed — other containers reach it as 'rtsp-server' via the default network
+    profiles:
+      - dev
+
+  rtsp-cam1:
+    image: jrottenberg/ffmpeg:4.4-alpine
+    # -re: read at native framerate  -stream_loop -1: loop indefinitely
+    command: [
+      "-re", "-stream_loop", "-1",
+      "-i", "/data/Test1/Camera1.mp4",
+      "-c", "copy", "-f", "rtsp",
+      "rtsp://rtsp-server:8554/cam1"
+    ]
+    volumes:
+      - ./testing-data:/data:ro
+    depends_on:
+      - rtsp-server
+    profiles:
+      - dev
+    restart: on-failure
+
+  rtsp-cam2:
+    image: jrottenberg/ffmpeg:4.4-alpine
+    command: [
+      "-re", "-stream_loop", "-1",
+      "-i", "/data/Test1/Camera2.mp4",
+      "-c", "copy", "-f", "rtsp",
+      "rtsp://rtsp-server:8554/cam2"
+    ]
+    volumes:
+      - ./testing-data:/data:ro
+    depends_on:
+      - rtsp-server
+    profiles:
+      - dev
+    restart: on-failure

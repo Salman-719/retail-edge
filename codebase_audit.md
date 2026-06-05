@@ -509,7 +509,7 @@ All tables in the `public` schema of the `retailvision` database.
 
 | Table | Key columns | Notes |
 |---|---|---|
-| `store_config_versions` | `id UUID PK`, `store_id→stores`, `status` (draft/active/archived), `activated_at` | One active per store |
+| `store_config_versions` | `id UUID PK`, `store_id→stores`, `status` (draft/active/archived), `activate_at` | One active per store |
 | `sections` | `id UUID PK`, `version_id→store_config_versions`, `name`, `position_x/y` | Sub-areas of store |
 | `floor_plans` | `id UUID PK`, `section_id→sections`, `original_s3_key`, `display_s3_key`, `pixels_per_metre FLOAT`, `image_width/height INT` | Scale set separately |
 | `zones` | `id UUID PK`, `section_id→sections`, `name`, `polygon GEOGRAPHY(POLYGON)` | PostGIS polygon |

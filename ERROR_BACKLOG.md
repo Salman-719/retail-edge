@@ -148,6 +148,33 @@ Each entry follows the format:
 
 ---
 
+### BUG-012 — Draft activation 500: `MultipleResultsFound` on floor plan and camera existence checks
+**Status:** Fixed  
+**Service(s):** `services/eep/app/api/routers/draft.py`  
+**Severity:** Critical (blocks draft activation; store cannot go live)  
+**Symptom:** `POST /api/store/{slug}/versions/draft/activate` returns 500. EEP logs `sqlalchemy.exc.MultipleResultsFound: Multiple rows were found when one or none was required` at `draft.py:1579`.  
+**Root Cause:** Two boolean existence checks in `activate_draft` use `scalar_one_or_none()`:  
+1. Floor plan check (`draft.py:1562`): `select(FloorPlan).where(...)`  
+2. Verified-camera check (`draft.py:1579`): `select(CameraConfig).where(status="verified")`  
+`scalar_one_or_none()` raises `MultipleResultsFound` when more than one row matches. Both queries are purely boolean ("does at least one row exist?") — with one floor plan per section and one verified camera config per camera this never triggered, but with multiple floor plans or multiple verified camera configs (the normal case after full onboarding) it crashes.  
+**Fix:** Changed both queries to `.limit(1)` + `.scalars().first()`. `.scalars().first()` returns the first match or `None`, never raises on multiple rows. `.limit(1)` tells the DB to stop scanning after the first match.  
+**Verification:** Draft activation succeeds after the fix with multiple camera configs present.  
+**Notes:** `scalar_one_or_none()` is correct only when the query is expected to return at most one row by contract (e.g. PK lookup). For existence checks on non-unique predicates, always use `.scalars().first()` or `EXISTS`.
+
+---
+
+### BUG-011 — EEP gRPC stream crashes on malformed STORE\_ID from edge agent
+**Status:** Fixed  
+**Service(s):** `services/eep/app/grpc_server/servicer.py`  
+**Severity:** High (crashes the gRPC agent stream; edge agent reconnects in a loop with no useful error)  
+**Symptom:** EEP logs `ValueError: badly formed hexadecimal UUID string` inside `_upsert_agent`, followed by `WARNI Agent stream error`. The edge agent immediately disconnects and reconnects. No FK violation is logged — the crash happens before the SQL is reached.  
+**Root Cause:** `servicer.py:184` — `uuid.UUID(store_id)` is called directly on the raw proto field value with no validation. If `store_id` is an empty string, contains whitespace, or has any formatting other than a bare UUID hex string, `uuid.UUID()` raises `ValueError`. This propagates up through `Connect()` uncaught by the `IntegrityError` except clause, terminating the entire gRPC stream. The `IntegrityError` handler only guards against FK violations from a valid but nonexistent UUID, not against malformed input.  
+**Fix:** Added explicit strip and try/except around `uuid.UUID(store_id_clean)` before the SQL block in `_upsert_agent`. Returns `False` and logs a clear `ERROR` message (`"Agent sent malformed store_id — check STORE_ID env var in edge agent container"`) rather than raising. The actual UUID value is logged with `repr()` so any whitespace or quotes are visible.  
+**Verification:** With a malformed STORE\_ID (e.g. empty string), EEP now logs the descriptive error and the gRPC stream continues cleanly rather than crashing.  
+**Notes:** The root cause in the environment is `STORE_ID` env var not propagating correctly to the edge agent container — e.g. set after container start, whitespace from shell variable expansion, or PowerShell variable type coercion. The guide (`TESTING_GUIDE.md` section after 3.2) now includes a `docker exec ... python -c "repr(os.environ.get('STORE_ID'))"` diagnostic to confirm the actual value before starting the agent.
+
+---
+
 ## Won't Fix / By Design
 
 *(none recorded yet)*

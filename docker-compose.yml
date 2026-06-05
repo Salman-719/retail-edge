@@ -181,6 +181,10 @@ services:
       - iep1-sockets:/tmp/iep1-sockets
       # Shared frame store: IEP1 writes JEPGs here; IEP2 reads them by tmpfs path.
       - frame-store:/dev/shm/frames
+      # Dev test videos: IEP1 opens cloud_stream_url via cv2.VideoCapture.
+      # On a real device this is an RTSP URL; in dev use a file path like
+      # /workspace/testing-data/Camera1.mp4 entered as the camera's stream URL.
+      - ./testing-data:/workspace/testing-data:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -378,11 +382,21 @@ services:
       AGENT_SECRET: "${AGENT_SECRET:-dev-agent-secret}"
       IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
       IEP1_HEALTH_SOCK: "unix:///tmp/iep1-sockets/iep1_health.sock"
+      # In the compose network, yolo-service and osnet-service are reachable by
+      # their service names, not localhost. The Edge Agent defaults to localhost:50052/50053
+      # which only works on a Jetson host where the containers share the host network.
+      YOLO_HEALTH_SOCK:  "yolo-service:50052"
+      OSNET_HEALTH_SOCK: "osnet-service:50053"
+      # IPC_SOCKETS_HOST_PATH is only used by the k8s path (IEP2 pod health sockets).
+      # In compose, IEP2 health sockets land in the ipc-sockets volume at /tmp/sockets.
+      IPC_SOCKETS_HOST_PATH: "/tmp/iep1-sockets"
     volumes:
       - iep1-sockets:/tmp/iep1-sockets
     depends_on:
       - eep
       - iep1-daemon
+      - yolo-service
+      - osnet-service
     profiles:
       - edge
 

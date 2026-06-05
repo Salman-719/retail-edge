@@ -34,7 +34,7 @@ python -m grpc_tools.protoc \
   --grpc_python_out=services/edge_agent/app/grpc_generated \
   proto/agent.proto
 
-sed -i 's/^import agent_pb2/from app.grpc_generated import agent_pb2/' \
+sed -i 's/^import agent_pb2/from services.edge_agent.app.grpc_generated import agent_pb2/' \
   services/edge_agent/app/grpc_generated/agent_pb2_grpc.py
 sed -i '1s/^/# AUTO-GENERATED — see proto\/agent.proto. Regenerate via: make proto\n/' \
   services/edge_agent/app/grpc_generated/agent_pb2_grpc.py
@@ -46,7 +46,7 @@ python -m grpc_tools.protoc \
   --grpc_python_out=services/edge_agent/app/grpc_generated \
   proto/iep1_control.proto
 
-sed -i 's/^import iep1_control_pb2/from app.grpc_generated import iep1_control_pb2/' \
+sed -i 's/^import iep1_control_pb2/from services.edge_agent.app.grpc_generated import iep1_control_pb2/' \
   services/edge_agent/app/grpc_generated/iep1_control_pb2_grpc.py
 
 # ── IEP1: iep1_control stubs (server) ────────────────────────────────────────

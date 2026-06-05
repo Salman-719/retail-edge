@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from app.grpc_generated import iep1_control_pb2 as iep1__control__pb2
+from services.edge_agent.app.grpc_generated import iep1_control_pb2 as iep1__control__pb2
 
 GRPC_GENERATED_VERSION = '1.64.0'
 GRPC_VERSION = grpc.__version__
