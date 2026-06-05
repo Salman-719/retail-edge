@@ -148,6 +148,18 @@ Each entry follows the format:
 
 ---
 
+### BUG-013 — IEP3 coordinator stuck in infinite `NOGROUP` loop after Redis stream deletion
+**Status:** Fixed  
+**Service(s):** `services/iep3_reconciliation/app/coordinator.py`  
+**Severity:** High (IEP3 stops reconciling permanently until manually restarted; `batch_complete` entries accumulate unread)  
+**Symptom:** IEP3 logs `ERROR XREADGROUP error: NOGROUP No such key 'stream:iep2:batch_complete' or consumer group ... in XREADGROUP` every 5 seconds indefinitely. No reconciliation occurs.  
+**Root Cause:** `coordinator.py:126–129` catches `aioredis.ResponseError` and sleeps 5 s before retrying `XREADGROUP`. When the error is `NOGROUP` (stream or consumer group deleted — happens on Redis restart, manual stream flush, or first publish before the stream exists), the retry fails with the same error forever because the group is never recreated. `_ensure_group()` exists and handles recreation correctly but was only called at startup, not on error.  
+**Trigger conditions:** Redis restart (data not persisted), `DEL stream:iep2:batch_complete`, Redis failover, any operational stream flush.  
+**Fix:** Added `NOGROUP` detection in the except block. When detected, calls `_ensure_group()` (which runs `XGROUP CREATE ... MKSTREAM` tolerating `BUSYGROUP`) before continuing. All other `ResponseError` subtypes keep the existing sleep-and-retry behaviour. No restart or manual intervention required.  
+**Verification:** After stream deletion, IEP3 logs `WARNING Consumer group lost — recreating` then `INFO Consumer group created` and resumes reading new messages without restart.
+
+---
+
 ### BUG-012 — Draft activation 500: `MultipleResultsFound` on floor plan and camera existence checks
 **Status:** Fixed  
 **Service(s):** `services/eep/app/api/routers/draft.py`  

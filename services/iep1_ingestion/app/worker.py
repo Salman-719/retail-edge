@@ -109,33 +109,64 @@ class CameraWorker:
 
     # ── Capture thread ────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _is_file_source(url: str) -> bool:
+        """Return True if url is a local file path rather than a network stream.
+
+        cv2.VideoCapture accepts both file paths and network URLs. For files,
+        EOF (cap.read() → False) means the video finished normally and should
+        loop immediately. For network streams, False means a connection failure
+        that warrants backoff and a warning.
+        """
+        return not url.startswith(("rtsp://", "rtsps://", "rtmp://", "http://", "https://"))
+
     def _open_cap(self) -> cv2.VideoCapture:
         cap = cv2.VideoCapture(self._config.rtsp_url)
-        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+        if not self._is_file_source(self._config.rtsp_url):
+            # Network stream timeouts only apply to RTSP/RTMP — not file paths.
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
         return cap
 
     def _capture_loop(self) -> None:
+        is_file = self._is_file_source(self._config.rtsp_url)
         cap = self._open_cap()
         consecutive_failures = 0
+
+        # For file sources, throttle reads to target_fps so the queue never
+        # overflows. RTSP streams self-throttle at the stream's native rate and
+        # need no sleep — adding one would cause frame loss on fast streams.
+        frame_interval = (1.0 / self._config.target_fps) if is_file and self._config.target_fps > 0 else 0.0
 
         while not self._stop_event.is_set():
             ret, frame = cap.read()
             if not ret:
-                consecutive_failures += 1
                 cap.release()
-                delay = min(2.0 * (2 ** consecutive_failures), 60.0)
-                self._status = "reconnecting"
-                logger.warning(
-                    "camera=%s RTSP read failed, reconnect in %.1fs (attempt %d)",
-                    self._config.camera_id, delay, consecutive_failures,
-                )
-                time.sleep(delay)
-                cap = self._open_cap()
+                if is_file:
+                    # EOF on a video file is not an error — loop immediately.
+                    logger.info(
+                        "camera=%s video file ended — looping from start",
+                        self._config.camera_id,
+                    )
+                    cap = self._open_cap()
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    delay = min(2.0 * (2 ** consecutive_failures), 60.0)
+                    self._status = "reconnecting"
+                    logger.warning(
+                        "camera=%s RTSP read failed, reconnect in %.1fs (attempt %d)",
+                        self._config.camera_id, delay, consecutive_failures,
+                    )
+                    time.sleep(delay)
+                    cap = self._open_cap()
                 continue
 
             consecutive_failures = 0
             self._status = "capturing"
+
+            if frame_interval:
+                time.sleep(frame_interval)
             ts = now_ms()
             # Schedule put_nowait on the event loop thread — the only correct
             # way to call asyncio.Queue methods from a non-async thread.
