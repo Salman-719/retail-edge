@@ -29,8 +29,20 @@ bottom; do not skip.
 | `<account>` | `692461731658` |
 | `<EIP>` (filled in after step 2) | `34.248.161.113` |
 
-> **Rule:** paste **one line at a time**. Multi-line commands joined with `\`
+> **Rule 1:** paste **one line at a time**. Multi-line commands joined with `\`
 > get corrupted by zsh on paste.
+>
+> **Rule 2:** never paste literal angle-bracket placeholders like `<EIP>` into a
+> shell — `<` and `>` are redirection operators (`cannot open EIP`). Instead, set
+> shell variables once and use `$EIP` etc. The commands below already use
+> variables; set them at the start of each shell session (workstation, server,
+> edge):
+> ```bash
+> export EIP=34.248.161.113                                  # from: terraform output server_public_ip
+> export OWNER=salman-719                                    # your GitHub owner (lowercase)
+> export REGION=eu-west-1
+> export BUCKET=retailvision-prod-objects-692461731658
+> ```
 
 ---
 
@@ -82,6 +94,8 @@ Open `terraform.tfvars` and set exactly these (leave `app_host`/`eep_host` empty
 ```hcl
 aws_region        = "eu-west-1"
 environment       = "production"
+# Real email YOU control — Let's Encrypt sends cert expiry/renewal notices here.
+# Not public, need not match any domain. e.g. ali.salman@edgebot.com
 letsencrypt_email = "you@example.com"
 s3_bucket_name    = "retailvision-prod-objects-692461731658"   # must be globally unique
 git_repo_url      = "https://github.com/Salman-719/retail-edge.git"   # must be PUBLIC
@@ -133,9 +147,15 @@ sudo k3s crictl pull ghcr.io/salman-719/retailvision/eep:1.0.0
 
 ### A7. [SERVER] Install the application (Helm)
 
-Replace `<EIP>` with your Elastic IP. This is one command — keep it on one line:
+First set the variables for this server session (use **your** EIP):
 ```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; cd /opt/retail-edge; helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/salman-719/retailvision --set ingress.appHost=app.<EIP>.nip.io --set eep.grpcHost=eep.<EIP>.nip.io --set s3.bucket=retailvision-prod-objects-692461731658 --set s3.region=eu-west-1 -n retailvision --create-namespace
+export EIP=34.248.161.113 OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+cd /opt/retail-edge
+```
+Then install — this is **one line**:
+```bash
+helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION -n retailvision --create-namespace
 ```
 **Expect:** `STATUS: deployed` within ~30s (no migrate hook to wait on).
 
@@ -155,14 +175,15 @@ k3s kubectl -n retailvision logs deploy/eep --tail=20
 Postgres/Redis errors.
 
 ```bash
-curl -sk -o /dev/null -w "%{http_code}\n" https://app.<EIP>.nip.io/api/stores
+curl -sk -o /dev/null -w "%{http_code}\n" "https://app.$EIP.nip.io/api/stores"
 ```
 **Expect:** `401` (API is live and requires auth). `404` would mean the proxy
 chain is wrong; `000` means the cert/ingress isn't ready yet.
 
 ### A9. [LOCAL] Open the app
 
-Browse to **http://app.\<EIP\>.nip.io** — the RetailVision UI loads. Register the
+Browse to **`http://app.<your-EIP>.nip.io`** (type your real IP, e.g.
+`http://app.34.248.161.113.nip.io`) — the RetailVision UI loads. Register the
 first user. **Cloud is done.**
 
 > HTTPS: if the browser warns or `curl` needs `-k`, the Let's Encrypt cert for
@@ -183,10 +204,16 @@ In the web UI: create the store, then copy its **UUID**. (Or `POST /api/stores`
 
 ### B2. [SERVER] Start that store's IEP3 worker
 
-Add the UUID to `iep3.stores` and re-run Helm (one line; include every store you
-want running, comma-separated):
+Set your variables (use your EIP and the new store UUID):
 ```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; cd /opt/retail-edge; helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/salman-719/retailvision --set ingress.appHost=app.<EIP>.nip.io --set eep.grpcHost=eep.<EIP>.nip.io --set s3.bucket=retailvision-prod-objects-692461731658 --set s3.region=eu-west-1 --set "iep3.stores={<STORE_UUID>}" -n retailvision
+export EIP=34.248.161.113 OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
+export STORE=00000000-0000-0000-0000-000000000001     # the UUID from B1
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+cd /opt/retail-edge
+```
+Re-run Helm (one line; for multiple stores use `{uuid1,uuid2}`):
+```bash
+helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set "iep3.stores={$STORE}" -n retailvision
 ```
 Verify:
 ```bash
@@ -223,11 +250,18 @@ need the store **UUID** (Part B).
 ### C2. [EDGE] Bootstrap the Jetson
 
 Prereqs: JetPack/NVIDIA drivers installed, Ubuntu, network egress to
-`eep.<EIP>.nip.io:50051`. Then:
+`eep.<your-EIP>.nip.io:50051`. Set variables (your EIP, the store UUID, and the
+agent secret from C1):
+```bash
+export EIP=34.248.161.113
+export STORE=00000000-0000-0000-0000-000000000001
+export AGENT_SECRET='paste-agent-secret-here'
+```
+Then:
 ```bash
 git clone https://github.com/Salman-719/retail-edge.git
 cd retail-edge && git checkout deploy/aws-k3s
-sudo -E bash scripts/bootstrap-edge-k3s.sh <STORE_UUID> 1.0.0 eep.<EIP>.nip.io <agent_secret>
+sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.0.0 "eep.$EIP.nip.io" "$AGENT_SECRET"
 ```
 Install the CA and restart the agent:
 ```bash
@@ -259,9 +293,16 @@ Add cameras via the UI; the Edge Agent creates per-camera IEP2 pods on demand.
    git push origin v1.0.1
    ```
    Wait for **Actions** to go green (images pushed as `:1.0.1`).
-2. **[SERVER]** roll out the new tag (one line):
+2. **[SERVER]** set variables, then roll out the new tag:
    ```bash
-   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; cd /opt/retail-edge; git pull; helm upgrade retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/salman-719/retailvision --set ingress.appHost=app.<EIP>.nip.io --set eep.grpcHost=eep.<EIP>.nip.io --set s3.bucket=retailvision-prod-objects-692461731658 --set s3.region=eu-west-1 --set "iep3.stores={<STORE_UUID>}" --set eep.image.tag=1.0.1 --set iep3.image.tag=1.0.1 --set frontend.image.tag=1.0.1 -n retailvision
+   export EIP=34.248.161.113 OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
+   export STORE=00000000-0000-0000-0000-000000000001 TAG=1.0.1
+   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+   cd /opt/retail-edge && git pull
+   ```
+   Then (one line):
+   ```bash
+   helm upgrade retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set "iep3.stores={$STORE}" --set eep.image.tag=$TAG --set iep3.image.tag=$TAG --set frontend.image.tag=$TAG -n retailvision
    ```
 3. **[SERVER]** watch the rollout:
    ```bash
