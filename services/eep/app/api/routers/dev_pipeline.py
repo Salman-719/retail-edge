@@ -265,16 +265,28 @@ async def get_tracking(
     limit: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ):
-    """Recent tracking_history rows for one camera (newest first)."""
+    """Recent tracking_history rows for one camera.
+
+    Returns up to :lim rows per local_id, ordered so that the identity that
+    appeared first always sorts first (stable display numbering in the UI).
+    Within each identity, rows are newest-first.
+    """
     rows = (await db.execute(
         text("""
-            SELECT local_id::text AS local_id, timestamp_ms,
-                   floor_x, floor_y, zone_id::text AS zone_id,
+            WITH ranked AS (
+                SELECT local_id::text AS local_id, timestamp_ms,
+                       floor_x, floor_y, zone_id::text AS zone_id,
+                       bbox_confidence, bbox_area,
+                       MIN(timestamp_ms) OVER (PARTITION BY local_id) AS id_first_seen,
+                       ROW_NUMBER()      OVER (PARTITION BY local_id ORDER BY timestamp_ms DESC) AS rn
+                FROM tracking_history
+                WHERE camera_id = :cam
+            )
+            SELECT local_id, timestamp_ms, floor_x, floor_y, zone_id,
                    bbox_confidence, bbox_area
-            FROM tracking_history
-            WHERE camera_id = :cam
-            ORDER BY timestamp_ms DESC
-            LIMIT :lim
+            FROM ranked
+            WHERE rn <= :lim
+            ORDER BY id_first_seen ASC, timestamp_ms DESC
         """),
         {"cam": camera_id, "lim": limit},
     )).mappings().all()

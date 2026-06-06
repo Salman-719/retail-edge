@@ -18,6 +18,7 @@ import io
 import logging
 import os
 import sys
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -345,7 +346,7 @@ class IEP2Runtime:
             detections = await self.yolo_client.detect(frame, _capture_ts_ms)
             tracks     = update(tracker, detections)
             _project_tracks(tracks, projector)
-            enriched   = await manager.process_frame(frame, tracks, timestamp_ms=_capture_ts_ms)
+            enriched, _, __ = await manager.process_frame(frame, tracks, timestamp_ms=_capture_ts_ms)
 
             log.debug(
                 "Frame %4d  detections=%d  tracks=%d  confirmed=%d  pending=%d",
@@ -403,6 +404,26 @@ class IEP2Runtime:
         db_rows_written = 0
         _resolution_written = False  # write stream resolution once from first valid frame
 
+        async def _load_and_detect_s3(mfst: dict) -> tuple[list, list, list, list]:
+            """Fetch frames from S3/tmpfs and run detect_batch for one manifest.
+
+            Returns (frames, timestamps_ms, s3_keys, detections_per_frame).
+            Unreadable frames are excluded from all four lists.
+            """
+            raw_frames, raw_ts, raw_keys = [], [], []
+            for entry in mfst.get("frames", []):
+                ts  = int(entry[0])
+                key = entry[1]
+                f   = _fetch_s3_frame(s3_client, s3_bucket, key)
+                if f is not None:
+                    raw_frames.append(f)
+                    raw_ts.append(ts)
+                    raw_keys.append(key)
+            if not raw_frames:
+                return [], [], [], []
+            dets = await self.yolo_client.detect_batch(raw_frames, raw_ts)
+            return raw_frames, raw_ts, raw_keys, dets
+
         async for message_id, manifest in source.manifests():
             if manifest.get("status") == "offline":
                 log.debug(
@@ -412,30 +433,37 @@ class IEP2Runtime:
                 await source.ack(message_id)
                 continue
 
-            for frame_entry in manifest.get("frames", []):
-                capture_ts_ms = int(frame_entry[0])
-                s3_key        = frame_entry[1]
+            # Send entire batch to YOLO at once — measure wall time.
+            _t_yolo_s3 = time.monotonic()
+            batch_frames, batch_ts, batch_keys, batch_detections = await _load_and_detect_s3(manifest)
+            yolo_ms_s3 = (time.monotonic() - _t_yolo_s3) * 1000
 
-                frame = _fetch_s3_frame(s3_client, s3_bucket, s3_key)
-                if frame is None:
-                    continue
+            # Write stream resolution from the first valid frame of the run.
+            if not _resolution_written and batch_frames:
+                _h, _w = batch_frames[0].shape[:2]
+                if _w > 0 and _h > 0:
+                    await persistence.write_stream_resolution(camera_id, _w, _h)
+                else:
+                    log.warning(
+                        "Could not read stream resolution (width=%d height=%d) — skipping",
+                        _w, _h,
+                    )
+                _resolution_written = True
 
-                if not _resolution_written:
-                    _h, _w = frame.shape[:2]
-                    if _w > 0 and _h > 0:
-                        await persistence.write_stream_resolution(camera_id, _w, _h)
-                    else:
-                        log.warning(
-                            "Could not read stream resolution from source "
-                            "(width=%d height=%d) — stream_width/height not updated",
-                            _w, _h,
-                        )
-                    _resolution_written = True
-
-                detections = await self.yolo_client.detect(frame, capture_ts_ms)
-                tracks     = update(tracker, detections)
+            # Sequential tracker/reid/DB pass over the pre-detected frames.
+            osnet_crops_s3   = 0
+            osnet_batches_s3 = 0
+            tracker_ms_s3    = 0.0
+            for frame, capture_ts_ms, s3_key, detections in zip(
+                batch_frames, batch_ts, batch_keys, batch_detections
+            ):
+                _t_frame_s3 = time.monotonic()
+                tracks   = update(tracker, detections)
                 _project_tracks(tracks, projector)
-                enriched   = await manager.process_frame(frame, tracks, timestamp_ms=capture_ts_ms)
+                enriched, _crops_s3, _batches_s3 = await manager.process_frame(frame, tracks, timestamp_ms=capture_ts_ms)
+                tracker_ms_s3    += (time.monotonic() - _t_frame_s3) * 1000
+                osnet_crops_s3   += _crops_s3
+                osnet_batches_s3 += _batches_s3
 
                 log.debug(
                     "Frame %4d  detections=%d  tracks=%d  confirmed=%d  pending=%d",
@@ -468,6 +496,15 @@ class IEP2Runtime:
                     new_entries=new_entries,
                 )
                 frame_index += 1
+
+            _avg_tracker_s3 = (tracker_ms_s3 / len(batch_frames)) if batch_frames else 0.0
+            log.info(
+                "Batch stats  camera=%s  batch=%s  frames=%d"
+                "  yolo_ms=%.0f  tracker_ms=%.0f  osnet_recalls=%d  batch_osnet_recalls=%d"
+                "  avg_tracker_ms_per_frame=%.1f",
+                camera_id, manifest.get("batch_number"), len(batch_frames),
+                yolo_ms_s3, tracker_ms_s3, osnet_crops_s3, osnet_batches_s3, _avg_tracker_s3,
+            )
 
             # Strict batch-close order: tracking writes → centroids → batch_complete → XACK.
             await self._flush_centroids(
@@ -758,31 +795,71 @@ async def run_daemon(settings) -> None:
         try:
             log.info("IEP2 daemon SERVING  camera=%s", settings.camera_id)
 
+            async def _load_and_detect(mfst: dict) -> tuple[list, list, list]:
+                """Load frames from tmpfs and run detect_batch for one manifest.
+
+                Returns (frames, timestamps_ms, detections_per_frame).
+                Skipped (unreadable) frames are excluded from all three lists.
+                """
+                raw_frames, raw_ts = [], []
+                for entry in mfst.get("frames", []):
+                    f = _read_frame_from_tmpfs(entry[1])
+                    if f is not None:
+                        raw_frames.append(f)
+                        raw_ts.append(int(entry[0]))
+                if not raw_frames:
+                    return [], [], []
+                dets = await yolo_client.detect_batch(raw_frames, raw_ts)
+                return raw_frames, raw_ts, dets
+
+            # Pipeline parallelism: while we run tracker/reid/DB on batch N,
+            # YOLO inference for batch N+1 runs concurrently as a background task.
+            yolo_task: asyncio.Task | None = None
+
             async for message_id, manifest in consumer.manifests():
                 if manifest.get("status") == "offline":
                     await consumer.ack(message_id)
                     continue
 
-                frames = manifest.get("frames", [])
-                frame_count = 0
+                # Launch YOLO for this manifest immediately so it overlaps with
+                # any remaining tracker work from the previous iteration.
+                this_yolo_task = asyncio.create_task(
+                    _load_and_detect(manifest),
+                    name=f"yolo-{settings.camera_id}-{manifest.get('batch_number', 0)}",
+                )
 
-                for entry in frames:
-                    capture_ts_ms = int(entry[0])
-                    path          = entry[1]
+                # If there was a previous YOLO task still running, await it now.
+                # (First iteration: yolo_task is None, skip.)
+                if yolo_task is not None:
+                    # yolo_task belongs to the *previous* manifest — it should already
+                    # be done; awaiting it here is just a safety drain.
+                    try:
+                        await yolo_task
+                    except Exception as exc:
+                        log.warning("Previous YOLO task error: %s", exc)
 
-                    frame = _read_frame_from_tmpfs(path)
-                    if frame is None:
-                        continue
+                # Await current batch YOLO results — measure wall time.
+                _t_yolo_start = time.monotonic()
+                batch_frames_data, batch_ts, batch_detections = await this_yolo_task
+                yolo_ms = (time.monotonic() - _t_yolo_start) * 1000
+                yolo_task = None
 
-                    detections = await yolo_client.detect(frame, capture_ts_ms)
-                    tracks     = update(tracker, detections)
+                # ── Sequential tracker/reid/DB pass ──────────────────────────
+                frame_count    = 0
+                osnet_crops    = 0
+                osnet_batches  = 0
+                tracker_ms     = 0.0
+                for frame, capture_ts_ms, detections in zip(batch_frames_data, batch_ts, batch_detections):
+                    _t_frame = time.monotonic()
+                    tracks   = update(tracker, detections)
                     _project_tracks(tracks, projector)
-                    enriched   = await manager.process_frame(
+                    enriched, _crops, _batches = await manager.process_frame(
                         frame, tracks, timestamp_ms=capture_ts_ms
                     )
+                    tracker_ms    += (time.monotonic() - _t_frame) * 1000
+                    osnet_crops   += _crops
+                    osnet_batches += _batches
 
-                    # Live preview: push frame + detections to the live stream.
-                    # No-op unless live_stream_enabled/live_embed_frame are set.
                     live_pub.publish_frame(frame, capture_ts_ms, enriched)
 
                     for track in enriched:
@@ -828,15 +905,16 @@ async def run_daemon(settings) -> None:
                     maxlen=500,
                     approximate=True,
                 )
-                # XACK fires after centroids + batch_complete are written.
-                # Trade-off: IEP3 orphan sweep is the compensating control for
-                # any partial state if IEP2 crashes post-XACK. See M4-S3 R7.
                 await consumer.ack(message_id)
                 await _cleanup_frames(manifest)
 
+                avg_tracker = (tracker_ms / frame_count) if frame_count else 0.0
                 log.info(
-                    "Batch complete  camera=%s  batch=%s  frames=%d",
+                    "Batch stats  camera=%s  batch=%s  frames=%d"
+                    "  yolo_ms=%.0f  tracker_ms=%.0f  osnet_recalls=%d  batch_osnet_recalls=%d"
+                    "  avg_tracker_ms_per_frame=%.1f",
                     settings.camera_id, manifest.get("batch_number"), frame_count,
+                    yolo_ms, tracker_ms, osnet_crops, osnet_batches, avg_tracker,
                 )
 
         except asyncio.CancelledError:

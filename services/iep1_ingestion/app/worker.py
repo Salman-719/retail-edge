@@ -214,12 +214,26 @@ class CameraWorker:
 
     # ── Async window loop ─────────────────────────────────────────────────────
 
-    async def _window_loop(self) -> None:
-        window_seconds_ms = int(self._config.window_seconds * 1000)
-        accumulator = WindowAccumulator(
+    def _make_accumulator(self) -> WindowAccumulator:
+        return WindowAccumulator(
             sample_fps=self._config.target_fps,
             batch_window_seconds=self._config.window_seconds,
+            batch_frames=self._config.batch_frames,
         )
+
+    async def _flush_accumulator(
+        self,
+        accumulator: WindowAccumulator,
+        window_start: int,
+        window_end: int,
+    ) -> None:
+        manifest = accumulator.close(window_start, window_end, self._batch_number)
+        await self._publish_manifest(manifest)
+        self._batch_number += 1
+
+    async def _window_loop(self) -> None:
+        window_seconds_ms = int(self._config.window_seconds * 1000) + 3500
+        accumulator  = self._make_accumulator()
         window_start = now_ms()
 
         try:
@@ -234,18 +248,24 @@ class CameraWorker:
                     self._last_frame_ts = ts
                     path = _write_to_tmpfs(self._config.camera_id, ts, frame)
                     if path is not None:
-                        accumulator.add(ts, path)
+                        batch_full = accumulator.add(ts, path)
+                        if batch_full:
+                            # Frame-count trigger: flush immediately.
+                            window_end   = ts
+                            await self._flush_accumulator(accumulator, window_start, window_end)
+                            window_start = window_end
+                            accumulator  = self._make_accumulator()
+                            continue
 
+                # Safety-flush: emit whatever has accumulated if the time budget
+                # expires — prevents frames from being held indefinitely when the
+                # source delivers fewer than batch_frames in window_seconds.
                 if now_ms() - window_start >= window_seconds_ms:
                     window_end = window_start + window_seconds_ms
-                    manifest = accumulator.close(window_start, window_end, self._batch_number)
-                    await self._publish_manifest(manifest)
-                    self._batch_number  += 1
-                    window_start        += window_seconds_ms  # fixed advance, no drift
-                    accumulator = WindowAccumulator(
-                        sample_fps=self._config.target_fps,
-                        batch_window_seconds=self._config.window_seconds,
-                    )
+                    await self._flush_accumulator(accumulator, window_start, window_end)
+                    window_start += window_seconds_ms  # fixed advance, no drift
+                    accumulator   = self._make_accumulator()
+
         except asyncio.CancelledError:
             # publish partial window before exiting (R8)
             if accumulator._frames:

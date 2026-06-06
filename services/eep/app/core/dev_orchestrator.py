@@ -42,6 +42,9 @@ def _iep1_channel():
     return grpc.insecure_channel(IEP1_CONTROL_SOCK)
 
 
+BATCH_FRAMES = int(os.environ.get("BATCH_FRAMES", "32"))
+
+
 def iep1_add_camera(
     camera_id: str,
     rtsp_url: str,
@@ -64,6 +67,7 @@ def iep1_add_camera(
             target_fps=target_fps,
             window_seconds=window_seconds,
             store_id=store_id,
+            batch_frames=BATCH_FRAMES,
         ),
         timeout=10.0,
     )
@@ -99,6 +103,7 @@ def start_iep2(
     camera_config_id: str,
     database_url_server: str,
     window_seconds: float,
+    batch_frames: int = BATCH_FRAMES,
 ) -> str:
     """Spawn (or replace) the IEP2 container for one camera. Returns container name."""
     import docker
@@ -122,6 +127,7 @@ def start_iep2(
             "CAMERA_CONFIG_ID":    camera_config_id or "",
             "STORE_ID":            store_id,
             "WINDOW_SECONDS":      str(window_seconds),
+            "BATCH_FRAMES":        str(batch_frames),
             "LOCAL_REDIS_URL":     LOCAL_REDIS_URL,
             "SERVER_REDIS_URL":    SERVER_REDIS_URL,
             "DATABASE_URL_SERVER": database_url_server,

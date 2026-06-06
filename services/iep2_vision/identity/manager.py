@@ -55,9 +55,6 @@ class LocalIdentityManager:
         self._lost:    dict[int, LostEntry]    = {}
         # Sticky mapping: once a track_id is assigned a local_id, the binding is permanent.
         self._track_to_local: dict[int, int] = {}
-        # Per-track frame counter: counts how many frames each track has been visible.
-        # Used for per-track embedding schedule (R6 M2-S4).
-        self._track_frame_index: dict[int, int] = {}
         self._next_id: int = self._load_counter()
         self._frame_index: int = 0
 
@@ -85,15 +82,19 @@ class LocalIdentityManager:
         frame: np.ndarray,
         tracks: list[dict],
         timestamp_ms: int = 0,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], int, int]:
         """Run the full identity lifecycle for one frame.
 
-        Returns a new list of enriched dicts with 'local_id' added.
+        Returns (enriched, osnet_crops, osnet_batches) where:
+          osnet_crops   — total number of crops sent to OSNet this frame
+          osnet_batches — number of asyncio.gather calls made (batch invocations)
         Active tracks carry an int local_id; pending tracks carry None.
         Input list is never mutated.
         """
         # Stage 0 — advance frame counter
         self._frame_index += 1
+        _osnet_crops   = 0
+        _osnet_batches = 0
 
         # Stage 1 — prune expired lost entries
         expired = [
@@ -124,17 +125,16 @@ class LocalIdentityManager:
 
         for tid in disappeared_pending:
             del self._pending[tid]  # dropped silently — no local_id ever minted
-            self._track_frame_index.pop(tid, None)
             log.info("F%04d  pending track dropped  track_id=%d  (never resolved)", self._frame_index, tid)
 
         # Stage 3 — process each current track
+        # Tracks that qualify for a global sample-tick OSNet call this frame:
+        # list of (active_track, track_dict) — populated below, fired after the loop.
+        sample_candidates: list[tuple] = []
+
         enriched: list[dict] = []
         for track in tracks:
             tid = track["track_id"]
-
-            # Advance per-track frame counter (R6 M2-S4)
-            self._track_frame_index[tid] = self._track_frame_index.get(tid, 0) + 1
-            track_frame = self._track_frame_index[tid]
 
             # ── Branch A: already active ───────────────────────────────────────
             if tid in self._active:
@@ -145,38 +145,64 @@ class LocalIdentityManager:
                 if floor_x is not None and floor_y is not None:
                     active.last_floor_pos = (floor_x, floor_y)
 
-                gallery = active.gallery
+                if active.gallery.is_init_phase:
+                    # Buffer the raw crop; send to OSNet only when we have a full batch.
+                    active.init_crops.append((frame, track["bbox"], timestamp_ms))
 
-                if gallery.is_init_phase:
-                    emb = await self._osnet_client.extract(
-                        frame, track["bbox"], track_id=tid, timestamp_ms=timestamp_ms
-                    )
-                    if emb is not None:
-                        gallery.add(emb, is_init=True)
+                    if len(active.init_crops) >= INIT_EMBEDDINGS_COUNT:
+                        # Batch-extract all buffered init crops in parallel.
+                        results = await asyncio.gather(*[
+                            self._osnet_client.extract(
+                                f, bbox, track_id=tid, timestamp_ms=ts
+                            )
+                            for f, bbox, ts in active.init_crops
+                        ])
+                        _osnet_crops   += len(active.init_crops)
+                        _osnet_batches += 1
+                        active.init_crops.clear()
+                        for emb in results:
+                            if emb is not None:
+                                active.gallery.add(emb, is_init=True)
+                        log.debug(
+                            "F%04d  init batch flushed  track_id=%d  local_id=%d",
+                            self._frame_index, tid, active.local_id,
+                        )
+                    else:
+                        log.debug(
+                            "F%04d  init buffering  track_id=%d  crops=%d/%d",
+                            self._frame_index, tid,
+                            len(active.init_crops), INIT_EMBEDDINGS_COUNT,
+                        )
                 else:
-                    # Sampled phase: per-track interval + quality gate (R6 M2-S4)
-                    if track_frame % SAMPLE_INTERVAL == 0:
+                    # Sampled phase: collect on global tick (fired after the loop).
+                    if self._frame_index % SAMPLE_INTERVAL == 0:
                         conf = track.get("confidence", 0.0)
                         x1, y1, x2, y2 = track["bbox"]
                         bbox_area = (x2 - x1) * (y2 - y1)
                         if (conf >= QUALITY_CONFIDENCE_THRESHOLD
                                 and bbox_area >= MIN_BBOX_AREA):
-                            emb = await self._osnet_client.extract(
-                                frame, track["bbox"], track_id=tid, timestamp_ms=timestamp_ms
-                            )
-                            if emb is not None:
-                                gallery.add(emb, is_init=False)
+                            sample_candidates.append((active, track))
 
                 enriched.append({**track, "local_id": active.local_id})
 
-            # ── Branch B: pending, collecting init embeddings ──────────────────
+            # ── Branch B: pending, buffering crops until we have a full init batch ──
             elif tid in self._pending:
                 pending = self._pending[tid]
-                emb = await self._osnet_client.extract(
-                    frame, track["bbox"], track_id=tid, timestamp_ms=timestamp_ms
-                )
-                if emb is not None:
-                    pending.init_embeddings.append(emb)
+                pending.init_crops.append((frame, track["bbox"], timestamp_ms))
+
+                if len(pending.init_crops) >= INIT_EMBEDDINGS_COUNT:
+                    results = await asyncio.gather(*[
+                        self._osnet_client.extract(
+                            f, bbox, track_id=tid, timestamp_ms=ts
+                        )
+                        for f, bbox, ts in pending.init_crops
+                    ])
+                    _osnet_crops   += len(pending.init_crops)
+                    _osnet_batches += 1
+                    pending.init_crops.clear()
+                    for emb in results:
+                        if emb is not None:
+                            pending.init_embeddings.append(emb)
 
                 if len(pending.init_embeddings) >= INIT_EMBEDDINGS_COUNT:
                     local_id, gallery = self._resolve_pending(pending, new_pos=track.get("floor_pos"))
@@ -187,8 +213,10 @@ class LocalIdentityManager:
                     enriched.append({**track, "local_id": local_id})
                 else:
                     log.debug(
-                        "F%04d  collecting  track_id=%d  embeddings=%d/%d",
-                        self._frame_index, tid, len(pending.init_embeddings), INIT_EMBEDDINGS_COUNT,
+                        "F%04d  collecting  track_id=%d  crops=%d/%d",
+                        self._frame_index, tid,
+                        len(pending.init_crops) + len(pending.init_embeddings),
+                        INIT_EMBEDDINGS_COUNT,
                     )
                     enriched.append({**track, "local_id": None})
 
@@ -237,7 +265,26 @@ class LocalIdentityManager:
                     )
                     enriched.append({**track, "local_id": None})
 
-        return enriched
+        # Stage 4 — global sample tick: batch-extract for all sampled-phase candidates.
+        if sample_candidates:
+            results = await asyncio.gather(*[
+                self._osnet_client.extract(
+                    frame, t_dict["bbox"],
+                    track_id=t_dict["track_id"], timestamp_ms=timestamp_ms,
+                )
+                for _, t_dict in sample_candidates
+            ])
+            _osnet_crops   += len(sample_candidates)
+            _osnet_batches += 1
+            for (active, _), emb in zip(sample_candidates, results):
+                if emb is not None:
+                    active.gallery.add(emb, is_init=False)
+            log.debug(
+                "F%04d  sample tick  candidates=%d",
+                self._frame_index, len(sample_candidates),
+            )
+
+        return enriched, _osnet_crops, _osnet_batches
 
     def get_active_centroids(self) -> dict[int, np.ndarray]:
         """Return {local_id_int: centroid_float32_array} for all currently active tracks."""

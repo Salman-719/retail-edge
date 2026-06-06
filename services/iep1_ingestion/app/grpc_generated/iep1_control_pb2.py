@@ -14,27 +14,27 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12iep1_control.proto\x12\x14retailvision.iep1.v1\"q\n\x0c\x43\x61meraConfig\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x10\n\x08rtsp_url\x18\x02 \x01(\t\x12\x12\n\ntarget_fps\x18\x03 \x01(\x02\x12\x16\n\x0ewindow_seconds\x18\x04 \x01(\x02\x12\x10\n\x08store_id\x18\x05 \x01(\t\"3\n\x11\x41\x64\x64\x43\x61meraResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\r\n\x05\x65rror\x18\x02 \x01(\t\"(\n\x13RemoveCameraRequest\x12\x11\n\tcamera_id\x18\x01 \x01(\t\"\'\n\x14RemoveCameraResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"I\n\x12Iep1StatusResponse\x12\x33\n\x07\x63\x61meras\x18\x01 \x03(\x0b\x32\".retailvision.iep1.v1.CameraStatus\"`\n\x0c\x43\x61meraStatus\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x0e\n\x06status\x18\x02 \x01(\t\x12\x15\n\rlast_frame_ts\x18\x03 \x01(\x03\x12\x16\n\x0e\x66rames_dropped\x18\x04 \x01(\x03\"\x07\n\x05\x45mpty2\xa2\x02\n\x0bIep1Control\x12X\n\tAddCamera\x12\".retailvision.iep1.v1.CameraConfig\x1a\'.retailvision.iep1.v1.AddCameraResponse\x12\x65\n\x0cRemoveCamera\x12).retailvision.iep1.v1.RemoveCameraRequest\x1a*.retailvision.iep1.v1.RemoveCameraResponse\x12R\n\tGetStatus\x12\x1b.retailvision.iep1.v1.Empty\x1a(.retailvision.iep1.v1.Iep1StatusResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12iep1_control.proto\x12\x14retailvision.iep1.v1\"\x87\x01\n\x0c\x43\x61meraConfig\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x10\n\x08rtsp_url\x18\x02 \x01(\t\x12\x12\n\ntarget_fps\x18\x03 \x01(\x02\x12\x16\n\x0ewindow_seconds\x18\x04 \x01(\x02\x12\x10\n\x08store_id\x18\x05 \x01(\t\x12\x14\n\x0c\x62\x61tch_frames\x18\x06 \x01(\x05\"3\n\x11\x41\x64\x64\x43\x61meraResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\r\n\x05\x65rror\x18\x02 \x01(\t\"(\n\x13RemoveCameraRequest\x12\x11\n\tcamera_id\x18\x01 \x01(\t\"\'\n\x14RemoveCameraResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"I\n\x12Iep1StatusResponse\x12\x33\n\x07\x63\x61meras\x18\x01 \x03(\x0b\x32\".retailvision.iep1.v1.CameraStatus\"`\n\x0c\x43\x61meraStatus\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x0e\n\x06status\x18\x02 \x01(\t\x12\x15\n\rlast_frame_ts\x18\x03 \x01(\x03\x12\x16\n\x0e\x66rames_dropped\x18\x04 \x01(\x03\"\x07\n\x05\x45mpty2\xa2\x02\n\x0bIep1Control\x12X\n\tAddCamera\x12\".retailvision.iep1.v1.CameraConfig\x1a\'.retailvision.iep1.v1.AddCameraResponse\x12\x65\n\x0cRemoveCamera\x12).retailvision.iep1.v1.RemoveCameraRequest\x1a*.retailvision.iep1.v1.RemoveCameraResponse\x12R\n\tGetStatus\x12\x1b.retailvision.iep1.v1.Empty\x1a(.retailvision.iep1.v1.Iep1StatusResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'iep1_control_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_CAMERACONFIG']._serialized_start=44
-  _globals['_CAMERACONFIG']._serialized_end=157
-  _globals['_ADDCAMERARESPONSE']._serialized_start=159
-  _globals['_ADDCAMERARESPONSE']._serialized_end=210
-  _globals['_REMOVECAMERAREQUEST']._serialized_start=212
-  _globals['_REMOVECAMERAREQUEST']._serialized_end=252
-  _globals['_REMOVECAMERARESPONSE']._serialized_start=254
-  _globals['_REMOVECAMERARESPONSE']._serialized_end=293
-  _globals['_IEP1STATUSRESPONSE']._serialized_start=295
-  _globals['_IEP1STATUSRESPONSE']._serialized_end=368
-  _globals['_CAMERASTATUS']._serialized_start=370
-  _globals['_CAMERASTATUS']._serialized_end=466
-  _globals['_EMPTY']._serialized_start=468
-  _globals['_EMPTY']._serialized_end=475
-  _globals['_IEP1CONTROL']._serialized_start=478
-  _globals['_IEP1CONTROL']._serialized_end=768
+  _globals['_CAMERACONFIG']._serialized_start=45
+  _globals['_CAMERACONFIG']._serialized_end=180
+  _globals['_ADDCAMERARESPONSE']._serialized_start=182
+  _globals['_ADDCAMERARESPONSE']._serialized_end=233
+  _globals['_REMOVECAMERAREQUEST']._serialized_start=235
+  _globals['_REMOVECAMERAREQUEST']._serialized_end=275
+  _globals['_REMOVECAMERARESPONSE']._serialized_start=277
+  _globals['_REMOVECAMERARESPONSE']._serialized_end=316
+  _globals['_IEP1STATUSRESPONSE']._serialized_start=318
+  _globals['_IEP1STATUSRESPONSE']._serialized_end=391
+  _globals['_CAMERASTATUS']._serialized_start=393
+  _globals['_CAMERASTATUS']._serialized_end=489
+  _globals['_EMPTY']._serialized_start=491
+  _globals['_EMPTY']._serialized_end=498
+  _globals['_IEP1CONTROL']._serialized_start=501
+  _globals['_IEP1CONTROL']._serialized_end=791
 # @@protoc_insertion_point(module_scope)
