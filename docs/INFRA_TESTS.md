@@ -854,19 +854,19 @@ except: print('NOT_READY')
 done
 ```
 
-Verify embedding dimensions match the expected 512-dim L2-normalised format:
+Verify embedding dimensions match the expected 2048-dim L2-normalised format:
 
 **[WIN]**
 ```powershell
 docker compose -f docker-compose.yml -f docker-compose.dev.yml exec osnet-service python -c "
-import os; print('EMBEDDING_DIM:', os.environ.get('EMBEDDING_DIM', '512'))
+import os; print('EMBEDDING_DIM:', os.environ.get('EMBEDDING_DIM', '2048'))
 "
-# Expected: EMBEDDING_DIM: 512
+# Expected: EMBEDDING_DIM: 2048
 ```
 
 **[LIN/ORIN]**
 ```bash
-$COMPOSE exec osnet-service python -c "import os; print('EMBEDDING_DIM:', os.environ.get('EMBEDDING_DIM', '512'))"
+$COMPOSE exec osnet-service python -c "import os; print('EMBEDDING_DIM:', os.environ.get('EMBEDDING_DIM', '2048'))"
 ```
 
 ### 2.5 IEP1 daemon — gRPC health (unix socket, no auth)
@@ -1156,8 +1156,8 @@ $COMPOSE exec eep alembic upgrade head
 | Aspect | Windows Dev (CPU) | Jetson Orin (Production) |
 |---|---|---|
 | Compose override | `-f docker-compose.yml -f docker-compose.dev.yml` | `-f docker-compose.yml` only |
-| YOLO backend | ultralytics YOLOv8n CPU | TensorRT engine (ARM64) |
-| OSNet backend | ResNet-18 torchvision CPU | OSNet TRT engine (ARM64) |
+| YOLO backend | ultralytics RT-DETR-x CPU/GPU | TensorRT engine (ARM64) |
+| OSNet backend | resnet50_msmt17 (boxmot) CPU/GPU | resnet50_msmt17 TRT engine (ARM64) |
 | Batch sizes | YOLO=4, OSNet=8 | YOLO=32, OSNet=64 |
 | Model load time | 30–60 s | 5–10 min (first boot, TRT compilation) |
 | IEP2 orchestration | Docker Compose (direct) | k3s Deployments via Edge Agent |

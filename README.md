@@ -35,7 +35,7 @@ CLOUD (Kubernetes / Docker Compose)
 │    60-second window manifests → edge-local Redis                    │
 │                                                                      │
 │  IEP2 vision (one k3s Deployment per camera, created by Edge Agent)  │
-│    XREADGROUP iep1-frames → YOLO → ByteTrack → ReID → homography    │
+│    XREADGROUP iep1-frames → RT-DETR → BoTSORT → ReID → homography   │
 │    → INSERT tracking_history → XADD stream:iep2:batch_complete      │
 │                                                                      │
 │  YOLO service + OSNet service (GPU, unix socket IPC)                 │
@@ -56,7 +56,7 @@ Redis topology
 | Frontend | React 18, Vite, React Router v6, Konva.js, Zustand, Tailwind CSS |
 | API Gateway (EEP) | FastAPI 0.115, SQLAlchemy 2 async, Pydantic v2, APScheduler 3.10 |
 | Edge-Cloud Comms | gRPC (grpcio 1.64, TLS + shared-secret auth, bidirectional streaming) |
-| Computer Vision | YOLOv8 (Ultralytics), ByteTrack (boxmot), OSNet ReID |
+| Computer Vision | RT-DETR (Ultralytics), BoTSORT (boxmot), resnet50_msmt17 ReID (boxmot) |
 | Floor Projection | NumPy homography, Shapely polygons |
 | Database | PostgreSQL 16 + PgBouncer 1.22, asyncpg 0.29 |
 | Cache / Streams | Redis 7.2 (XREADGROUP consumer groups, topology-split) |
@@ -88,11 +88,11 @@ retail-edge/
 │   ├── eep/                     # EEP: REST API + gRPC server + scheduler
 │   ├── edge_agent/              # Thin gRPC relay → k3s API
 │   ├── iep1_ingestion/          # Camera ingestion daemon
-│   ├── iep2_vision/             # Per-camera YOLO+ByteTrack+ReID worker
+│   ├── iep2_vision/             # Per-camera RT-DETR+BoTSORT+ReID worker
 │   ├── iep3_reconciliation/     # Cross-camera identity reconciliation daemon
 │   ├── live_bridge/             # WebSocket live frame relay
 │   ├── yolo_service/            # YOLO gRPC inference service (GPU)
-│   └── osnet_service/           # OSNet ReID embedding service (GPU)
+│   └── osnet_service/           # resnet50_msmt17 ReID embedding service (GPU)
 └── tests/
     ├── unit/iep3/               # IEP3 pure-logic unit tests (no infrastructure)
     └── e2e/                     # Integration + end-to-end tests
@@ -155,8 +155,8 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 
 > **Why the dev overlay?** The base `docker-compose.yml` builds YOLO and OSNet
 > from Jetson/ARM64 JetPack base images that cannot build or run on x86.
-> `docker-compose.dev.yml` overrides both to CPU-only variants (ultralytics
-> YOLOv8n on CPU for YOLO; ResNet-18 + avgpool + L2-norm for OSNet). The dev
+> `docker-compose.dev.yml` overrides both to CPU/GPU dev variants (Ultralytics
+> RT-DETR-x for detection; resnet50_msmt17 via boxmot for ReID). The dev
 > override must always be included on any non-Jetson machine.
 
 First build takes several minutes (model download, OpenCV, grpcio, k8s client).
@@ -512,7 +512,7 @@ docker compose logs -f iep1-daemon
 
 ### IEP2 Vision Worker
 
-**What it does:** Per-camera YOLO → ByteTrack → OSNet ReID → homography → `tracking_history`. One Deployment per active camera (created by Edge Agent on k3s; one compose service in dev).
+**What it does:** Per-camera RT-DETR → BoTSORT → resnet50_msmt17 ReID → homography → `tracking_history`. One Deployment per active camera (created by Edge Agent on k3s; one compose service in dev).
 
 **Start with Compose (requires `CAMERA_ID`, `STORE_ID`, Redis URLs, and DB URL):**
 
@@ -537,7 +537,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev up 
 ```
 
 IEP2 reads IEP1 manifests from the Redis stream for `CAMERA_ID` and processes each
-frame batch through YOLO → ByteTrack → OSNet → homography → `tracking_history`.
+frame batch through RT-DETR → BoTSORT → resnet50_msmt17 → homography → `tracking_history`.
 
 **Verify tracking rows after one batch:**
 ```bash
@@ -810,10 +810,10 @@ with separate Windows (PowerShell) and Linux/Jetson command variants.
 | `WINDOW_SECONDS` | required | Must match IEP1/IEP2 |
 | `DATABASE_URL_SERVER` | required | `postgresql://...` (no `+asyncpg`) |
 | `SERVER_REDIS_URL` | `redis://redis:6379/0` | Server Redis (reads `batch_complete` stream) |
-| `REID_THRESHOLD` | `0.75` | Cosine similarity threshold |
+| `REID_THRESHOLD` | `0.85` | Cosine similarity threshold |
 | `MAX_SPEED_MPS` | `1.5` | Spatial gate max walking speed |
 | `GRACE_SECONDS` | `300.0` | LOST → EXITED grace period |
-| `EMBEDDING_DIM` | `512` | OSNet embedding dimension |
+| `EMBEDDING_DIM` | `2048` | ReID embedding dimension (resnet50_msmt17) |
 | `CENTROID_EMA_ALPHA` | `0.3` | EMA smoothing for embedding updates |
 | `COORDINATOR_TIMEOUT_S` | `120.0` | Partial-batch timeout |
 | `POSITION_WEIGHT_AREA` | `0.7` | Canonical position scoring: bbox area weight |
@@ -977,7 +977,7 @@ Camera (RTSP / video file)
           └─ IEP2 vision: XREADGROUP iep1-frames
                ├─ Phase A (startup): drain un-ACKed messages
                ├─ Phase B (normal): block-read new messages
-               ├─ per manifest: tmpfs read → YOLO → ByteTrack → OSNet → homography
+               ├─ per manifest: tmpfs read → RT-DETR → BoTSORT → resnet50_msmt17 → homography
                ├─ INSERT tracking_history + UPSERT local_centroids
                ├─ XADD server-Redis stream:iep2:batch_complete
                └─ XACK edge-local-Redis stream:iep1:{camera_id}
@@ -1006,7 +1006,7 @@ restarts because it lives in Redis.
 | Table | Key columns |
 |---|---|
 | `tracking_history` | `camera_id`, `local_id UUID`, `timestamp_ms BIGINT`, `floor_x/y`, `zone_id`, `bbox_confidence`, `bbox_area` |
-| `local_centroids` | `local_id UUID PK`, `store_id UUID`, `centroid BYTEA` (float32[512]) |
+| `local_centroids` | `local_id UUID PK`, `store_id UUID`, `centroid BYTEA` (float32[2048]) |
 | `camera_schedules` | `store_id`, `camera_config_id`, `days_of_week`, `start_time`, `end_time`, `is_active` |
 | `edge_agents` | `store_id UNIQUE`, `status`, `last_heartbeat_at`, `agent_version` |
 | `camera_runtime_sessions` | `store_id`, `physical_camera_id`, `started_at`, `stopped_at`, `stop_reason` |

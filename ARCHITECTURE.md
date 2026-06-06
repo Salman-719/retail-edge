@@ -69,7 +69,7 @@ Camera (RTSP / video file)
 IEP1  Ingestion      decode frames → JPEG to tmpfs → 60 s window manifest → Redis
    │
    ▼
-IEP2  Vision         per camera: YOLO detect → ByteTrack → OSNet ReID embedding
+IEP2  Vision         per camera: RT-DETR detect → BoTSORT → resnet50_msmt17 ReID embedding
    │                 → homography (pixel → floor coords) → tracking_history
    │                 → publish batch_complete
    ▼
@@ -82,7 +82,7 @@ IEP4/5/6  (planned)  alerts · analytics aggregation · AI agent (NL queries)
 | Stage | Where it runs | Cardinality | Responsibility |
 |---|---|---|---|
 | **IEP1 — Ingestion** | Edge | 1 daemon per device (all cameras) | Pull RTSP/video, sample at `target_fps`, write JPEG frames to tmpfs, emit a 60 s **window manifest** to edge-local Redis. |
-| **IEP2 — Vision** | Edge | 1 deployment **per camera** | Read the manifest, run **YOLO** person detection → **ByteTrack** in-frame tracking → **OSNet** ReID embeddings → **homography** projection to floor coordinates. Writes `tracking_history`, publishes `batch_complete`. |
+| **IEP2 — Vision** | Edge | 1 deployment **per camera** | Read the manifest, run **RT-DETR** person detection → **BoTSORT** in-frame tracking (ReID off) → **resnet50_msmt17** ReID embeddings → **homography** projection to floor coordinates. Writes `tracking_history`, publishes `batch_complete`. |
 | **IEP3 — Reconciliation** | Cloud | 1 per store | The brain. Consumes every camera's `batch_complete`, waits for all cameras in a window, then **cosine-matches embeddings across cameras** to merge local tracks into **global identities** and picks one canonical floor position per person per timestamp. Manages identity state (ACTIVE → LOST → EXITED). |
 | **IEP4 — Alerts** | Cloud | planned | Rule/threshold alerts (e.g. occupancy over limit). |
 | **IEP5 — Analytics** | Cloud | planned | Aggregation of global trajectories into dashboards (dwell, flow, heatmaps). |
@@ -136,7 +136,7 @@ CLOUD (Kubernetes / Docker Compose)
 │    RTSP/video → JPEG → tmpfs → Redis XADD stream:iep1:{camera_id}      │
 │                                                                        │
 │  IEP2 vision (one Deployment per camera)                               │
-│    XREADGROUP → YOLO → ByteTrack → ReID → homography →                 │
+│    XREADGROUP → RT-DETR → BoTSORT → ReID → homography →                │
 │    INSERT tracking_history → XADD stream:iep2:batch_complete           │
 │                                                                        │
 │  YOLO service + OSNet service (GPU, ZMQ unix-socket IPC)               │
@@ -168,7 +168,8 @@ upgrades from the vision worker.
   `service_dev.py` (CPU dev mode using Ultralytics `.pt`; supports a live
   CPU/GPU toggle via the Redis key `inference:device` and publishes hardware
   capability to `inference:capability:detector`).
-- `osnet_service/` — same pattern for ReID embeddings (ResNet-18 fallback in dev).
+- `osnet_service/` — same pattern for ReID embeddings (resnet50_msmt17 via boxmot;
+  2048-dim. Service is still named `osnet_service` for socket/deployment continuity).
 
 ### Edge ↔ cloud control protocol (gRPC)
 
@@ -246,7 +247,7 @@ then calibrates homography per camera.
 | Table | Key columns |
 |---|---|
 | `tracking_history` | `camera_id`, `local_id`, `timestamp_ms`, `floor_x/y`, `zone_id`, `bbox_confidence`, `bbox_area` |
-| `local_centroids` | `local_id` PK, `store_id`, `centroid` (float32[512] ReID embedding) |
+| `local_centroids` | `local_id` PK, `store_id`, `centroid` (float32[2048] ReID embedding) |
 | `camera_schedules` | active windows per camera config |
 | `edge_agents` | `store_id` UNIQUE, `status`, `last_heartbeat_at`, `agent_version` |
 | `camera_runtime_sessions` | start/stop bookkeeping per camera run |
@@ -270,7 +271,7 @@ then calibrates homography per camera.
 | **API / Control plane (EEP)** | FastAPI 0.115, SQLAlchemy 2 (async), Pydantic v2, APScheduler 3.10, Alembic migrations |
 | **Edge ↔ cloud comms** | gRPC (grpcio 1.64), bidirectional streaming, TLS + shared-secret auth |
 | **Inter-stage messaging** | Redis 7.2 streams + consumer groups (`XREADGROUP`), two-Redis topology |
-| **Computer vision** | YOLO / RT-DETR (Ultralytics; TensorRT on Jetson), ByteTrack (boxmot), OSNet ReID |
+| **Computer vision** | RT-DETR (Ultralytics; TensorRT on Jetson), BoTSORT (boxmot), resnet50_msmt17 ReID (boxmot) |
 | **Inference IPC** | ZeroMQ unix sockets, msgpack, batched GPU inference services |
 | **Floor projection** | NumPy homography, Shapely polygons (zone hit-testing) |
 | **Database** | PostgreSQL 16 + PgBouncer 1.22, asyncpg 0.29 |
@@ -308,14 +309,14 @@ retail-edge/
 │   ├── eep/                # REST API + gRPC server + scheduler (control plane)
 │   ├── edge_agent/         # thin gRPC relay → k3s
 │   ├── iep1_ingestion/     # camera ingestion daemon (edge)
-│   ├── iep2_vision/        # per-camera YOLO+ByteTrack+ReID+homography worker
+│   ├── iep2_vision/        # per-camera RT-DETR+BoTSORT+ReID+homography worker
 │   ├── iep3_reconciliation/# cross-camera identity reconciliation (cloud)
 │   ├── iep4_alerts/        # (planned) alerting
 │   ├── iep5_analytics/     # (planned) analytics aggregation
 │   ├── iep6_agent/         # (planned) NL analytics agent
 │   ├── live_bridge/        # WebSocket live-frame relay
 │   ├── yolo_service/       # YOLO/RT-DETR inference service (GPU + CPU dev)
-│   └── osnet_service/      # OSNet ReID embedding service (GPU + CPU dev)
+│   └── osnet_service/      # resnet50_msmt17 ReID embedding service (GPU + CPU dev)
 ├── docs/
 │   ├── decisions/          # ADRs (e.g. ADR-001 XACK-before-processing)
 │   ├── operations/         # runbooks (e.g. IEP3 orphan sweep)

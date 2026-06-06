@@ -1295,7 +1295,7 @@ $COMPOSE logs yolo-service | grep -i "batch\|TRT\|engine"
 
 ### 4.2 OSNet ZMQ Roundtrip
 
-Send a person crop to OSNet and verify a 512-dim L2-normalised embedding is returned.
+Send a person crop to OSNet and verify a 2048-dim L2-normalised embedding is returned.
 
 **[WIN]**
 ```powershell
@@ -1329,7 +1329,7 @@ assert resp.get('request_id') == req_id, 'FAIL: request_id mismatch'
 emb_bytes = resp.get('embedding')
 assert emb_bytes is not None, 'FAIL: no embedding in response'
 emb = np.frombuffer(emb_bytes, dtype=np.float32)
-assert emb.shape == (512,), f'FAIL: expected (512,) got {emb.shape}'
+assert emb.shape == (2048,), f'FAIL: expected (2048,) got {emb.shape}'
 norm = np.linalg.norm(emb)
 assert abs(norm - 1.0) < 1e-5, f'FAIL: embedding not L2-normalised (norm={norm:.6f})'
 print(f'PASS: OSNet roundtrip OK — embedding shape={emb.shape} norm={norm:.6f}')
@@ -1353,7 +1353,7 @@ push.send(payload)
 resp=msgpack.unpackb(pull.recv(),raw=False)
 assert resp.get('request_id')==req_id,'request_id mismatch'
 emb=np.frombuffer(resp['embedding'],dtype=np.float32)
-assert emb.shape==(512,),f'shape={emb.shape}'
+assert emb.shape==(2048,),f'shape={emb.shape}'
 norm=np.linalg.norm(emb)
 assert abs(norm-1.0)<1e-5,f'norm={norm}'
 print(f'PASS: OSNet OK shape={emb.shape} norm={norm:.6f}')
