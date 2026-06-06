@@ -44,3 +44,4 @@ pgbouncer:
 
 redis:
   maxmemory: "256mb"
+  memoryLimit: "512Mi"

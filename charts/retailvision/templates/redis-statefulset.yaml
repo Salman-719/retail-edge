@@ -41,7 +41,9 @@ spec:
               memory: "256Mi"
             limits:
               cpu: "1000m"
-              memory: {{ .Values.redis.maxmemory | quote }}
+              # k8s quantity (e.g. 1Gi) — distinct from redis.maxmemory which uses
+              # redis units (e.g. 1gb) and only feeds redis.conf.
+              memory: {{ .Values.redis.memoryLimit | quote }}
           livenessProbe:
             exec:
               command: ["redis-cli", "-p", "6380", "--tls",

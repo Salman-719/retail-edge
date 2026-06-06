@@ -20,6 +20,7 @@ postgres:
 
 redis:
   maxmemory: "1gb"
+  memoryLimit: "1536Mi"
 
 # Set the real public hostname (DNS A/ALIAS -> the ingress NLB) before deploy.
 ingress:

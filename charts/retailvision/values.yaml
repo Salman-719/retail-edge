@@ -86,7 +86,8 @@ redis:
   image:
     tag: "7.2.4"
   tls: true
-  maxmemory: "512mb"
+  maxmemory: "512mb"      # redis units (feeds redis.conf)
+  memoryLimit: "768Mi"    # k8s container memory limit (headroom over maxmemory)
 
 # Public HTTPS ingress for the SPA + API (via the frontend pod's /api proxy).
 # Requires ingress-nginx + cert-manager (installed by bootstrap-cloud-k3s.sh).
