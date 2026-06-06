@@ -680,7 +680,10 @@ Redis, S3 for object storage, AWS Secrets Manager for secrets, and a single
 Elastic IP fronting ingress + gRPC via k3s ServiceLB (no always-on NLB).
 Images are pulled from **GitHub Container Registry**.
 
-**Full step-by-step runbook:** [docs/operations/deploy-aws-cloud.md](docs/operations/deploy-aws-cloud.md).
+**Definitive end-to-end guide (cloud + edge + new store, with troubleshooting):**
+[docs/operations/DEPLOYMENT_GUIDE.md](docs/operations/DEPLOYMENT_GUIDE.md).
+(Older topic docs: [deploy-aws-cloud.md](docs/operations/deploy-aws-cloud.md),
+[deploy-edge.md](docs/operations/deploy-edge.md).)
 
 Provisioning is two layers:
 
