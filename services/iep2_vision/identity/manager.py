@@ -368,7 +368,7 @@ if __name__ == "__main__":
     class _MockOsNetClient:
         """Injects a controlled embedding regardless of crop content."""
         def __init__(self):
-            self.emb = np.zeros(512, dtype=np.float32)
+            self.emb = np.zeros(2048, dtype=np.float32)
 
         async def start(self): pass
         async def close(self): pass
@@ -380,8 +380,8 @@ if __name__ == "__main__":
         mock = _MockOsNetClient()
         mgr  = LocalIdentityManager(mock)
 
-        emb_a = np.zeros(512, dtype=np.float32); emb_a[0] = 1.0
-        emb_b = np.zeros(512, dtype=np.float32); emb_b[1] = 1.0
+        emb_a = np.zeros(2048, dtype=np.float32); emb_a[0] = 1.0
+        emb_b = np.zeros(2048, dtype=np.float32); emb_b[1] = 1.0
 
         frame = np.zeros((200, 300, 3), dtype=np.uint8)
         bbox  = [10, 10, 110, 160]
