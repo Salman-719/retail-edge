@@ -320,8 +320,8 @@ retail-edge/
 ├── docs/
 │   ├── decisions/          # ADRs (e.g. ADR-001 XACK-before-processing)
 │   ├── operations/         # runbooks (e.g. IEP3 orphan sweep)
-│   └── security/           # mTLS migration
-├── docs_models/            # model experiments (detection / tracking / reid)
+│   ├── security/           # mTLS migration
+│   └── docs_models/        # model experiments (detection / tracking / reid)
 └── tests/
     ├── unit/iep3/          # pure-logic IEP3 tests (no infra)
     └── e2e/                # integration + end-to-end tests
