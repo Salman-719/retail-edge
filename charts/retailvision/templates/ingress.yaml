@@ -1,0 +1,33 @@
+{{- if .Values.ingress.enabled }}
+# Public HTTPS entry for the SPA + API. The frontend pod's nginx already proxies
+# /api/ -> eep-http, so the Ingress only needs to route the app host to frontend.
+# cert-manager issues the public cert via the Let's Encrypt ClusterIssuer.
+# Edge<->EEP gRPC (50051, mTLS) does NOT go through here — it uses the eep-grpc
+# LoadBalancer Service (TLS terminated at the pod). See values.eep.grpcPort.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: retailvision
+  namespace: retailvision
+  annotations:
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | quote }}
+    nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+spec:
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.appHost | quote }}
+      secretName: retailvision-app-tls
+  rules:
+    - host: {{ .Values.ingress.appHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+{{- end }}

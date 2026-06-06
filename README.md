@@ -673,35 +673,39 @@ The default `docker-compose.yml` runs the full stack with dev defaults. For debu
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
-### Cloud — Server (Helm)
+### Cloud — AWS-native (k3s on EC2, no EKS)
 
-Prerequisites: Kubernetes cluster, `cert-manager`, `external-secrets` installed.
+The cloud runs **k3s on EC2** (no control-plane fee), with in-cluster Postgres +
+Redis, S3 for object storage, AWS Secrets Manager for secrets, and a single
+Elastic IP fronting ingress + gRPC via k3s ServiceLB (no always-on NLB).
+Images are pulled from **GitHub Container Registry**.
+
+**Full step-by-step runbook:** [docs/operations/deploy-aws-cloud.md](docs/operations/deploy-aws-cloud.md).
+
+Provisioning is two layers:
 
 ```bash
-# Dry run
-helm upgrade --install retailvision ./charts/retailvision \
-  -f charts/retailvision/values.staging.yaml \
-  --namespace retailvision \
-  --create-namespace \
-  --dry-run
+# 1. Infrastructure (VPC, EC2 k3s server, S3, IAM, Secrets Manager, EIP).
+cd infra/aws
+cp terraform.tfvars.example terraform.tfvars   # edit hosts, bucket, region
+terraform init && terraform apply
+#   user-data runs scripts/bootstrap-cloud-k3s.sh -> k3s + ingress-nginx +
+#   cert-manager + external-secrets + ebs-csi. Point DNS at the output EIP.
 
-# Deploy staging
+# 2. Application (Helm). Run against the server's kubeconfig:
 helm upgrade --install retailvision ./charts/retailvision \
-  -f charts/retailvision/values.staging.yaml \
-  --namespace retailvision
+  -f charts/retailvision/values.production.yaml \
+  --set ingress.appHost=app.example.com \
+  --set eep.grpcHost=eep.example.com \
+  --set "iep3.stores={store-uuid-1,store-uuid-2}" \
+  --namespace retailvision --create-namespace
 
-# Verify EEP
-kubectl rollout status deployment/eep -n retailvision --timeout=120s
+kubectl rollout status deployment/eep -n retailvision --timeout=180s
 kubectl get pods -n retailvision
 ```
 
-Add stores to IEP3:
-```bash
-helm upgrade retailvision ./charts/retailvision \
-  -f charts/retailvision/values.production.yaml \
-  --set "iep3.stores={store-uuid-1,store-uuid-2}" \
-  --namespace retailvision
-```
+Adding a store later = append its UUID to `iep3.stores` and `helm upgrade`
+(spins up a per-store IEP3 StatefulSet), then bootstrap the store's edge device.
 
 ### Cloud — Edge Device (k3s bootstrap)
 
@@ -715,7 +719,12 @@ sudo bash scripts/bootstrap-edge-k3s.sh \
   <agent_secret>
 ```
 
-This installs k3s (API server loopback-only), applies `infra/edge/base/` manifests, writes the edge agent env file, and installs the systemd service. After bootstrap:
+For private GHCR images, also export `GHCR_USER` and `GHCR_TOKEN` (a PAT with
+`read:packages`) before running — the script writes `/etc/rancher/k3s/registries.yaml`.
+
+This installs k3s (API server loopback-only), applies `infra/edge/base/` via
+kustomize (`kubectl apply -k`, so image registry/tag are overridable), writes the
+edge agent env file, and installs the systemd service. After bootstrap:
 
 ```bash
 # Verify edge services
@@ -728,9 +737,10 @@ journalctl -u retailvision-edge-agent -f
 ### Updating edge images (zero-downtime rolling update)
 
 ```bash
-# Image tag convention: retail-edge-{service}:latest (or a pinned digest for production)
+# Images live at ghcr.io/<owner>/retailvision/{service}:<tag> (built by
+# .github/workflows/build-images.yml). Use a pinned tag/digest in production.
 k3s kubectl set image deployment/yolo-service \
-  yolo-service=retail-edge-yolo-service:latest \
+  yolo-service=ghcr.io/your-org/retailvision/yolo:1.0.1 \
   -n retailvision
 k3s kubectl rollout status deployment/yolo-service -n retailvision
 ```

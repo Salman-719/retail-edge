@@ -4,6 +4,8 @@
 
 eep:
   replicas: 1
+  hpa:
+    enabled: false   # fixed single replica in staging (see R1 note above)
   resources:
     requests:
       cpu: "250m"
@@ -11,6 +13,19 @@ eep:
     limits:
       cpu: "1000m"
       memory: "1Gi"
+
+frontend:
+  replicas: 1
+
+postgres:
+  storage: 10Gi
+
+ingress:
+  appHost: app.staging.retailvision.example.com   # override before deploy
+
+s3:
+  bucket: retailvision-staging
+  region: eu-west-1
 
 iep3:
   stores:

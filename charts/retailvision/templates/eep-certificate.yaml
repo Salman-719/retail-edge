@@ -10,6 +10,6 @@ spec:
     kind: ClusterIssuer
   dnsNames:
     - eep.retailvision.internal
-    - eep.retailvision.example.com
+    - {{ .Values.eep.grpcHost | quote }}
   duration: 8760h    # 1 year
   renewBefore: 720h  # renew 30 days before expiry

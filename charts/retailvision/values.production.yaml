@@ -3,9 +3,28 @@
 
 eep:
   replicas: 2
+  grpcHost: eep.retailvision.example.com   # set the real gRPC hostname before deploy
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
 
 iep3:
   stores: []   # set at deploy time: --set iep3.stores={uuid1,uuid2,...}
 
+frontend:
+  replicas: 2
+
+postgres:
+  storage: 50Gi
+
 redis:
   maxmemory: "1gb"
+
+# Set the real public hostname (DNS A/ALIAS -> the ingress NLB) before deploy.
+ingress:
+  appHost: app.retailvision.example.com
+
+s3:
+  bucket: retailvision-prod
+  region: eu-west-1

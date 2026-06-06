@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: osnet-service
-          image: retailvision-osnet-service:1.0.0
+          image: ghcr.io/your-org/retailvision/osnet:1.0.0
           resources:
             limits:
               nvidia.com/gpu: 1

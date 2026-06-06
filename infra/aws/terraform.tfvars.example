@@ -1,0 +1,29 @@
+# Copy to terraform.tfvars and fill in. Run: terraform init && terraform plan
+
+aws_region  = "eu-west-1"
+environment = "production"
+
+# Public hostnames (must match Helm values: ingress.appHost and eep.grpcHost).
+app_host = "app.retailvision.example.com"
+eep_host = "eep.retailvision.example.com"
+
+letsencrypt_email = "ops@retailvision.example.com"
+
+# Globally-unique bucket name (must match Helm values: s3.bucket).
+s3_bucket_name = "retailvision-prod-objects-CHANGEME"
+
+# Cost-efficient Graviton defaults; single-node to start.
+server_instance_type = "t4g.large"
+agent_count          = 0
+
+# Repo the nodes clone to run the bootstrap script.
+git_repo_url = "https://github.com/your-org/retail-edge.git"
+git_branch   = "deploy/aws-k3s"
+
+# Lock SSH to your IP, or leave default and use SSM Session Manager instead.
+# ssh_key_name     = "my-keypair"
+# ssh_ingress_cidr = "203.0.113.4/32"
+
+# Optional: let Terraform create the Route53 records.
+# create_dns_records = true
+# route53_zone_id    = "Z0123456789ABCDEFGHIJ"

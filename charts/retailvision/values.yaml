@@ -1,6 +1,12 @@
 global:
-  imageRegistry: registry.example.com/retailvision
+  # GitHub Container Registry. Replace `your-org` with the GitHub org/user that
+  # owns the images (see .github/workflows/build-images.yml). Images are pushed
+  # as ghcr.io/<owner>/retailvision/<service>:<tag>.
+  imageRegistry: ghcr.io/your-org/retailvision
   imagePullPolicy: IfNotPresent
+  # StorageClass for all PVCs (Postgres, Redis). Provisioned by the
+  # aws-ebs-csi-driver in bootstrap-cloud-k3s.sh.
+  storageClass: gp3
 
 windowSeconds: "60"
 
@@ -10,6 +16,9 @@ eep:
   replicas: 2
   grpcPort: 50051
   httpPort: 8000
+  # Public hostname edge devices dial for gRPC; must match the cert SAN and the
+  # EEP_HOST passed to bootstrap-edge-k3s.sh. Override per environment.
+  grpcHost: eep.retailvision.example.com
   resources:
     requests:
       cpu: "500m"
@@ -17,6 +26,11 @@ eep:
     limits:
       cpu: "2000m"
       memory: "2Gi"
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
 
 iep3:
   image:
@@ -29,6 +43,36 @@ iep3:
     limits:
       cpu: "1000m"
       memory: "1Gi"
+
+frontend:
+  enabled: true
+  image:
+    tag: "1.0.0"
+  replicas: 2
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "250m"
+      memory: "128Mi"
+
+# In-cluster PostgreSQL (cheapest option). For managed RDS instead, set
+# postgres.enabled=false and point pgbouncer POSTGRESQL_HOST at the RDS endpoint.
+postgres:
+  enabled: true
+  image:
+    tag: "16-alpine"
+  user: retailvision
+  database: retailvision
+  storage: 20Gi
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
 
 pgbouncer:
   image:
@@ -44,11 +88,32 @@ redis:
   tls: true
   maxmemory: "512mb"
 
+# Public HTTPS ingress for the SPA + API (via the frontend pod's /api proxy).
+# Requires ingress-nginx + cert-manager (installed by bootstrap-cloud-k3s.sh).
+ingress:
+  enabled: true
+  className: nginx
+  clusterIssuer: letsencrypt-prod
+  appHost: app.retailvision.example.com   # override per environment
+
+# Object storage. Empty endpointUrl => boto3 uses real AWS S3 for the region.
+s3:
+  endpointUrl: ""
+  publicUrl: ""                            # e.g. https://cdn.retailvision.example.com
+  bucket: retailvision
+  region: eu-west-1
+
+# Alembic migrations run as a Helm pre-install/pre-upgrade hook.
+migrations:
+  enabled: true
+
 secrets:
-  # Injected by external-secrets from secrets manager.
-  # Values are secret manager paths, not plaintext secrets.
+  # Injected by external-secrets from AWS Secrets Manager.
+  # Values are secret-manager paths/names, not plaintext secrets.
   postgresPassword: "retailvision/postgres-password"
   redisPassword:    "retailvision/redis-password"
   jwtSecret:        "retailvision/jwt-secret"
   agentSecret:      "retailvision/agent-secret"
   redisUrl:         "retailvision/redis-url"
+  s3AccessKey:      "retailvision/s3-access-key"
+  s3SecretKey:      "retailvision/s3-secret-key"

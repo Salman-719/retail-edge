@@ -31,8 +31,13 @@ spec:
               value: {{ . | quote }}
             - name: WINDOW_SECONDS
               value: {{ $.Values.windowSeconds | quote }}
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: postgres-password
             - name: DATABASE_URL_SERVER
-              value: "postgresql://pgbouncer:5432/retailvision"
+              value: "postgresql://{{ $.Values.postgres.user }}:$(PG_PASSWORD)@pgbouncer:5432/{{ $.Values.postgres.database }}"
             - name: SERVER_REDIS_URL
               valueFrom:
                 secretKeyRef:

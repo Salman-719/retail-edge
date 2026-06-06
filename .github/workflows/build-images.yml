@@ -1,0 +1,77 @@
+name: Build & Push Images
+
+# Builds all service images and pushes them to GitHub Container Registry.
+#   ghcr.io/<owner>/retailvision/<service>:<tag>
+# Cloud services (eep, iep3, frontend, ...) are multi-arch (amd64 + arm64) so they
+# run on Graviton or x86. Edge GPU services (yolo, osnet) are arm64-only for Jetson.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to push (e.g. 1.0.0)"
+        required: true
+        default: "latest"
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: eep,         context: services/eep,                platforms: "linux/amd64,linux/arm64" }
+          - { name: iep1,        context: services/iep1_ingestion,     platforms: "linux/amd64,linux/arm64" }
+          - { name: iep2,        context: services/iep2_vision,        platforms: "linux/amd64,linux/arm64" }
+          - { name: iep3,        context: services/iep3_reconciliation, platforms: "linux/amd64,linux/arm64" }
+          - { name: iep4,        context: services/iep4_alerts,        platforms: "linux/amd64,linux/arm64" }
+          - { name: iep5,        context: services/iep5_analytics,     platforms: "linux/amd64,linux/arm64" }
+          - { name: iep6,        context: services/iep6_agent,         platforms: "linux/amd64,linux/arm64" }
+          - { name: live-bridge, context: services/live_bridge,        platforms: "linux/amd64,linux/arm64" }
+          - { name: edge-agent,  context: services/edge_agent,         platforms: "linux/amd64,linux/arm64" }
+          - { name: frontend,    context: frontend,                    platforms: "linux/amd64,linux/arm64" }
+          # Edge GPU services — arm64 (Jetson/L4T) only. May need a self-hosted
+          # arm64 builder if the CUDA base image won't build under QEMU emulation.
+          - { name: yolo,        context: services/yolo_service,       platforms: "linux/arm64" }
+          - { name: osnet,       context: services/osnet_service,      platforms: "linux/arm64" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/retailvision/${{ matrix.name }}:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/retailvision/${{ matrix.name }}:latest
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max

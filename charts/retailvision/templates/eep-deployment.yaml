@@ -42,14 +42,40 @@ spec:
           env:
             - name: WINDOW_SECONDS
               value: {{ .Values.windowSeconds | quote }}
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: postgres-password
+            # Through pgbouncer (transaction pooling). $(PG_PASSWORD) is expanded
+            # by kubelet from the env var defined above.
             - name: DATABASE_URL_EEP
-              value: "postgresql+asyncpg://pgbouncer:5432/retailvision"
+              value: "postgresql+asyncpg://{{ .Values.postgres.user }}:$(PG_PASSWORD)@pgbouncer:5432/{{ .Values.postgres.database }}"
             # EEP reads REDIS_URL (not SERVER_REDIS_URL) — see config.py
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
                   name: retailvision-secrets
                   key: redis-url
+            # ── S3 / object storage (real AWS S3; empty endpoint -> AWS default) ──
+            - name: S3_ENDPOINT_URL
+              value: {{ .Values.s3.endpointUrl | quote }}
+            - name: S3_PUBLIC_URL
+              value: {{ .Values.s3.publicUrl | quote }}
+            - name: S3_BUCKET
+              value: {{ .Values.s3.bucket | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: s3-secret-key
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:

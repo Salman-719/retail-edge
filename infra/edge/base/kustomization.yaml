@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Apply with: kubectl apply -k infra/edge/base/
+# Override the registry/tag without editing manifests, e.g.:
+#   cd infra/edge/base && kustomize edit set image \
+#     ghcr.io/your-org/retailvision/iep1=ghcr.io/acme/retailvision/iep1:1.2.0
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - iep1-daemon.yaml
+  - yolo-service.yaml
+  - osnet-service.yaml
+
+images:
+  - name: ghcr.io/your-org/retailvision/iep1
+    newTag: "1.0.0"
+  - name: ghcr.io/your-org/retailvision/yolo
+    newTag: "1.0.0"
+  - name: ghcr.io/your-org/retailvision/osnet
+    newTag: "1.0.0"

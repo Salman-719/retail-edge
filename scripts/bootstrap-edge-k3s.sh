@@ -1,12 +1,16 @@
 #!/bin/bash
 # Bootstrap a Jetson edge device with k3s and the RetailVision edge stack.
 # Usage: sudo ./bootstrap-edge-k3s.sh <store_uuid> <version> <eep_host> <agent_secret>
+# Optional env for pulling private GHCR images:
+#   GHCR_USER, GHCR_TOKEN   (a GitHub PAT with read:packages)
 set -euo pipefail
 
 STORE_UUID=$1
 VERSION=$2
 EEP_HOST=$3
 AGENT_SECRET=$4
+GHCR_USER="${GHCR_USER:-}"
+GHCR_TOKEN="${GHCR_TOKEN:-}"
 
 echo "=== RetailVision k3s bootstrap for store ${STORE_UUID} ==="
 
@@ -18,6 +22,20 @@ chronyc waitsync 10 0.5 0 30 || {
     exit 1
 }
 echo "[1/7] NTP sync OK"
+
+# 1b. (Optional) authenticate k3s/containerd to GHCR for private images.
+if [ -n "${GHCR_TOKEN}" ]; then
+    mkdir -p /etc/rancher/k3s
+    cat > /etc/rancher/k3s/registries.yaml << EOF
+configs:
+  ghcr.io:
+    auth:
+      username: ${GHCR_USER}
+      password: ${GHCR_TOKEN}
+EOF
+    chmod 600 /etc/rancher/k3s/registries.yaml
+    echo "[1b] GHCR registry credentials written"
+fi
 
 # 2. Install k3s (single-node, no CNI, no traefik)
 #    --bind-address=127.0.0.1: API server loopback-only (R5 — never network-accessible)
@@ -56,7 +74,7 @@ echo "[4/7] Shared host paths created"
 #    Manifests live at infra/edge/base/ in the repo (bootstrap-edge-k3s.sh
 #    expects to run from the repo root)
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-k3s kubectl apply -f infra/edge/base/
+k3s kubectl apply -k infra/edge/base/
 
 echo "[5/7] Base manifests applied — waiting for rollout..."
 k3s kubectl rollout status deployment/yolo-service  -n retailvision --timeout=120s
@@ -70,7 +88,7 @@ cat > /etc/retailvision/edge-agent.env << EOF
 EEP_GRPC_URL=${EEP_HOST}:50051
 STORE_ID=${STORE_UUID}
 AGENT_VERSION=${VERSION}
-IEP2_IMAGE=retailvision-iep2:${VERSION}
+IEP2_IMAGE=ghcr.io/your-org/retailvision/iep2:${VERSION}
 WINDOW_SECONDS=60
 HEARTBEAT_INTERVAL_S=30
 LOCAL_REDIS_URL=redis://127.0.0.1:6379

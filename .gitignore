@@ -58,3 +58,9 @@ docsme/
 # TLS private keys — never commit
 *.key
 certs/*.key
+# Terraform
+infra/aws/.terraform/
+infra/aws/.terraform.lock.hcl
+infra/aws/terraform.tfvars
+*.tfstate
+*.tfstate.*

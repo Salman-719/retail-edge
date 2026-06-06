@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: yolo-service
-          image: retailvision-yolo-service:1.0.0
+          image: ghcr.io/your-org/retailvision/yolo:1.0.0
           resources:
             limits:
               nvidia.com/gpu: 1

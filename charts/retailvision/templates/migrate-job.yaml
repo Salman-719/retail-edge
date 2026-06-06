@@ -1,0 +1,45 @@
+{{- if .Values.migrations.enabled }}
+# Alembic migrations run as a Helm pre-install/pre-upgrade hook, BEFORE EEP rolls
+# out. Connects directly to postgres (bypassing pgbouncer) per alembic/env.py,
+# which reads ALEMBIC_DATABASE_URL. Hook-delete-policy keeps the namespace clean.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: eep-migrate
+  namespace: retailvision
+  labels:
+    app: eep-migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: eep-migrate
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: "{{ .Values.global.imageRegistry }}/eep:{{ .Values.eep.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["alembic", "upgrade", "head"]
+          env:
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: postgres-password
+            - name: ALEMBIC_DATABASE_URL
+              value: "postgresql+psycopg2://{{ .Values.postgres.user }}:$(PG_PASSWORD)@postgres:5432/{{ .Values.postgres.database }}"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+{{- end }}
