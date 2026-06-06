@@ -9,6 +9,11 @@ database:
 pgbouncer:
   enabled: false
 
+# EEP runs alembic at startup against the schema.sql-seeded Postgres (same as dev),
+# so the separate pre/post-install migrate hook is unnecessary here.
+migrations:
+  enabled: false
+
 eep:
   replicas: 1
   grpcHost: eep.retailvision.example.com   # set the real gRPC hostname before deploy

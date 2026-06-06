@@ -42,6 +42,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            # Seeds the full schema on first init (empty data dir), mirroring
+            # docker-compose. Alembic/EEP then layer indexes/constraints on top.
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
           resources: {{ toYaml .Values.postgres.resources | nindent 12 }}
           livenessProbe:
             exec:
@@ -54,6 +59,10 @@ spec:
               command: ["pg_isready", "-U", "{{ .Values.postgres.user }}", "-d", "{{ .Values.postgres.database }}"]
             initialDelaySeconds: 10
             periodSeconds: 10
+      volumes:
+        - name: initdb
+          configMap:
+            name: postgres-initdb
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -79,4 +88,15 @@ spec:
     - name: postgres
       port: 5432
       targetPort: 5432
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-initdb
+  namespace: retailvision
+  labels:
+    app: postgres
+data:
+  schema.sql: |
+{{ .Files.Get "files/schema.sql" | indent 4 }}
 {{- end }}
