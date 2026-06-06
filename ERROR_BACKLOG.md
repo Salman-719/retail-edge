@@ -39,7 +39,7 @@ Each entry follows the format:
 
 ### BUG-002 — YOLO and OSNet services not runnable on x86 / Intel (no Jetson/CUDA)
 **Status:** Fixed  
-**Service(s):** `yolo-service`, `osnet-service`, `docker-compose.dev.yml`  
+**Service(s):** `yolo-service`, `reid-service`, `docker-compose.dev.yml`  
 **Severity:** Critical (blocks dev stack on any non-Jetson machine)  
 **Symptom:** `docker compose build` fails because `nvcr.io/nvidia/l4t-pytorch:r36.2.0-pth2.2-py3` is an ARM64/Jetson-only base image; TRT/pycuda deps are unavailable on x86.  
 **Root Cause:** Both inference service Dockerfiles are pinned to the Jetson JetPack base image and require TensorRT + pycuda, which are NVIDIA-GPU/ARM64-only. No CPU fallback existed.  
@@ -47,11 +47,11 @@ Each entry follows the format:
 - `services/yolo_service/Dockerfile.dev` — `python:3.11-slim` base, CPU torch, ultralytics `.pt` model
 - `services/yolo_service/service_dev.py` — identical ZMQ wire protocol, loads `yolov8n.pt` on CPU
 - `services/yolo_service/requirements.dev.txt`
-- `services/osnet_service/Dockerfile.dev` — `python:3.11-slim` base, CPU torch+torchvision, ResNet-18 (512-dim avgpool, same L2-norm wire format)
-- `services/osnet_service/service_dev.py` — identical ZMQ wire protocol, no TRT/pycuda
-- `services/osnet_service/requirements.dev.txt`
+- `services/reid_service/Dockerfile.dev` — `python:3.11-slim` base, CPU torch+torchvision, ResNet-18 (512-dim avgpool, same L2-norm wire format)
+- `services/reid_service/service_dev.py` — identical ZMQ wire protocol, no TRT/pycuda
+- `services/reid_service/requirements.dev.txt`
 - Updated `docker-compose.dev.yml` to override builds for both services + set `ML_SERVICES_TIMEOUT_S=300`  
-**Verification:** Run `docker compose -f docker-compose.yml -f docker-compose.dev.yml build yolo-service osnet-service`; both should build successfully on x86.  
+**Verification:** Run `docker compose -f docker-compose.yml -f docker-compose.dev.yml build yolo-service reid-service`; both should build successfully on x86.  
 **Notes:** ResNet-18 produces valid 512-dim L2-normalised embeddings — full pipeline works end-to-end. ReID matching quality is lower than OSNet but sufficient for dev testing. IEP2, IEP1, EEP, IEP3 are unchanged.
 
 ---
@@ -66,9 +66,9 @@ Each entry follows the format:
   2. The `protobuf==4.25.3` pin was incorrect across all services. Confirmed by `agent_pb2.py` header `# Protobuf Python Version: 5.26.1` — stubs were already generated with protobuf 5.x. The entire grpcio 1.64.0 ecosystem (`grpcio-tools`, `grpcio-reflection`, `grpcio-health-checking`) requires `protobuf>=5.26.1`.  
 **Fix:**  
   - Removed `grpcio-tools==1.64.0` from `services/eep/requirements.txt` and `services/edge_agent/requirements.txt` (not needed at runtime; stubs are pre-generated).  
-  - Upgraded `protobuf==4.25.3` → `protobuf==5.27.2` in all 8 requirements files (eep, edge_agent, iep1_ingestion, iep2_vision, yolo_service, osnet_service, yolo_service/requirements.dev.txt, osnet_service/requirements.dev.txt).  
+  - Upgraded `protobuf==4.25.3` → `protobuf==5.27.2` in all 8 requirements files (eep, edge_agent, iep1_ingestion, iep2_vision, yolo_service, reid_service, yolo_service/requirements.dev.txt, reid_service/requirements.dev.txt).  
   - Both stub styles (`agent_pb2.py` serialized-file approach and `iep1_control_pb2.py` dynamic descriptor approach) use APIs available in both protobuf 4.x and 5.x — no stub regeneration needed.  
-**Verification:** Re-run `docker compose -f docker-compose.yml -f docker-compose.dev.yml build yolo-service osnet-service eep`; all pip installs should resolve cleanly.  
+**Verification:** Re-run `docker compose -f docker-compose.yml -f docker-compose.dev.yml build yolo-service reid-service eep`; all pip installs should resolve cleanly.  
 **Notes:** To regenerate stubs in future: install `grpcio-tools==1.64.0` in a one-off container as documented in the README. IDE "package not installed" hints on requirements.txt files are the local Windows Python linter checking the host environment — not Docker build errors, safely ignored.
 
 ---

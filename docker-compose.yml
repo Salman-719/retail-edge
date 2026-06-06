@@ -146,7 +146,7 @@ services:
       DOCKER_NETWORK: ${DOCKER_NETWORK:-retail-edge_default}
       IPC_SOCKETS_VOLUME: ${IPC_SOCKETS_VOLUME:-retail-edge_ipc-sockets}
       YOLO_HEALTH_TCP_ADDR: yolo-service:50052
-      OSNET_HEALTH_TCP_ADDR: osnet-service:50053
+      REID_HEALTH_TCP_ADDR: reid-service:50053
       ML_SERVICES_TIMEOUT_S: ${ML_SERVICES_TIMEOUT_S:-120}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -157,7 +157,7 @@ services:
         condition: service_healthy
       yolo-service:
         condition: service_started
-      osnet-service:
+      reid-service:
         condition: service_started
     restart: on-failure
 
@@ -215,19 +215,19 @@ services:
       - "50052:50052"
     restart: on-failure
 
-  # ── OSNet ReID embedding service ──────────────────────────────────────────────
+  # ── ReID embedding service (resnet50_msmt17) ─────────────────────────────────
   # Single GPU process; batches person crops from all IEP2 workers into one TRT call.
-  # Returns L2-normalised 512-dim float32 embeddings. Jetson/ARM64 only.
-  osnet-service:
+  # Returns L2-normalised 2048-dim float32 embeddings. Jetson/ARM64 only.
+  reid-service:
     build:
-      context: ./services/osnet_service
+      context: ./services/reid_service
       dockerfile: Dockerfile
     environment:
-      OSNET_MAX_BATCH_SIZE: ${OSNET_MAX_BATCH_SIZE:-64}
-      OSNET_BATCH_TIMEOUT_MS: ${OSNET_BATCH_TIMEOUT_MS:-50}
-      OSNET_INPUT_SOCK: "ipc:///tmp/sockets/osnet_input.sock"
-      OSNET_HEALTH_SOCK: "unix:///tmp/sockets/osnet_health.sock"
-      OSNET_HEALTH_TCP_ADDR: "[::]:50053"
+      REID_MAX_BATCH_SIZE: ${REID_MAX_BATCH_SIZE:-64}
+      REID_BATCH_TIMEOUT_MS: ${REID_BATCH_TIMEOUT_MS:-50}
+      REID_INPUT_SOCK: "ipc:///tmp/sockets/reid_input.sock"
+      REID_HEALTH_SOCK: "unix:///tmp/sockets/reid_health.sock"
+      REID_HEALTH_TCP_ADDR: "[::]:50053"
     volumes:
       - ipc-sockets:/tmp/sockets
     ports:
@@ -250,10 +250,10 @@ services:
       LOCAL_REDIS_URL: "redis://redis:6379/0"
       SERVER_REDIS_URL: "redis://redis:6379/0"
       YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
-      OSNET_INPUT_SOCK: "ipc:///tmp/sockets/osnet_input.sock"
+      REID_INPUT_SOCK: "ipc:///tmp/sockets/reid_input.sock"
       TMPFS_FRAME_ROOT: /dev/shm/frames
       YOLO_HEALTH_TCP_ADDR: yolo-service:50052
-      OSNET_HEALTH_TCP_ADDR: osnet-service:50053
+      REID_HEALTH_TCP_ADDR: reid-service:50053
     volumes:
       - ./testing-data:/workspace/testing-data:ro
       - ipc-sockets:/tmp/sockets
@@ -265,7 +265,7 @@ services:
         condition: service_healthy
       yolo-service:
         condition: service_started
-      osnet-service:
+      reid-service:
         condition: service_started
       iep1-daemon:
         condition: service_started
@@ -349,7 +349,7 @@ services:
     environment:
       <<: *shared-config
       YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
-      OSNET_INPUT_SOCK: "ipc:///tmp/sockets/osnet_input.sock"
+      REID_INPUT_SOCK: "ipc:///tmp/sockets/reid_input.sock"
       LOCAL_REDIS_URL: "redis://redis:6379/0"
       SERVER_REDIS_URL: "redis://redis:6379/0"
     volumes:
@@ -362,7 +362,7 @@ services:
         condition: service_healthy
       yolo-service:
         condition: service_started
-      osnet-service:
+      reid-service:
         condition: service_started
     profiles:
       - dev
@@ -382,11 +382,11 @@ services:
       AGENT_SECRET: "${AGENT_SECRET:-dev-agent-secret}"
       IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
       IEP1_HEALTH_SOCK: "unix:///tmp/iep1-sockets/iep1_health.sock"
-      # In the compose network, yolo-service and osnet-service are reachable by
+      # In the compose network, yolo-service and reid-service are reachable by
       # their service names, not localhost. The Edge Agent defaults to localhost:50052/50053
       # which only works on a Jetson host where the containers share the host network.
       YOLO_HEALTH_SOCK:  "yolo-service:50052"
-      OSNET_HEALTH_SOCK: "osnet-service:50053"
+      REID_HEALTH_SOCK: "reid-service:50053"
       # IPC_SOCKETS_HOST_PATH is only used by the k8s path (IEP2 pod health sockets).
       # In compose, IEP2 health sockets land in the ipc-sockets volume at /tmp/sockets.
       IPC_SOCKETS_HOST_PATH: "/tmp/iep1-sockets"
@@ -396,7 +396,7 @@ services:
       - eep
       - iep1-daemon
       - yolo-service
-      - osnet-service
+      - reid-service
     profiles:
       - edge
 

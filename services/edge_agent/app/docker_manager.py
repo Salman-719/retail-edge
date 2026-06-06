@@ -4,7 +4,7 @@ DEPRECATED — superseded by k8s_manager.py in the M3-S4 k3s deployment model.
 Retained for reference. Not imported by agent.py.
 
 Manages:
-  - yolo-service / osnet-service  (long-lived, one per device, GPU)
+  - yolo-service / reid-service  (long-lived, one per device, GPU)
   - iep1-daemon                   (long-lived, one per device)
   - iep2_{store_id}_{camera_id}   (per-camera, started/stopped per schedule)
 
@@ -27,7 +27,7 @@ IEP1_SOCKETS_VOLUME = os.environ.get("IEP1_SOCKETS_VOLUME", "retail-edge_iep1-so
 IEP1_IMAGE  = os.environ.get("IEP1_IMAGE",  "retailvision-iep1:latest")
 IEP2_IMAGE  = os.environ.get("IEP2_IMAGE",  "retailvision-iep2:latest")
 YOLO_IMAGE  = os.environ.get("YOLO_IMAGE",  "retailvision-yolo-service:latest")
-OSNET_IMAGE = os.environ.get("OSNET_IMAGE", "retailvision-osnet-service:latest")
+REID_IMAGE = os.environ.get("REID_IMAGE", "retailvision-reid-service:latest")
 
 _client: docker.DockerClient | None = None
 

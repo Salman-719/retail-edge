@@ -139,7 +139,7 @@ CLOUD (Kubernetes / Docker Compose)
 │    XREADGROUP → RT-DETR → BoTSORT → ReID → homography →                │
 │    INSERT tracking_history → XADD stream:iep2:batch_complete           │
 │                                                                        │
-│  YOLO service + OSNet service (GPU, ZMQ unix-socket IPC)               │
+│  YOLO service + ReID service (GPU, ZMQ unix-socket IPC)               │
 │  Edge-local Redis (loopback-only, ephemeral)                           │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -156,10 +156,10 @@ The system deliberately runs **two separate Redis instances**:
 This keeps high-frequency frame traffic local to the device and only sends compact
 batch-complete signals across the WAN.
 
-### The inference micro-services (YOLO / OSNet)
+### The inference micro-services (YOLO / ReID)
 
 IEP2 does not load the heavy models itself. Instead, **YOLO** (detection) and
-**OSNet** (ReID embeddings) run as **separate GPU services** that IEP2 talks to
+**ReID** (resnet50_msmt17 embeddings) run as **separate GPU services** that IEP2 talks to
 over **ZeroMQ unix-socket IPC** (msgpack-encoded). This lets one shared GPU
 serve many per-camera IEP2 workers via batched inference, and decouples model
 upgrades from the vision worker.
@@ -168,8 +168,8 @@ upgrades from the vision worker.
   `service_dev.py` (CPU dev mode using Ultralytics `.pt`; supports a live
   CPU/GPU toggle via the Redis key `inference:device` and publishes hardware
   capability to `inference:capability:detector`).
-- `osnet_service/` — same pattern for ReID embeddings (resnet50_msmt17 via boxmot;
-  2048-dim. Service is still named `osnet_service` for socket/deployment continuity).
+- `reid_service/` — same pattern for ReID embeddings (resnet50_msmt17 via boxmot;
+  2048-dim. Service is still named `reid_service` for socket/deployment continuity).
 
 ### Edge ↔ cloud control protocol (gRPC)
 
@@ -284,9 +284,9 @@ then calibrates homography per camera.
 
 ### Build/runtime variants
 
-- **`docker-compose.yml`** — base stack (YOLO/OSNet build from Jetson/ARM64 bases).
+- **`docker-compose.yml`** — base stack (YOLO/ReID build from Jetson/ARM64 bases).
 - **`docker-compose.dev.yml`** — CPU-only overlay for x86 dev machines; required on
-  any non-Jetson host. Swaps YOLO/OSNet to CPU variants and enables `DEBUG_MODE`.
+  any non-Jetson host. Swaps YOLO/ReID to CPU/GPU dev variants and enables `DEBUG_MODE`.
 - **`docker-compose.gpu.yml`** — overlay that builds detector + ReID with CUDA
   PyTorch and reserves an NVIDIA GPU.
 
@@ -316,7 +316,7 @@ retail-edge/
 │   ├── iep6_agent/         # (planned) NL analytics agent
 │   ├── live_bridge/        # WebSocket live-frame relay
 │   ├── yolo_service/       # YOLO/RT-DETR inference service (GPU + CPU dev)
-│   └── osnet_service/      # resnet50_msmt17 ReID embedding service (GPU + CPU dev)
+│   └── reid_service/      # resnet50_msmt17 ReID embedding service (GPU + CPU dev)
 ├── docs/
 │   ├── decisions/          # ADRs (e.g. ADR-001 XACK-before-processing)
 │   ├── operations/         # runbooks (e.g. IEP3 orphan sweep)

@@ -6,11 +6,11 @@ outputs 2048-dim float32 features — the production ReID embedding dimensionali
 For local development only — do NOT deploy to production (use Dockerfile/TRT).
 
 Architecture (unchanged from service.py):
-  IEP2 × N  ──PUSH──►  PULL (osnet_input.sock)
+  IEP2 × N  ──PUSH──►  PULL (reid_input.sock)
                             ↓ batch collector
                         resnet50_msmt17 inference + L2 norm
                             ↓ per-camera routing
-  IEP2 × N  ◄──PUSH──  PUSH(osnet_output_{camera_id}.sock)
+  IEP2 × N  ◄──PUSH──  PUSH(reid_output_{camera_id}.sock)
 """
 
 import asyncio
@@ -26,7 +26,7 @@ import numpy as np
 import zmq
 import zmq.asyncio
 
-log = logging.getLogger("osnet_service_dev")
+log = logging.getLogger("reid_service_dev")
 
 # ── Device selection (CPU / GPU) shared with the dev pipeline ──────────────────
 # Mirrors the detector service: reads the desired device from Redis `inference:device`,
@@ -91,13 +91,13 @@ def _device_watcher() -> None:
         time.sleep(2)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-OSNET_INPUT_SOCK       = os.environ.get("OSNET_INPUT_SOCK",        "ipc:///tmp/sockets/osnet_input.sock")
-OSNET_HEALTH_UNIX_SOCK = os.environ.get("OSNET_HEALTH_SOCK",       "unix:///tmp/sockets/osnet_health.sock")
-OSNET_HEALTH_TCP_ADDR  = os.environ.get("OSNET_HEALTH_TCP_ADDR",   "[::]:50053")
-OSNET_MODEL_PATH       = os.environ.get("OSNET_MODEL_PATH",        "resnet50_msmt17.pt")
+REID_INPUT_SOCK       = os.environ.get("REID_INPUT_SOCK",        "ipc:///tmp/sockets/reid_input.sock")
+REID_HEALTH_UNIX_SOCK = os.environ.get("REID_HEALTH_SOCK",       "unix:///tmp/sockets/reid_health.sock")
+REID_HEALTH_TCP_ADDR  = os.environ.get("REID_HEALTH_TCP_ADDR",   "[::]:50053")
+REID_MODEL_PATH       = os.environ.get("REID_MODEL_PATH",        "resnet50_msmt17.pt")
 # Smaller defaults on CPU.
-MAX_BATCH_SIZE         = int(os.environ.get("OSNET_MAX_BATCH_SIZE",    "8"))
-BATCH_TIMEOUT_MS       = float(os.environ.get("OSNET_BATCH_TIMEOUT_MS", "200"))
+MAX_BATCH_SIZE         = int(os.environ.get("REID_MAX_BATCH_SIZE",    "8"))
+BATCH_TIMEOUT_MS       = float(os.environ.get("REID_BATCH_TIMEOUT_MS", "200"))
 EMBEDDING_DIM          = 2048
 
 # ImageNet normalisation — same constants boxmot's backend uses (R3).
@@ -109,7 +109,7 @@ _result_sockets: dict[str, zmq.asyncio.Socket] = {}
 
 
 def _result_sock_addr(camera_id: str) -> str:
-    return f"ipc:///tmp/sockets/osnet_output_{camera_id}.sock"
+    return f"ipc:///tmp/sockets/reid_output_{camera_id}.sock"
 
 
 def _get_result_socket(ctx: zmq.asyncio.Context, camera_id: str) -> zmq.asyncio.Socket:
@@ -134,7 +134,7 @@ def _load_model():
     # not PyTorch's "cuda" string.
     boxmot_device = "0" if device == "cuda" else device
     rab = ReidAutoBackend(
-        weights=Path(OSNET_MODEL_PATH),
+        weights=Path(REID_MODEL_PATH),
         device=torch.device(boxmot_device) if boxmot_device == "cpu" else boxmot_device,
         half=False,
     )
@@ -254,10 +254,10 @@ async def _run_health_server(health_servicer) -> None:
 
     server = grpc.aio.server()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
-    server.add_insecure_port(OSNET_HEALTH_UNIX_SOCK)
-    server.add_insecure_port(OSNET_HEALTH_TCP_ADDR)
+    server.add_insecure_port(REID_HEALTH_UNIX_SOCK)
+    server.add_insecure_port(REID_HEALTH_TCP_ADDR)
     await server.start()
-    log.info("Health server: unix=%s  tcp=%s", OSNET_HEALTH_UNIX_SOCK, OSNET_HEALTH_TCP_ADDR)
+    log.info("Health server: unix=%s  tcp=%s", REID_HEALTH_UNIX_SOCK, REID_HEALTH_TCP_ADDR)
     await server.wait_for_termination()
 
 
@@ -292,8 +292,8 @@ async def main() -> None:
     os.makedirs("/tmp/sockets", exist_ok=True)
     ctx = zmq.asyncio.Context.instance()
     pull_sock = ctx.socket(zmq.PULL)
-    pull_sock.bind(OSNET_INPUT_SOCK)
-    log.info("Bound input socket: %s", OSNET_INPUT_SOCK)
+    pull_sock.bind(REID_INPUT_SOCK)
+    log.info("Bound input socket: %s", REID_INPUT_SOCK)
 
     await _inference_loop(model, pull_sock, ctx)
 

@@ -47,13 +47,13 @@ services:
       SERVER_REDIS_URL: "redis://redis:6379/0"
       INFERENCE_DEVICE: "cpu"
 
-  osnet-service:
+  reid-service:
     build:
-      context: ./services/osnet_service
+      context: ./services/reid_service
       dockerfile: Dockerfile.dev
     environment:
-      OSNET_MAX_BATCH_SIZE: "8"
-      OSNET_BATCH_TIMEOUT_MS: "200"
+      REID_MAX_BATCH_SIZE: "8"
+      REID_BATCH_TIMEOUT_MS: "200"
       SERVER_REDIS_URL: "redis://redis:6379/0"
       INFERENCE_DEVICE: "cpu"
 

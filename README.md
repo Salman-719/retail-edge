@@ -38,7 +38,7 @@ CLOUD (Kubernetes / Docker Compose)
 │    XREADGROUP iep1-frames → RT-DETR → BoTSORT → ReID → homography   │
 │    → INSERT tracking_history → XADD stream:iep2:batch_complete      │
 │                                                                      │
-│  YOLO service + OSNet service (GPU, unix socket IPC)                 │
+│  YOLO service + ReID service (GPU, unix socket IPC)                 │
 │  Edge-local Redis (loopback-only, ephemeral)                         │
 └──────────────────────────────────────────────────────────────────────┘
 
@@ -92,7 +92,7 @@ retail-edge/
 │   ├── iep3_reconciliation/     # Cross-camera identity reconciliation daemon
 │   ├── live_bridge/             # WebSocket live frame relay
 │   ├── yolo_service/            # YOLO gRPC inference service (GPU)
-│   └── osnet_service/           # resnet50_msmt17 ReID embedding service (GPU)
+│   └── reid_service/           # resnet50_msmt17 ReID embedding service (GPU)
 └── tests/
     ├── unit/iep3/               # IEP3 pure-logic unit tests (no infrastructure)
     └── e2e/                     # Integration + end-to-end tests
@@ -153,7 +153,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 ```
 
-> **Why the dev overlay?** The base `docker-compose.yml` builds YOLO and OSNet
+> **Why the dev overlay?** The base `docker-compose.yml` builds YOLO and ReID
 > from Jetson/ARM64 JetPack base images that cannot build or run on x86.
 > `docker-compose.dev.yml` overrides both to CPU/GPU dev variants (Ultralytics
 > RT-DETR-x for detection; resnet50_msmt17 via boxmot for ReID). The dev
@@ -183,16 +183,16 @@ EEP first startup automatically runs Alembic schema migrations. Allow 30–60 s 
 
 ### 5. Start the edge inference services
 
-YOLO and OSNet must be running before IEP1 or IEP2 can start.
+YOLO and ReID must be running before IEP1 or IEP2 can start.
 
 **Windows (PowerShell):**
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d yolo-service osnet-service iep1-daemon
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d yolo-service reid-service iep1-daemon
 ```
 
 **macOS / Linux:**
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d yolo-service osnet-service iep1-daemon
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d yolo-service reid-service iep1-daemon
 ```
 
 > The Edge Agent (`edge_agent_dev`) requires a valid kubeconfig to init the k3s
@@ -330,7 +330,7 @@ reserves the GPU for them. Run from the `retail-edge/` directory.
 **Build (first time, or after pulling changes):**
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
-  build yolo-service osnet-service
+  build yolo-service reid-service
 ```
 > CUDA PyTorch is a large download (~2.5 GB) — the first build takes several minutes.
 > If your NVIDIA driver is older than CUDA 12.1 (driver < 525), edit
@@ -341,7 +341,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose
 docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml up -d \
   postgres pgbouncer redis minio \
   eep iep3_reconciliation live_bridge \
-  yolo-service osnet-service iep1-daemon
+  yolo-service reid-service iep1-daemon
 ```
 
 ### Step G5 — Verify the services are on the GPU
@@ -660,7 +660,7 @@ docker compose logs -f edge_agent_dev
 
 ```bash
 docker compose up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge
-docker compose --profile edge up -d iep1-daemon yolo-service osnet-service edge_agent_dev
+docker compose --profile edge up -d iep1-daemon yolo-service reid-service edge_agent_dev
 ```
 
 ### Step 2 — Create a store, add cameras, configure schedules
@@ -799,7 +799,7 @@ with separate Windows (PowerShell) and Linux/Jetson command variants.
 | `SERVER_REDIS_URL` | yes | Server Redis (publishes `batch_complete`) |
 | `DATABASE_URL_SERVER` | yes | `postgresql://...` (no `+asyncpg` prefix) |
 | `YOLO_INPUT_SOCK` | yes | ZMQ IPC socket for YOLO inference |
-| `OSNET_INPUT_SOCK` | yes | ZMQ IPC socket for OSNet inference |
+| `REID_INPUT_SOCK` | yes | ZMQ IPC socket for ReID inference |
 | `TMPFS_FRAME_ROOT` | yes | Shared frame store path (reads IEP1 files) |
 
 ### IEP3 Reconciliation

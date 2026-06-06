@@ -4,9 +4,9 @@
 # them. Stack on TOP of the dev overlay:
 #
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
-#     build yolo-service osnet-service
+#     build yolo-service reid-service
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
-#     up -d yolo-service osnet-service
+#     up -d yolo-service reid-service
 #
 # Requires: NVIDIA driver + NVIDIA Container Toolkit on the host (see README
 # "Running inference on a GPU"). The CUDA torch wheel bundles its own CUDA
@@ -31,7 +31,7 @@ services:
               count: all
               capabilities: [gpu]
 
-  osnet-service:
+  reid-service:
     build:
       args:
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121

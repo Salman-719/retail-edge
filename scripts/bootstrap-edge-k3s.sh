@@ -60,7 +60,7 @@ k3s kubectl apply -f infra/edge/base/
 
 echo "[5/7] Base manifests applied — waiting for rollout..."
 k3s kubectl rollout status deployment/yolo-service  -n retailvision --timeout=120s
-k3s kubectl rollout status deployment/osnet-service -n retailvision --timeout=120s
+k3s kubectl rollout status deployment/reid-service -n retailvision --timeout=120s
 k3s kubectl rollout status deployment/iep1-daemon   -n retailvision --timeout=60s
 echo "[5/7] Inference services and IEP1 ready"
 

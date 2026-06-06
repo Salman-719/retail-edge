@@ -2,7 +2,7 @@
 
 Uses BoTSORT from boxmot 10.0.84 with the built-in ReID DISABLED (with_reid=False).
 Association is motion-only: Kalman filter + IoU + camera-motion compensation (SOF).
-Appearance ReID for cross-camera identity lives in the separate osnet-service and
+Appearance ReID for cross-camera identity lives in the separate reid-service and
 LocalIdentityManager — BoTSORT must not duplicate it.
 
 Swap BoTSORT for another tracker here and nothing outside this file changes.

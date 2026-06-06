@@ -1,5 +1,5 @@
 # x86 / Intel CPU dev build — no TRT, no pycuda, no ARM base image.
-# Build context: ./services/osnet_service (no files needed from repo root).
+# Build context: ./services/reid_service (no files needed from repo root).
 # Do NOT use this in staging or production — use Dockerfile (Jetson TRT).
 
 FROM python:3.11-slim
@@ -28,8 +28,8 @@ RUN pip install --no-cache-dir -r requirements.dev.txt
 # breaks the plain uc?id= URL and causes a corrupt HTML download.
 RUN gdown --fuzzy "https://drive.google.com/uc?id=1ep7RypVDOthCRIAqDnn4_N-UhkkFHJsj" -O resnet50_msmt17.pt
 
-# Copy service source — mirrors the module path services.osnet_service.*
-COPY . services/osnet_service/
+# Copy service source — mirrors the module path services.reid_service.*
+COPY . services/reid_service/
 RUN touch services/__init__.py
 
-CMD ["python", "-m", "services.osnet_service.service_dev"]
+CMD ["python", "-m", "services.reid_service.service_dev"]

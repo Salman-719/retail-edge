@@ -19,7 +19,7 @@ class ActiveTrack:
     track_id: int
     gallery: EmbeddingGallery
     last_floor_pos: tuple[float, float] | None = None
-    # Crops buffered during init phase — flushed to OSNet as a batch once full.
+    # Crops buffered during init phase — flushed to ReID as a batch once full.
     # Each entry is (crop_ndarray, bbox, timestamp_ms).
     init_crops: list = field(default_factory=list)
 
@@ -28,7 +28,7 @@ class ActiveTrack:
 class PendingTrack:
     track_id: int
     init_embeddings: list = field(default_factory=list)
-    # Raw crops buffered until we have a full batch to send to OSNet at once.
+    # Raw crops buffered until we have a full batch to send to ReID at once.
     # Each entry is (frame_ndarray, bbox, timestamp_ms).
     init_crops: list = field(default_factory=list)
 

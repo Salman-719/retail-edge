@@ -1,12 +1,12 @@
-"""ReID client — delegates crop embedding to the shared osnet-service via ZMQ.
+"""ReID client — delegates crop embedding to the shared reid-service via ZMQ.
 
 IEP2 no longer loads or owns ReID weights. It extracts the person crop from the
-full frame, JPEG-encodes it, and submits it to the osnet-service. The service
+full frame, JPEG-encodes it, and submits it to the reid-service. The service
 handles all preprocessing (R3), runs inference (resnet50_msmt17), L2-normalises
 (R5), and returns 2048-dim float32 bytes.
 
 Transport: ipc:// only. Serialisation: msgpack only.
-Swap the ReID model in osnet-service — nothing outside this file changes.
+Swap the ReID model in reid-service — nothing outside this file changes.
 """
 import asyncio
 import logging
@@ -21,16 +21,16 @@ import zmq.asyncio
 log = logging.getLogger("iep2.reid")
 
 EMBEDDING_DIM = 2048
-OSNET_INPUT_SOCK = os.environ.get("OSNET_INPUT_SOCK", "ipc:///tmp/sockets/osnet_input.sock")
+REID_INPUT_SOCK = os.environ.get("REID_INPUT_SOCK", "ipc:///tmp/sockets/reid_input.sock")
 
 
 def _result_sock_addr(camera_id: str) -> str:
-    """Per-camera result socket — IEP2 binds, osnet-service connects."""
-    return f"ipc:///tmp/sockets/osnet_output_{camera_id}.sock"
+    """Per-camera result socket — IEP2 binds, reid-service connects."""
+    return f"ipc:///tmp/sockets/reid_output_{camera_id}.sock"
 
 
-class OsNetClient:
-    """Async ZMQ client for the shared osnet-service.
+class ReidClient:
+    """Async ZMQ client for the shared reid-service.
 
     Lifecycle: call start() before extract(), close() when done.
     """
@@ -40,9 +40,9 @@ class OsNetClient:
         self._ctx  = zmq.asyncio.Context.instance()
 
         self._push = self._ctx.socket(zmq.PUSH)
-        self._push.connect(OSNET_INPUT_SOCK)
+        self._push.connect(REID_INPUT_SOCK)
 
-        # Bind per-camera result socket — osnet-service connects PUSH to this.
+        # Bind per-camera result socket — reid-service connects PUSH to this.
         self._pull = self._ctx.socket(zmq.PULL)
         self._pull.bind(_result_sock_addr(camera_id))
 
@@ -79,7 +79,7 @@ class OsNetClient:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                log.warning("OSNet reader loop error: %s", exc)
+                log.warning("ReID reader loop error: %s", exc)
 
     async def extract(
         self,
@@ -91,7 +91,7 @@ class OsNetClient:
         """Extract ReID embedding for the person at bbox.
 
         Clamps bbox to frame boundaries; returns None for zero-area crops.
-        Returns (2048,) float32 L2-normalised embedding from osnet-service.
+        Returns (2048,) float32 L2-normalised embedding from reid-service.
         """
         h, w = frame.shape[:2]
         x1 = max(0, int(bbox[0]))

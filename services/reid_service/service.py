@@ -4,11 +4,11 @@ Single GPU process that batches person crops from all IEP2 workers and runs
 one TRT inference call per batch. Returns L2-normalised 2048-dim float32 embeddings.
 
 Architecture mirrors yolo-service:
-  IEP2 × N  ──PUSH──►  PULL (osnet_input.sock)
+  IEP2 × N  ──PUSH──►  PULL (reid_input.sock)
                             ↓ batch collector
                         TRT inference (executor)
                             ↓ per-camera routing + L2 normalise
-  IEP2 × N  ◄──PUSH──  PUSH(osnet_output_{camera_id}.sock)
+  IEP2 × N  ◄──PUSH──  PUSH(reid_output_{camera_id}.sock)
 
 R1: TRT engine only — .pt at runtime is banned.
 R3: Preprocessing owned by this service (decode/resize/normalise).
@@ -29,16 +29,16 @@ import numpy as np
 import zmq
 import zmq.asyncio
 
-log = logging.getLogger("osnet_service")
+log = logging.getLogger("reid_service")
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-OSNET_INPUT_SOCK       = os.environ.get("OSNET_INPUT_SOCK",       "ipc:///tmp/sockets/osnet_input.sock")
-OSNET_HEALTH_UNIX_SOCK = os.environ.get("OSNET_HEALTH_SOCK",      "unix:///tmp/sockets/osnet_health.sock")
-OSNET_HEALTH_TCP_ADDR  = os.environ.get("OSNET_HEALTH_TCP_ADDR",  "[::]:50053")
+REID_INPUT_SOCK       = os.environ.get("REID_INPUT_SOCK",       "ipc:///tmp/sockets/reid_input.sock")
+REID_HEALTH_UNIX_SOCK = os.environ.get("REID_HEALTH_SOCK",      "unix:///tmp/sockets/reid_health.sock")
+REID_HEALTH_TCP_ADDR  = os.environ.get("REID_HEALTH_TCP_ADDR",  "[::]:50053")
 
-OSNET_MODEL_PATH  = os.environ.get("OSNET_MODEL_PATH",  "resnet50_msmt17.engine")
-MAX_BATCH_SIZE    = int(os.environ.get("OSNET_MAX_BATCH_SIZE",    "64"))
-BATCH_TIMEOUT_MS  = float(os.environ.get("OSNET_BATCH_TIMEOUT_MS", "50"))
+REID_MODEL_PATH  = os.environ.get("REID_MODEL_PATH",  "resnet50_msmt17.engine")
+MAX_BATCH_SIZE    = int(os.environ.get("REID_MAX_BATCH_SIZE",    "64"))
+BATCH_TIMEOUT_MS  = float(os.environ.get("REID_BATCH_TIMEOUT_MS", "50"))
 EMBEDDING_DIM     = 2048
 
 # ImageNet normalisation constants (R3).
@@ -50,7 +50,7 @@ _result_sockets: dict[str, zmq.asyncio.Socket] = {}
 
 
 def _result_sock_addr(camera_id: str) -> str:
-    return f"ipc:///tmp/sockets/osnet_output_{camera_id}.sock"
+    return f"ipc:///tmp/sockets/reid_output_{camera_id}.sock"
 
 
 def _get_result_socket(ctx: zmq.asyncio.Context, camera_id: str) -> zmq.asyncio.Socket:
@@ -84,7 +84,7 @@ def _load_engine(engine_path: str):
     if not os.path.exists(engine_path):
         raise FileNotFoundError(
             f"TRT engine not found: {engine_path}. "
-            "Rebuild the image — export_osnet_trt.py runs at build time."
+            "Rebuild the image — export_reid_trt.py runs at build time."
         )
     import tensorrt as trt
     trt_logger = trt.Logger(trt.Logger.WARNING)
@@ -100,7 +100,7 @@ def _warmup(engine) -> None:
     """One forward pass with blank batch to warm up CUDA kernels."""
     blank = np.zeros((1, 3, 256, 128), dtype=np.float16)
     _infer_batch(engine, blank)
-    log.info("OSNet TRT warmup complete.")
+    log.info("ReID TRT warmup complete.")
 
 
 def _infer_batch(engine, batch: np.ndarray) -> np.ndarray:
@@ -212,10 +212,10 @@ async def _run_health_server(health_servicer) -> None:
 
     server = grpc.aio.server()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
-    server.add_insecure_port(OSNET_HEALTH_UNIX_SOCK)
-    server.add_insecure_port(OSNET_HEALTH_TCP_ADDR)
+    server.add_insecure_port(REID_HEALTH_UNIX_SOCK)
+    server.add_insecure_port(REID_HEALTH_TCP_ADDR)
     await server.start()
-    log.info("Health server: unix=%s  tcp=%s", OSNET_HEALTH_UNIX_SOCK, OSNET_HEALTH_TCP_ADDR)
+    log.info("Health server: unix=%s  tcp=%s", REID_HEALTH_UNIX_SOCK, REID_HEALTH_TCP_ADDR)
     await server.wait_for_termination()
 
 
@@ -238,19 +238,19 @@ async def main() -> None:
     await asyncio.sleep(0)
 
     log.info("Loading TRT engine: %s  max_batch=%d  timeout_ms=%.0f",
-             OSNET_MODEL_PATH, MAX_BATCH_SIZE, BATCH_TIMEOUT_MS)
+             REID_MODEL_PATH, MAX_BATCH_SIZE, BATCH_TIMEOUT_MS)
     loop = asyncio.get_running_loop()
-    engine = await loop.run_in_executor(None, _load_engine, OSNET_MODEL_PATH)
+    engine = await loop.run_in_executor(None, _load_engine, REID_MODEL_PATH)
     await loop.run_in_executor(None, _warmup, engine)
 
     health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)  # R7
-    log.info("OSNet service SERVING  model=%s  dim=%d", OSNET_MODEL_PATH, EMBEDDING_DIM)
+    log.info("ReID service SERVING  model=%s  dim=%d", REID_MODEL_PATH, EMBEDDING_DIM)
 
     os.makedirs("/tmp/sockets", exist_ok=True)
     ctx = zmq.asyncio.Context.instance()
     pull_sock = ctx.socket(zmq.PULL)
-    pull_sock.bind(OSNET_INPUT_SOCK)
-    log.info("Bound input socket: %s", OSNET_INPUT_SOCK)
+    pull_sock.bind(REID_INPUT_SOCK)
+    log.info("Bound input socket: %s", REID_INPUT_SOCK)
 
     await _inference_loop(engine, pull_sock, ctx)
 

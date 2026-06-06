@@ -7,14 +7,14 @@ WORKDIR /workspace
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . services/osnet_service/
-COPY ../../scripts/export_osnet_trt.py scripts/export_osnet_trt.py
+COPY . services/reid_service/
+COPY ../../scripts/export_reid_trt.py scripts/export_reid_trt.py
 
 # Pre-download resnet50_msmt17 weights (gdown handles Drive's large-file redirect).
 RUN gdown --fuzzy "https://drive.google.com/uc?id=1ep7RypVDOthCRIAqDnn4_N-UhkkFHJsj" -O resnet50_msmt17.pt
 
 # Step 1 — export resnet50_msmt17 weights to ONNX at build time.
-RUN python scripts/export_osnet_trt.py
+RUN python scripts/export_reid_trt.py
 
 # Step 2 — convert ONNX to TensorRT FP16 engine with dynamic batch axis.
 # trtexec is part of the JetPack TensorRT installation.
@@ -26,4 +26,4 @@ RUN trtexec \
     --optShapes=input:64x3x256x128 \
     --maxShapes=input:128x3x256x128
 
-CMD ["python", "-m", "services.osnet_service.service"]
+CMD ["python", "-m", "services.reid_service.service"]

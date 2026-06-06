@@ -38,13 +38,13 @@ MIN_BBOX_AREA              = 2500  # minimum bbox area (px²) for sampled-phase 
 class LocalIdentityManager:
     def __init__(
         self,
-        osnet_client,
+        reid_client,
         camera_id: str = "",
         redis_local=None,
         fps: float = 5.0,
     ):
-        """osnet_client: OsNetClient; camera_id + redis_local enable Redis counter persistence (R5)."""
-        self._osnet_client = osnet_client
+        """reid_client: ReidClient; camera_id + redis_local enable Redis counter persistence (R5)."""
+        self._reid_client = reid_client
         self._camera_id = camera_id
         self._redis = redis_local
         self._fps = fps
@@ -85,16 +85,16 @@ class LocalIdentityManager:
     ) -> tuple[list[dict], int, int]:
         """Run the full identity lifecycle for one frame.
 
-        Returns (enriched, osnet_crops, osnet_batches) where:
-          osnet_crops   — total number of crops sent to OSNet this frame
-          osnet_batches — number of asyncio.gather calls made (batch invocations)
+        Returns (enriched, reid_crops, reid_batches) where:
+          reid_crops   — total number of crops sent to ReID this frame
+          reid_batches — number of asyncio.gather calls made (batch invocations)
         Active tracks carry an int local_id; pending tracks carry None.
         Input list is never mutated.
         """
         # Stage 0 — advance frame counter
         self._frame_index += 1
-        _osnet_crops   = 0
-        _osnet_batches = 0
+        _reid_crops   = 0
+        _reid_batches = 0
 
         # Stage 1 — prune expired lost entries
         expired = [
@@ -128,7 +128,7 @@ class LocalIdentityManager:
             log.info("F%04d  pending track dropped  track_id=%d  (never resolved)", self._frame_index, tid)
 
         # Stage 3 — process each current track
-        # Tracks that qualify for a global sample-tick OSNet call this frame:
+        # Tracks that qualify for a global sample-tick ReID call this frame:
         # list of (active_track, track_dict) — populated below, fired after the loop.
         sample_candidates: list[tuple] = []
 
@@ -146,19 +146,19 @@ class LocalIdentityManager:
                     active.last_floor_pos = (floor_x, floor_y)
 
                 if active.gallery.is_init_phase:
-                    # Buffer the raw crop; send to OSNet only when we have a full batch.
+                    # Buffer the raw crop; send to ReID only when we have a full batch.
                     active.init_crops.append((frame, track["bbox"], timestamp_ms))
 
                     if len(active.init_crops) >= INIT_EMBEDDINGS_COUNT:
                         # Batch-extract all buffered init crops in parallel.
                         results = await asyncio.gather(*[
-                            self._osnet_client.extract(
+                            self._reid_client.extract(
                                 f, bbox, track_id=tid, timestamp_ms=ts
                             )
                             for f, bbox, ts in active.init_crops
                         ])
-                        _osnet_crops   += len(active.init_crops)
-                        _osnet_batches += 1
+                        _reid_crops   += len(active.init_crops)
+                        _reid_batches += 1
                         active.init_crops.clear()
                         for emb in results:
                             if emb is not None:
@@ -192,13 +192,13 @@ class LocalIdentityManager:
 
                 if len(pending.init_crops) >= INIT_EMBEDDINGS_COUNT:
                     results = await asyncio.gather(*[
-                        self._osnet_client.extract(
+                        self._reid_client.extract(
                             f, bbox, track_id=tid, timestamp_ms=ts
                         )
                         for f, bbox, ts in pending.init_crops
                     ])
-                    _osnet_crops   += len(pending.init_crops)
-                    _osnet_batches += 1
+                    _reid_crops   += len(pending.init_crops)
+                    _reid_batches += 1
                     pending.init_crops.clear()
                     for emb in results:
                         if emb is not None:
@@ -268,14 +268,14 @@ class LocalIdentityManager:
         # Stage 4 — global sample tick: batch-extract for all sampled-phase candidates.
         if sample_candidates:
             results = await asyncio.gather(*[
-                self._osnet_client.extract(
+                self._reid_client.extract(
                     frame, t_dict["bbox"],
                     track_id=t_dict["track_id"], timestamp_ms=timestamp_ms,
                 )
                 for _, t_dict in sample_candidates
             ])
-            _osnet_crops   += len(sample_candidates)
-            _osnet_batches += 1
+            _reid_crops   += len(sample_candidates)
+            _reid_batches += 1
             for (active, _), emb in zip(sample_candidates, results):
                 if emb is not None:
                     active.gallery.add(emb, is_init=False)
@@ -284,7 +284,7 @@ class LocalIdentityManager:
                 self._frame_index, len(sample_candidates),
             )
 
-        return enriched, _osnet_crops, _osnet_batches
+        return enriched, _reid_crops, _reid_batches
 
     def get_active_centroids(self) -> dict[int, np.ndarray]:
         """Return {local_id_int: centroid_float32_array} for all currently active tracks."""
@@ -365,7 +365,7 @@ class LocalIdentityManager:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
 
-    class _MockOsNetClient:
+    class _MockReidClient:
         """Injects a controlled embedding regardless of crop content."""
         def __init__(self):
             self.emb = np.zeros(2048, dtype=np.float32)
@@ -377,7 +377,7 @@ if __name__ == "__main__":
             return self.emb.copy()
 
     async def _run_tests():
-        mock = _MockOsNetClient()
+        mock = _MockReidClient()
         mgr  = LocalIdentityManager(mock)
 
         emb_a = np.zeros(2048, dtype=np.float32); emb_a[0] = 1.0
@@ -433,8 +433,8 @@ if __name__ == "__main__":
         print(f"[3] ReID recovery → local_id={recovered_id} == original {local_id_a} ✓")
 
         # ── Test 4: pending dropped ───────────────────────────────────────────
-        mgr2 = LocalIdentityManager(_MockOsNetClient())
-        mock2 = mgr2._osnet_client
+        mgr2 = LocalIdentityManager(_MockReidClient())
+        mock2 = mgr2._reid_client
         mock2.emb = emb_a
         await mgr2.process_frame(frame, [_track(1)])
         await mgr2.process_frame(frame, [])
@@ -445,8 +445,8 @@ if __name__ == "__main__":
         print("[4] pending disappear → silently dropped ✓")
 
         # ── Test 5: TTL + sticky mapping ─────────────────────────────────────
-        mgr3 = LocalIdentityManager(_MockOsNetClient())
-        mgr3._osnet_client.emb = emb_a
+        mgr3 = LocalIdentityManager(_MockReidClient())
+        mgr3._reid_client.emb = emb_a
         await mgr3.process_frame(frame, [_track(1)])
         await mgr3.process_frame(frame, [])
         for _ in range(TTL_FRAMES + 1):
@@ -457,8 +457,8 @@ if __name__ == "__main__":
         print(f"[5] TTL + sticky → local_id={r[0]['local_id']} ✓")
 
         # ── Test 6: BoTSORT reuse ─────────────────────────────────────────────
-        mgr4 = LocalIdentityManager(_MockOsNetClient())
-        mgr4._osnet_client.emb = emb_a
+        mgr4 = LocalIdentityManager(_MockReidClient())
+        mgr4._reid_client.emb = emb_a
         await mgr4.process_frame(frame, [_track(1)])
         for _ in range(3):
             await mgr4.process_frame(frame, [_track(1)])
