@@ -51,6 +51,12 @@ spec:
             # by kubelet from the env var defined above.
             - name: DATABASE_URL_EEP
               value: "postgresql+asyncpg://{{ .Values.postgres.user }}:$(PG_PASSWORD)@{{ .Values.database.host }}:5432/{{ .Values.postgres.database }}"
+            # Alembic (startup migrations) needs psycopg2 + a DIRECT postgres
+            # connection (CREATE INDEX CONCURRENTLY can't run via pgbouncer txn
+            # pooling). Without this, alembic falls back to alembic.ini's dev
+            # password and fails auth.
+            - name: ALEMBIC_DATABASE_URL
+              value: "postgresql+psycopg2://{{ .Values.postgres.user }}:$(PG_PASSWORD)@postgres:5432/{{ .Values.postgres.database }}"
             # EEP reads REDIS_URL (not SERVER_REDIS_URL) — see config.py
             - name: REDIS_URL
               valueFrom:
