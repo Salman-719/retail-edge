@@ -22,3 +22,7 @@ grpcio-health-checking==1.64.0
 protobuf==5.27.2
 alembic==1.13.1
 psycopg2-binary==2.9.9
+# Docker SDK — used only by the DEBUG_MODE dev-pipeline orchestrator to spawn
+# per-camera IEP2 containers via the host docker.sock. Not used in production
+# (k3s + Edge Agent manage IEP2 there).
+docker==7.1.0

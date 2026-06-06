@@ -511,6 +511,11 @@ def _make_settings_class():
             health_sock:         str   = _Field(default="")
             # R7: CA cert for TLS verification of server Redis (shares CA with gRPC)
             redis_ca_cert_path:  str   = _Field(default="/etc/retailvision/certs/ca.crt")
+            # Live preview: publish per-frame detections to stream:iep2:live:{camera_id}.
+            # live_embed_frame base64-embeds the JPEG (dev — no S3). Both default off;
+            # enabled in dev via LIVE_STREAM_ENABLED / LIVE_EMBED_FRAME env vars.
+            live_stream_enabled: bool  = _Field(default=False)
+            live_embed_frame:    bool  = _Field(default=False)
 
             class Config:
                 env_file = ".env"
@@ -734,6 +739,14 @@ async def run_daemon(settings) -> None:
             name=f"reload-watch-{settings.camera_id}",
         ) if settings.camera_config_id else None
 
+        # ── Live preview publisher (server Redis → Live Bridge) ───────────────
+        live_pub = LivePublisher(
+            camera_id=settings.camera_id,
+            redis_url=settings.server_redis_url,
+            enabled=bool(settings.live_stream_enabled or settings.live_embed_frame),
+            embed_frame=bool(settings.live_embed_frame),
+        )
+
         # ── Manifest consumer (local Redis, IEP1 stream) ──────────────────────
         consumer = RedisStreamFrameSource(
             camera_id=settings.camera_id,
@@ -767,6 +780,10 @@ async def run_daemon(settings) -> None:
                     enriched   = await manager.process_frame(
                         frame, tracks, timestamp_ms=capture_ts_ms
                     )
+
+                    # Live preview: push frame + detections to the live stream.
+                    # No-op unless live_stream_enabled/live_embed_frame are set.
+                    live_pub.publish_frame(frame, capture_ts_ms, enriched)
 
                     for track in enriched:
                         if track["local_id"] is None:

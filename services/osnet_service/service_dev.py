@@ -16,8 +16,10 @@ Architecture (unchanged from service.py):
 """
 
 import asyncio
+import json
 import logging
 import os
+import threading
 import time
 
 import cv2
@@ -27,6 +29,68 @@ import zmq
 import zmq.asyncio
 
 log = logging.getLogger("osnet_service_dev")
+
+# ── Device selection (CPU / GPU) shared with the dev pipeline ──────────────────
+# Mirrors the detector service: reads the desired device from Redis `inference:device`,
+# resolves against real hardware, applies live, and publishes capability to
+# `inference:capability:reid`.
+_REDIS_URL      = os.environ.get("SERVER_REDIS_URL") or os.environ.get("REDIS_URL", "redis://redis:6379/0")
+_DEVICE_KEY     = "inference:device"
+_CAP_KEY        = "inference:capability:reid"
+_INITIAL_DEVICE = os.environ.get("INFERENCE_DEVICE", "cpu")
+
+_state = {"device": "cpu", "model_device": None}
+
+
+def _detect_caps() -> dict:
+    try:
+        import torch
+        cuda = bool(torch.cuda.is_available())
+        xpu  = bool(getattr(torch, "xpu", None) and torch.xpu.is_available())
+    except Exception:
+        cuda = xpu = False
+    return {"cuda": cuda, "xpu": xpu}
+
+
+def _resolve_device(requested: str, caps: dict) -> str:
+    requested = (requested or "cpu").lower()
+    if requested == "cpu":
+        return "cpu"
+    if requested == "cuda":
+        return "cuda" if caps["cuda"] else "cpu"
+    if requested == "xpu":
+        return "xpu" if caps["xpu"] else "cpu"
+    if caps["cuda"]:
+        return "cuda"
+    if caps["xpu"]:
+        return "xpu"
+    return "cpu"
+
+
+def _device_watcher() -> None:
+    try:
+        import redis
+        r = redis.Redis.from_url(_REDIS_URL)
+    except Exception as exc:
+        log.warning("Device watcher disabled (redis unavailable): %s", exc)
+        return
+    caps = _detect_caps()
+    log.info("ReID GPU capability: cuda=%s xpu=%s", caps["cuda"], caps["xpu"])
+    while True:
+        try:
+            requested = r.get(_DEVICE_KEY)
+            requested = requested.decode() if requested else _INITIAL_DEVICE
+            resolved = _resolve_device(requested, caps)
+            if resolved != _state["device"]:
+                log.info("Inference device → %s (requested=%s)", resolved, requested)
+                _state["device"] = resolved
+            r.set(_CAP_KEY, json.dumps({
+                "role": "reid", "cuda": caps["cuda"], "xpu": caps["xpu"],
+                "device": _state["device"],
+            }), ex=15)
+        except Exception as exc:
+            log.warning("Device watcher tick failed: %s", exc)
+        time.sleep(2)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 OSNET_INPUT_SOCK       = os.environ.get("OSNET_INPUT_SOCK",        "ipc:///tmp/sockets/osnet_input.sock")
@@ -76,10 +140,13 @@ def _load_model():
 
 def _warmup(model) -> None:
     import torch
-    blank = torch.zeros(1, 3, 256, 128)
+    device = _state["device"]
+    model.to(device)
+    _state["model_device"] = device
+    blank = torch.zeros(1, 3, 256, 128).to(device)
     with torch.no_grad():
         model(blank)
-    log.info("CPU warmup complete.")
+    log.info("Warmup complete on device=%s", device)
 
 
 # ── Preprocessing (mirrors production service R3) ─────────────────────────────
@@ -112,12 +179,18 @@ def _infer_and_pack(model, batch_items: list[dict]) -> list[dict]:
     """ResNet-18 inference → 512-dim L2-normalised float32 bytes per crop."""
     import torch
 
+    device = _state["device"]
+    # Move the model onto the active device only when it changes.
+    if _state["model_device"] != device:
+        model.to(device)
+        _state["model_device"] = device
+
     tensors = [_preprocess_crop(item["crop"]) for item in batch_items]
-    batch   = torch.tensor(np.stack(tensors, axis=0), dtype=torch.float32)  # [B, 3, 256, 128]
+    batch   = torch.tensor(np.stack(tensors, axis=0), dtype=torch.float32).to(device)  # [B, 3, 256, 128]
 
     with torch.no_grad():
-        feats = model(batch)                         # [B, 512, 1, 1]
-    embeddings = feats.squeeze(-1).squeeze(-1).numpy()  # [B, 512]
+        feats = model(batch)                              # [B, 512, 1, 1]
+    embeddings = feats.squeeze(-1).squeeze(-1).cpu().numpy()  # [B, 512]
 
     responses = []
     for item, emb in zip(batch_items, embeddings):
@@ -201,13 +274,17 @@ async def main() -> None:
     asyncio.create_task(_run_health_server(health_servicer))
     await asyncio.sleep(0)
 
-    log.info("Loading ResNet-18 dev ReID stub (CPU)")
+    # Resolve initial device, then start the watcher that tracks the dev toggle.
+    _state["device"] = _resolve_device(_INITIAL_DEVICE, _detect_caps())
+    threading.Thread(target=_device_watcher, name="device-watcher", daemon=True).start()
+
+    log.info("Loading ResNet-18 dev ReID stub  device=%s", _state["device"])
     loop = asyncio.get_running_loop()
     model = await loop.run_in_executor(None, _load_model)
     await loop.run_in_executor(None, _warmup, model)
 
     health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
-    log.info("OSNet service (dev/CPU) SERVING  model=resnet18  dim=%d", EMBEDDING_DIM)
+    log.info("OSNet service (dev) SERVING  model=resnet18  dim=%d  device=%s", EMBEDDING_DIM, _state["device"])
 
     os.makedirs("/tmp/sockets", exist_ok=True)
     ctx = zmq.asyncio.Context.instance()

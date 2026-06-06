@@ -134,6 +134,19 @@ export default function Sidebar() {
             <Bug size={15} className="nav-icon shrink-0" />
             <span className="flex-1 truncate">Vision Debug</span>
           </NavLink>
+          <NavLink
+            to={`/store/${slug}/dev/e2e`}
+            className={({ isActive }) =>
+              `nav-item flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all duration-150 border-l-2 pl-[10px] ${
+                isActive
+                  ? 'bg-amber-600/20 text-amber-300 font-semibold border-amber-500 active'
+                  : 'text-amber-400/60 hover:bg-amber-500/10 hover:text-amber-300 border-transparent'
+              }`
+            }
+          >
+            <Video size={15} className="nav-icon shrink-0" />
+            <span className="flex-1 truncate">Main Vision Debug</span>
+          </NavLink>
         </div>
       )}
 

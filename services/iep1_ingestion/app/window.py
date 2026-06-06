@@ -40,7 +40,15 @@ class WindowAccumulator:
     def add(self, capture_ts_ms: int, s3_key: str) -> None:
         if self._frames:
             prev_ts = self._frames[-1][0]
-            if (capture_ts_ms - prev_ts) > GAP_MULTIPLIER * self._sample_interval_ms:
+            elapsed = capture_ts_ms - prev_ts
+            # Decimate to sample_fps: drop frames arriving faster than the sample
+            # interval. Makes target_fps authoritative for any source — a high-FPS
+            # RTSP stream or a fast file read is sampled down to ~sample_fps rather
+            # than flooding the window. The 0.9 factor tolerates capture jitter
+            # without systematically under-sampling.
+            if elapsed < self._sample_interval_ms * 0.9:
+                return
+            if elapsed > GAP_MULTIPLIER * self._sample_interval_ms:
                 self._gaps.append(Gap(start_ts_ms=prev_ts, end_ts_ms=capture_ts_ms))
         self._frames.append((capture_ts_ms, s3_key))
 

@@ -148,6 +148,29 @@ Each entry follows the format:
 
 ---
 
+### BUG-014 — IEP3 `write_global_position` int32 overflow on batch_number
+**Status:** Fixed
+**Service(s):** `services/eep/schema.sql`, Alembic migration `0004`, `global_tracking_history`
+**Severity:** Critical (every IEP3 reconciliation crashes; no global positions ever written)
+**Symptom:** `asyncpg.exceptions.DataError: invalid input for query argument $4: 1780683120000 (value out of int32 range)` on every `write_global_position()` call.
+**Root Cause:** The IEP3 coordinator's R8 refactor changed the batch identifier from a small integer to `window_start_ms` rounded to the window boundary (a monotonic, restart-safe epoch-ms value ~1.78e12). That value flows into `global_tracking_history.batch_number`, which the schema still typed as `INT` (int32, max 2.15e9). The schema was never widened when the coordinator changed.
+**Fix:** Alembic migration `0004_batch_number_bigint.py` runs `ALTER TABLE global_tracking_history ALTER COLUMN batch_number TYPE BIGINT`; `schema.sql` updated to `BIGINT` for fresh DBs. Applied automatically via EEP lifespan `alembic upgrade head`.
+**Verification:** After migration, `batch_number` is `bigint`; IEP3 logs `positions_written: N` with no overflow; `global_tracking_history` accumulates rows from both cameras.
+
+---
+
+### BUG-015 — IEP1 WindowAccumulator never decimates → manifest frame flood on RTSP / fast sources
+**Status:** Fixed
+**Service(s):** `services/iep1_ingestion/app/window.py`
+**Severity:** High (IEP2 takes ~30 min per manifest; IEP3 never receives batches; pipeline appears hung)
+**Symptom:** IEP1 manifest `frame_count: 1673` with `expected_frames: 60` for a 60 s window at `target_fps=1.0`. IEP2 processes a single manifest for tens of minutes and never emits `batch_complete`, so IEP3 sits idle.
+**Root Cause:** `WindowAccumulator.add()` appended **every** frame the capture thread delivered; it computed `_sample_interval_ms` only for gap detection and never decimated to `sample_fps`. Decimation was implicitly relying on the capture rate. A file-source capture-thread `time.sleep(1/target_fps)` (added in a prior fix) masked this for file paths, but RTSP streams deliver at native FPS (~28) with no throttle, so the window accumulated ~28×60 frames.
+**Fix:** `WindowAccumulator.add()` now drops frames arriving sooner than `0.9 × _sample_interval_ms` since the last kept frame, making `target_fps` authoritative for any source (file or RTSP). The 0.9 factor tolerates capture jitter without under-sampling.
+**Verification:** After fix, a 60 s window at `target_fps=1.0` yields `frame_count: 60 status: online`; IEP2 completes each manifest in ~60 s; IEP3 reconciles both cameras per window (`partial=False`).
+**Notes:** The file-source capture-thread throttle is retained as a CPU optimisation (avoids decoding frames that would be dropped) but is no longer required for correctness.
+
+---
+
 ### BUG-013 — IEP3 coordinator stuck in infinite `NOGROUP` loop after Redis stream deletion
 **Status:** Fixed  
 **Service(s):** `services/iep3_reconciliation/app/coordinator.py`  

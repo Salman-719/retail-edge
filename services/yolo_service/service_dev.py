@@ -13,8 +13,10 @@ Architecture (unchanged from service.py):
 """
 
 import asyncio
+import json
 import logging
 import os
+import threading
 import time
 
 import cv2
@@ -25,13 +27,83 @@ import zmq.asyncio
 
 log = logging.getLogger("yolo_service_dev")
 
+# ── Device selection (CPU / GPU) shared with the dev pipeline ──────────────────
+# The dev screen's CPU/GPU toggle writes the desired device to Redis key
+# `inference:device`; this service resolves it against the hardware it can
+# actually see and applies it live. It publishes what the machine supports to
+# `inference:capability:detector` so EEP can answer "does this machine have a GPU?".
+_REDIS_URL          = os.environ.get("SERVER_REDIS_URL") or os.environ.get("REDIS_URL", "redis://redis:6379/0")
+_DEVICE_KEY         = "inference:device"               # desired: cpu|cuda|xpu|gpu|auto
+_CAP_KEY            = "inference:capability:detector"
+_INITIAL_DEVICE     = os.environ.get("INFERENCE_DEVICE", "cpu")
+
+# Mutable holder read by the inference loop; updated by the watcher thread.
+_state = {"device": "cpu"}
+
+
+def _detect_caps() -> dict:
+    """Which GPU backends this machine/container can actually use."""
+    try:
+        import torch
+        cuda = bool(torch.cuda.is_available())
+        xpu  = bool(getattr(torch, "xpu", None) and torch.xpu.is_available())
+    except Exception:
+        cuda = xpu = False
+    return {"cuda": cuda, "xpu": xpu}
+
+
+def _resolve_device(requested: str, caps: dict) -> str:
+    """Map a requested device against real capability. Falls back to cpu."""
+    requested = (requested or "cpu").lower()
+    if requested == "cpu":
+        return "cpu"
+    if requested == "cuda":
+        return "cuda" if caps["cuda"] else "cpu"
+    if requested == "xpu":
+        return "xpu" if caps["xpu"] else "cpu"
+    # "gpu" / "auto": prefer CUDA, then Intel XPU
+    if caps["cuda"]:
+        return "cuda"
+    if caps["xpu"]:
+        return "xpu"
+    return "cpu"
+
+
+def _device_watcher() -> None:
+    """Background thread: publish capability + apply the requested device live."""
+    try:
+        import redis
+        r = redis.Redis.from_url(_REDIS_URL)
+    except Exception as exc:
+        log.warning("Device watcher disabled (redis unavailable): %s", exc)
+        return
+    caps = _detect_caps()
+    log.info("Detector GPU capability: cuda=%s xpu=%s", caps["cuda"], caps["xpu"])
+    while True:
+        try:
+            requested = r.get(_DEVICE_KEY)
+            requested = requested.decode() if requested else _INITIAL_DEVICE
+            resolved = _resolve_device(requested, caps)
+            if resolved != _state["device"]:
+                log.info("Inference device → %s (requested=%s)", resolved, requested)
+                _state["device"] = resolved
+            r.set(_CAP_KEY, json.dumps({
+                "role": "detector", "cuda": caps["cuda"], "xpu": caps["xpu"],
+                "device": _state["device"],
+            }), ex=15)
+        except Exception as exc:
+            log.warning("Device watcher tick failed: %s", exc)
+        time.sleep(2)
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 YOLO_INPUT_SOCK       = os.environ.get("YOLO_INPUT_SOCK",        "ipc:///tmp/sockets/yolo_input.sock")
 YOLO_HEALTH_UNIX_SOCK = os.environ.get("YOLO_HEALTH_SOCK",       "unix:///tmp/sockets/yolo_health.sock")
 YOLO_HEALTH_TCP_ADDR  = os.environ.get("YOLO_HEALTH_TCP_ADDR",   "[::]:50052")
 
-YOLO_MODEL_VARIANT    = os.environ.get("YOLO_MODEL_VARIANT",     "n")
-YOLO_CONF_THRESHOLD   = float(os.environ.get("YOLO_CONF",        "0.25"))
+# Dev detector model. Default YOLO11n (light, fast on CPU). Loader class is
+# chosen by filename (rtdetr-*.pt → RTDETR, else YOLO). Confidence threshold 0.5.
+DETECTOR_MODEL        = os.environ.get("DETECTOR_MODEL",         "yolo11n.pt")
+YOLO_CONF_THRESHOLD   = float(os.environ.get("YOLO_CONF",        "0.5"))
 YOLO_IOU_THRESHOLD    = float(os.environ.get("YOLO_IOU",         "0.45"))
 # Smaller defaults on CPU — ultralytics batching on CPU is slower than TRT.
 MAX_BATCH_SIZE        = int(os.environ.get("YOLO_MAX_BATCH_SIZE", "4"))
@@ -56,24 +128,28 @@ def _get_result_socket(ctx: zmq.asyncio.Context, camera_id: str) -> zmq.asyncio.
 
 # ── Model loading ──────────────────────────────────────────────────────────────
 
-def _load_model(variant: str):
-    """Load ultralytics YOLO .pt model on CPU."""
-    from ultralytics import YOLO
-    model_path = f"yolov8{variant}.pt"
-    if not os.path.exists(model_path):
+def _load_model(model_file: str):
+    """Load an ultralytics detector. Picks the loader class by filename:
+    rtdetr-*.pt → RTDETR (NMS-free transformer); everything else → YOLO."""
+    if not os.path.exists(model_file):
         raise FileNotFoundError(
-            f".pt model not found: {model_path}. "
-            "Ensure yolov8n.pt is copied into the image by Dockerfile.dev."
+            f".pt model not found: {model_file}. "
+            "Ensure the weights are baked into the image by Dockerfile.dev."
         )
-    log.info("Loading model: %s  device=cpu", model_path)
-    model = YOLO(model_path)
-    return model
+    if os.path.basename(model_file).lower().startswith("rtdetr"):
+        from ultralytics import RTDETR as _Model
+        family = "RT-DETR"
+    else:
+        from ultralytics import YOLO as _Model
+        family = "YOLO"
+    log.info("Loading %s model: %s", family, model_file)
+    return _Model(model_file)
 
 
 def _warmup(model) -> None:
     blank = np.zeros((640, 640, 3), dtype=np.uint8)
-    model([blank], verbose=False, device="cpu")
-    log.info("CPU warmup complete.")
+    model([blank], verbose=False, device=_state["device"])
+    log.info("Warmup complete on device=%s", _state["device"])
 
 
 # ── Inference ─────────────────────────────────────────────────────────────────
@@ -94,7 +170,7 @@ def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
         verbose=False,
         conf=YOLO_CONF_THRESHOLD,
         iou=YOLO_IOU_THRESHOLD,
-        device="cpu",
+        device=_state["device"],
     )
     responses = []
     for item, result in zip(batch_items, results):
@@ -187,13 +263,18 @@ async def main() -> None:
     asyncio.create_task(_run_health_server(health_servicer))
     await asyncio.sleep(0)
 
-    log.info("Loading YOLO .pt model  variant=%s  device=cpu", YOLO_MODEL_VARIANT)
+    # Resolve the initial device synchronously (so warmup uses it), then start
+    # the watcher thread that keeps it in sync with the dev screen's toggle.
+    _state["device"] = _resolve_device(_INITIAL_DEVICE, _detect_caps())
+    threading.Thread(target=_device_watcher, name="device-watcher", daemon=True).start()
+
+    log.info("Loading detector  file=%s  conf=%.2f  device=%s", DETECTOR_MODEL, YOLO_CONF_THRESHOLD, _state["device"])
     loop = asyncio.get_running_loop()
-    model = await loop.run_in_executor(None, _load_model, YOLO_MODEL_VARIANT)
+    model = await loop.run_in_executor(None, _load_model, DETECTOR_MODEL)
     await loop.run_in_executor(None, _warmup, model)
 
     health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
-    log.info("YOLO service (dev/CPU) SERVING  model=yolov8%s.pt", YOLO_MODEL_VARIANT)
+    log.info("Detector service (dev/CPU) SERVING  model=%s  conf=%.2f", DETECTOR_MODEL, YOLO_CONF_THRESHOLD)
 
     os.makedirs("/tmp/sockets", exist_ok=True)
     ctx = zmq.asyncio.Context.instance()

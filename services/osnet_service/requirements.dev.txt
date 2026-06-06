@@ -7,3 +7,4 @@ opencv-python-headless==4.9.0.80
 grpcio==1.64.0
 grpcio-health-checking==1.64.0
 protobuf==5.27.2
+redis==5.0.4
