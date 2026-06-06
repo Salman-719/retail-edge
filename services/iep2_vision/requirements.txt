@@ -4,7 +4,7 @@ opencv-python-headless==4.9.0.80
 python-multipart
 Pillow
 numpy==1.26.4
-supervision==0.22.0
+boxmot==10.0.84
 asyncpg==0.29.0
 shapely==2.0.4
 python-dotenv==1.0.1

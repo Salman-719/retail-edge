@@ -1,16 +1,14 @@
-"""OSNet ReID embedding service — CPU dev mode (x86 / Intel, no CUDA).
+"""ReID embedding service — CPU/GPU dev mode (x86 / Intel / NVIDIA).
 
 Identical ZMQ wire protocol to service.py.
-Replaces TRT + pycuda with torchvision ResNet-18 on CPU.
-ResNet-18 avgpool outputs exactly 512-dim float32 features — correct dimensionality
-for the full pipeline. ReID accuracy is lower than OSNet but the wire format,
-L2 normalisation, and 2048-byte embedding payload are identical.
-For local development only — do NOT deploy to production.
+Runs resnet50_msmt17 via boxmot (ReidAutoBackend PyTorch backend). The model
+outputs 2048-dim float32 features — the production ReID embedding dimensionality.
+For local development only — do NOT deploy to production (use Dockerfile/TRT).
 
 Architecture (unchanged from service.py):
   IEP2 × N  ──PUSH──►  PULL (osnet_input.sock)
                             ↓ batch collector
-                        ResNet-18 CPU inference + L2 norm
+                        resnet50_msmt17 inference + L2 norm
                             ↓ per-camera routing
   IEP2 × N  ◄──PUSH──  PUSH(osnet_output_{camera_id}.sock)
 """
@@ -96,12 +94,13 @@ def _device_watcher() -> None:
 OSNET_INPUT_SOCK       = os.environ.get("OSNET_INPUT_SOCK",        "ipc:///tmp/sockets/osnet_input.sock")
 OSNET_HEALTH_UNIX_SOCK = os.environ.get("OSNET_HEALTH_SOCK",       "unix:///tmp/sockets/osnet_health.sock")
 OSNET_HEALTH_TCP_ADDR  = os.environ.get("OSNET_HEALTH_TCP_ADDR",   "[::]:50053")
+OSNET_MODEL_PATH       = os.environ.get("OSNET_MODEL_PATH",        "resnet50_msmt17.pt")
 # Smaller defaults on CPU.
 MAX_BATCH_SIZE         = int(os.environ.get("OSNET_MAX_BATCH_SIZE",    "8"))
 BATCH_TIMEOUT_MS       = float(os.environ.get("OSNET_BATCH_TIMEOUT_MS", "200"))
-EMBEDDING_DIM          = 512
+EMBEDDING_DIM          = 2048
 
-# ImageNet normalisation — same constants as production OSNet service (R3).
+# ImageNet normalisation — same constants boxmot's backend uses (R3).
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -125,34 +124,37 @@ def _get_result_socket(ctx: zmq.asyncio.Context, camera_id: str) -> zmq.asyncio.
 # ── Model loading ──────────────────────────────────────────────────────────────
 
 def _load_model():
-    """Load ResNet-18 up to avgpool, weights pre-downloaded at image build time."""
+    """Load resnet50_msmt17 via boxmot ReidAutoBackend (weights baked at build time)."""
     import torch
-    import torchvision.models as models
+    from pathlib import Path
+    from boxmot.appearance.reid_auto_backend import ReidAutoBackend
 
-    # Weights are baked into the image by Dockerfile.dev — no runtime download.
-    base = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-    # Strip the final FC classifier; avgpool output is [B, 512, 1, 1].
-    model = torch.nn.Sequential(*list(base.children())[:-1])
-    model.eval()
-    log.info("ResNet-18 (dev ReID stub) loaded on CPU  output_dim=%d", EMBEDDING_DIM)
-    return model
+    device = _state["device"]
+    # boxmot select_device expects "cpu" or a CUDA index ("0", "1", …),
+    # not PyTorch's "cuda" string.
+    boxmot_device = "0" if device == "cuda" else device
+    rab = ReidAutoBackend(
+        weights=Path(OSNET_MODEL_PATH),
+        device=torch.device(boxmot_device) if boxmot_device == "cpu" else boxmot_device,
+        half=False,
+    )
+    _state["model_device"] = device
+    log.info("resnet50_msmt17 (boxmot) loaded  device=%s  output_dim=%d", device, EMBEDDING_DIM)
+    return rab.model   # PyTorchBackend — owns .model (nn.Module) and .forward()
 
 
 def _warmup(model) -> None:
     import torch
-    device = _state["device"]
-    model.to(device)
-    _state["model_device"] = device
-    blank = torch.zeros(1, 3, 256, 128).to(device)
-    with torch.no_grad():
-        model(blank)
-    log.info("Warmup complete on device=%s", device)
+    device = torch.device(_state["device"])
+    blank = torch.zeros(1, 3, 256, 128, device=device)
+    model.forward(blank)
+    log.info("Warmup complete on device=%s", _state["device"])
 
 
-# ── Preprocessing (mirrors production service R3) ─────────────────────────────
+# ── Preprocessing ─────────────────────────────────────────────────────────────
 
 def _preprocess_crop(jpeg_bytes: bytes) -> np.ndarray:
-    """JPEG bytes → CHW float32 normalised to ImageNet stats. Same as service.py."""
+    """JPEG bytes → CHW float32 normalised to ImageNet stats."""
     arr  = np.frombuffer(jpeg_bytes, dtype=np.uint8)
     crop = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if crop is None:
@@ -176,21 +178,22 @@ def _l2_normalize(emb: np.ndarray) -> np.ndarray:
 # ── Inference ─────────────────────────────────────────────────────────────────
 
 def _infer_and_pack(model, batch_items: list[dict]) -> list[dict]:
-    """ResNet-18 inference → 512-dim L2-normalised float32 bytes per crop."""
+    """resnet50_msmt17 inference → 2048-dim L2-normalised float32 bytes per crop."""
     import torch
 
-    device = _state["device"]
-    # Move the model onto the active device only when it changes.
-    if _state["model_device"] != device:
-        model.to(device)
-        _state["model_device"] = device
+    device = torch.device(_state["device"])
+    # Move model onto the active device only when it changes.
+    if _state["model_device"] != _state["device"]:
+        model.model.to(device)
+        _state["model_device"] = _state["device"]
 
     tensors = [_preprocess_crop(item["crop"]) for item in batch_items]
-    batch   = torch.tensor(np.stack(tensors, axis=0), dtype=torch.float32).to(device)  # [B, 3, 256, 128]
+    batch   = torch.tensor(np.stack(tensors, axis=0), dtype=torch.float32, device=device)  # [B,3,256,128]
 
-    with torch.no_grad():
-        feats = model(batch)                              # [B, 512, 1, 1]
-    embeddings = feats.squeeze(-1).squeeze(-1).cpu().numpy()  # [B, 512]
+    embeddings = model.forward(batch)
+    if hasattr(embeddings, "cpu"):
+        embeddings = embeddings.cpu().numpy()
+    embeddings = np.asarray(embeddings).reshape(len(batch_items), -1)  # [B, 2048]
 
     responses = []
     for item, emb in zip(batch_items, embeddings):
@@ -201,7 +204,7 @@ def _infer_and_pack(model, batch_items: list[dict]) -> list[dict]:
             "camera_id":    item["camera_id"],
             "track_id":     item["track_id"],
             "timestamp_ms": item["timestamp_ms"],
-            "embedding":    emb.astype(np.float32).tobytes(),   # 2048 bytes, matches R2
+            "embedding":    emb.astype(np.float32).tobytes(),   # 8192 bytes
         })
     return responses
 
@@ -278,13 +281,13 @@ async def main() -> None:
     _state["device"] = _resolve_device(_INITIAL_DEVICE, _detect_caps())
     threading.Thread(target=_device_watcher, name="device-watcher", daemon=True).start()
 
-    log.info("Loading ResNet-18 dev ReID stub  device=%s", _state["device"])
+    log.info("Loading resnet50_msmt17 (boxmot)  device=%s", _state["device"])
     loop = asyncio.get_running_loop()
     model = await loop.run_in_executor(None, _load_model)
     await loop.run_in_executor(None, _warmup, model)
 
     health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
-    log.info("OSNet service (dev) SERVING  model=resnet18  dim=%d  device=%s", EMBEDDING_DIM, _state["device"])
+    log.info("ReID service (dev) SERVING  model=resnet50_msmt17  dim=%d  device=%s", EMBEDDING_DIM, _state["device"])
 
     os.makedirs("/tmp/sockets", exist_ok=True)
     ctx = zmq.asyncio.Context.instance()

@@ -23,8 +23,10 @@ RUN pip install --no-cache-dir \
 COPY requirements.dev.txt .
 RUN pip install --no-cache-dir -r requirements.dev.txt
 
-# Pre-download ResNet-18 weights at build time — avoids runtime internet dependency.
-RUN python -c "import torchvision.models as m; m.resnet18(weights=m.ResNet18_Weights.DEFAULT)"
+# Pre-download resnet50_msmt17 weights at build time — avoids runtime internet dependency.
+# gdown --fuzzy handles Google Drive's large-file confirmation redirect that
+# breaks the plain uc?id= URL and causes a corrupt HTML download.
+RUN gdown --fuzzy "https://drive.google.com/uc?id=1ep7RypVDOthCRIAqDnn4_N-UhkkFHJsj" -O resnet50_msmt17.pt
 
 # Copy service source — mirrors the module path services.osnet_service.*
 COPY . services/osnet_service/

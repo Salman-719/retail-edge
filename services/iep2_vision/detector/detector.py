@@ -98,7 +98,7 @@ class YoloClient:
         """Send frame to yolo-service and await person detections.
 
         Returns list of {"label", "confidence", "bbox"} dicts compatible with
-        the existing ByteTrack pipeline.
+        the existing BoTSORT pipeline.
         """
         req_id = str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()

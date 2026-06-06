@@ -86,7 +86,7 @@ class CameraBatchInfo:
 
 class Iep3Repository:
 
-    def __init__(self, pool: asyncpg.Pool, embedding_dim: int = 512) -> None:
+    def __init__(self, pool: asyncpg.Pool, embedding_dim: int = 2048) -> None:
         self._pool = pool
         self._embedding_dim = embedding_dim
 

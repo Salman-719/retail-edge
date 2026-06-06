@@ -1,6 +1,7 @@
 # Jetson JetPack 6.0 — torch, tensorrt, and pycuda come from the base image.
 # Do NOT add torch, tensorrt, or pycuda here.
-torchreid==1.4.0
+# boxmot provides the resnet50_msmt17 ReID backbone for ONNX/TRT export.
+boxmot==10.0.84
 pyzmq==25.1.2
 msgpack==1.0.8
 numpy==1.26.4

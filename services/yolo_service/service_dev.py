@@ -102,7 +102,7 @@ YOLO_HEALTH_TCP_ADDR  = os.environ.get("YOLO_HEALTH_TCP_ADDR",   "[::]:50052")
 
 # Dev detector model. Default YOLO11n (light, fast on CPU). Loader class is
 # chosen by filename (rtdetr-*.pt → RTDETR, else YOLO). Confidence threshold 0.5.
-DETECTOR_MODEL        = os.environ.get("DETECTOR_MODEL",         "yolo11n.pt")
+DETECTOR_MODEL        = os.environ.get("DETECTOR_MODEL",         "rtdetr-x.pt")
 YOLO_CONF_THRESHOLD   = float(os.environ.get("YOLO_CONF",        "0.5"))
 YOLO_IOU_THRESHOLD    = float(os.environ.get("YOLO_IOU",         "0.45"))
 # Smaller defaults on CPU — ultralytics batching on CPU is slower than TRT.

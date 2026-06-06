@@ -37,6 +37,7 @@ def upgrade() -> None:
     ))
 
     # centroid BYTEA must hold exactly 512 float32 values = 512 * 4 = 2048 bytes.
+    # NOTE: superseded by migration 0005 (resnet50_msmt17 → 2048-dim = 8192 bytes).
     op.execute(sa.text(
         "DO $$ BEGIN "
         "ALTER TABLE local_centroids "

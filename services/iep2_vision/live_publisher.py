@@ -20,7 +20,7 @@ _MAXLEN = 500
 
 
 def _local_id_str(value) -> str | None:
-    """Normalise a track local_id (int from ByteTrack, str, or None) to str|None."""
+    """Normalise a track local_id (int from BoTSORT, str, or None) to str|None."""
     if value is None:
         return None
     if isinstance(value, int):

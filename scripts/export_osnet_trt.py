@@ -1,36 +1,35 @@
-"""Export OSNet x1.0 weights to ONNX, then convert to TensorRT FP16 engine.
+"""Export resnet50_msmt17 ReID weights to ONNX, then convert to TensorRT FP16 engine.
 
-Step 1 (this script): PyTorch → ONNX with dynamic batch axis.
+Step 1 (this script): boxmot resnet50_msmt17 PyTorch → ONNX with dynamic batch axis.
 Step 2 (Dockerfile RUN):
-    trtexec --onnx=osnet_x1_0.onnx --saveEngine=osnet_x1_0.engine \
+    trtexec --onnx=resnet50_msmt17.onnx --saveEngine=resnet50_msmt17.engine \
             --fp16 \
             --minShapes=input:1x3x256x128 \
             --optShapes=input:64x3x256x128 \
             --maxShapes=input:128x3x256x128
 
 Input tensor: [B, 3, 256, 128] float16 (CHW, ImageNet-normalised).
-Output tensor: [B, 512] float32 embedding (L2 normalisation applied by service at runtime).
+Output tensor: [B, 2048] float32 embedding (L2 normalisation applied by service at runtime).
 """
 import sys
+from pathlib import Path
 
-import numpy as np
 import torch
-import torchreid
+from boxmot.appearance.reid_auto_backend import ReidAutoBackend
 
-ONNX_PATH  = "osnet_x1_0.onnx"
+ONNX_PATH  = "resnet50_msmt17.onnx"
+WEIGHTS    = Path("resnet50_msmt17.pt")
 OPT_BATCH  = int(sys.argv[1]) if len(sys.argv) > 1 else 64
 MAX_BATCH  = OPT_BATCH * 2
 
-print(f"Exporting OSNet x1.0  opt_batch={OPT_BATCH}  max_batch={MAX_BATCH}")
+print(f"Exporting resnet50_msmt17  opt_batch={OPT_BATCH}  max_batch={MAX_BATCH}")
 
-model = torchreid.models.build_model(
-    name="osnet_x1_0",
-    num_classes=1,
-    pretrained=True,
-)
+# ReidAutoBackend loads the resnet50_msmt17 backbone and its pretrained weights.
+rab = ReidAutoBackend(weights=WEIGHTS, device=torch.device("cuda"), half=True)
+model = rab.model.model            # the underlying nn.Module
 model.eval().cuda().half()
 
-# Dummy input: [opt_batch, 3, H=256, W=128] — OSNet canonical input size.
+# Dummy input: [opt_batch, 3, H=256, W=128] — canonical person-ReID input size.
 dummy = torch.zeros(OPT_BATCH, 3, 256, 128, dtype=torch.float16, device="cuda")
 
 torch.onnx.export(

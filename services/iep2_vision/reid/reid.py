@@ -1,12 +1,12 @@
-"""OSNet ReID client — delegates crop embedding to the shared osnet-service via ZMQ.
+"""ReID client — delegates crop embedding to the shared osnet-service via ZMQ.
 
-IEP2 no longer loads or owns OSNet weights. It extracts the person crop from the
+IEP2 no longer loads or owns ReID weights. It extracts the person crop from the
 full frame, JPEG-encodes it, and submits it to the osnet-service. The service
-handles all preprocessing (R3), runs TRT inference, L2-normalises (R5), and
-returns 512-dim float32 bytes.
+handles all preprocessing (R3), runs inference (resnet50_msmt17), L2-normalises
+(R5), and returns 2048-dim float32 bytes.
 
 Transport: ipc:// only. Serialisation: msgpack only.
-Swap OSNet for another ReID model here — nothing outside this file changes.
+Swap the ReID model in osnet-service — nothing outside this file changes.
 """
 import asyncio
 import logging
@@ -20,7 +20,7 @@ import zmq.asyncio
 
 log = logging.getLogger("iep2.reid")
 
-EMBEDDING_DIM = 512
+EMBEDDING_DIM = 2048
 OSNET_INPUT_SOCK = os.environ.get("OSNET_INPUT_SOCK", "ipc:///tmp/sockets/osnet_input.sock")
 
 
@@ -91,7 +91,7 @@ class OsNetClient:
         """Extract ReID embedding for the person at bbox.
 
         Clamps bbox to frame boundaries; returns None for zero-area crops.
-        Returns (512,) float32 L2-normalised embedding from osnet-service.
+        Returns (2048,) float32 L2-normalised embedding from osnet-service.
         """
         h, w = frame.shape[:2]
         x1 = max(0, int(bbox[0]))

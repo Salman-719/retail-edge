@@ -32,7 +32,7 @@ INIT_EMBEDDINGS_COUNT      = 5     # embeddings collected before ReID attempt
 SAMPLE_INTERVAL            = 15    # frames between samples in sampled phase
 QUALITY_CONFIDENCE_THRESHOLD = 0.6 # minimum YOLO conf for sampled-phase sample
 MIN_BBOX_AREA              = 2500  # minimum bbox area (px²) for sampled-phase sample
-# ReID similarity threshold lives in SpatialGateConfig.base_threshold (default 0.75)
+# ReID similarity threshold lives in SpatialGateConfig.base_threshold (default 0.85)
 
 
 class LocalIdentityManager:
@@ -223,19 +223,19 @@ class LocalIdentityManager:
             # ── Branch C: first appearance ─────────────────────────────────────
             else:
                 if tid in self._track_to_local:
-                    # ByteTrack re-surfaced a known track_id — restore prior local_id immediately.
+                    # BoTSORT re-surfaced a known track_id — restore prior local_id immediately.
                     local_id = self._track_to_local[tid]
                     if local_id in self._lost:
                         lost_entry = self._lost.pop(local_id)
                         gallery = lost_entry.gallery
                         log.info(
-                            "F%04d  ByteTrack reuse  track_id=%d  → local_id=%d  (restored from lost pool)",
+                            "F%04d  BoTSORT reuse  track_id=%d  → local_id=%d  (restored from lost pool)",
                             self._frame_index, tid, local_id,
                         )
                     else:
                         gallery = EmbeddingGallery()
                         log.info(
-                            "F%04d  ByteTrack reuse (post-TTL)  track_id=%d  → local_id=%d  (fresh gallery)",
+                            "F%04d  BoTSORT reuse (post-TTL)  track_id=%d  → local_id=%d  (fresh gallery)",
                             self._frame_index, tid, local_id,
                         )
                     self._active[tid] = ActiveTrack(local_id=local_id, track_id=tid, gallery=gallery)
@@ -456,7 +456,7 @@ if __name__ == "__main__":
         assert r[0]["local_id"] == 1
         print(f"[5] TTL + sticky → local_id={r[0]['local_id']} ✓")
 
-        # ── Test 6: ByteTrack reuse ────────────────────────────────────────────
+        # ── Test 6: BoTSORT reuse ─────────────────────────────────────────────
         mgr4 = LocalIdentityManager(_MockOsNetClient())
         mgr4._osnet_client.emb = emb_a
         await mgr4.process_frame(frame, [_track(1)])
@@ -466,7 +466,7 @@ if __name__ == "__main__":
         r = await mgr4.process_frame(frame, [_track(1)])
         assert r[0]["local_id"] == 1
         assert 1 not in mgr4._pending
-        print(f"[6] ByteTrack reuse → local_id={r[0]['local_id']} ✓")
+        print(f"[6] BoTSORT reuse → local_id={r[0]['local_id']} ✓")
 
         print("\nsmoke test passed")
 

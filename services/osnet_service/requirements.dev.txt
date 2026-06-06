@@ -1,5 +1,6 @@
 # CPU dev requirements — torch + torchvision pre-installed in Dockerfile.dev with CPU index URL.
-# No torchreid, tensorrt, or pycuda needed for the CPU dev stub.
+# boxmot provides the resnet50_msmt17 ReID backbone (ReidAutoBackend).
+boxmot==10.0.84
 pyzmq==25.1.2
 msgpack==1.0.8
 numpy==1.26.4

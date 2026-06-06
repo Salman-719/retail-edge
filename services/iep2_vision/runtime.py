@@ -116,7 +116,7 @@ def _fetch_s3_frame(s3_client, bucket: str, key: str) -> np.ndarray | None:
 def _project_tracks(tracks: list[dict], projector: FloorProjector) -> None:
     """Project each confirmed track's bbox foot point and attach floor_x, floor_y, clamped in-place.
 
-    Called after ByteTrack update, before identity manager, so the manager and
+    Called after BoTSORT update, before identity manager, so the manager and
     the persist step both read projection results from the track dict rather than
     recomputing them independently.
     """
@@ -344,7 +344,7 @@ class IEP2Runtime:
 
         for _capture_ts_ms, _s3_key, frame in source:
             detections = await self.yolo_client.detect(frame, _capture_ts_ms)
-            tracks     = update(tracker, detections)
+            tracks     = update(tracker, detections, frame)
             _project_tracks(tracks, projector)
             enriched, _, __ = await manager.process_frame(frame, tracks, timestamp_ms=_capture_ts_ms)
 
@@ -458,7 +458,7 @@ class IEP2Runtime:
                 batch_frames, batch_ts, batch_keys, batch_detections
             ):
                 _t_frame_s3 = time.monotonic()
-                tracks   = update(tracker, detections)
+                tracks   = update(tracker, detections, frame)
                 _project_tracks(tracks, projector)
                 enriched, _crops_s3, _batches_s3 = await manager.process_frame(frame, tracks, timestamp_ms=capture_ts_ms)
                 tracker_ms_s3    += (time.monotonic() - _t_frame_s3) * 1000
@@ -701,7 +701,7 @@ async def run_daemon(settings) -> None:
 
     Reads IEP1 manifests from local Redis, processes frames from tmpfs,
     writes tracking_history to cloud DB, publishes batch_complete to server Redis.
-    ByteTrack and LocalIdentityManager state persist across all batch boundaries.
+    BoTSORT and LocalIdentityManager state persist across all batch boundaries.
     """
     import asyncio
     import redis as _sync_redis
@@ -851,7 +851,7 @@ async def run_daemon(settings) -> None:
                 tracker_ms     = 0.0
                 for frame, capture_ts_ms, detections in zip(batch_frames_data, batch_ts, batch_detections):
                     _t_frame = time.monotonic()
-                    tracks   = update(tracker, detections)
+                    tracks   = update(tracker, detections, frame)
                     _project_tracks(tracks, projector)
                     enriched, _crops, _batches = await manager.process_frame(
                         frame, tracks, timestamp_ms=capture_ts_ms

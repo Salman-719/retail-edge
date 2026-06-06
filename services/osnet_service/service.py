@@ -1,7 +1,7 @@
-"""OSNet ReID embedding service.
+"""ReID embedding service — resnet50_msmt17 (2048-dim).
 
 Single GPU process that batches person crops from all IEP2 workers and runs
-one TRT inference call per batch. Returns L2-normalised 512-dim float32 embeddings.
+one TRT inference call per batch. Returns L2-normalised 2048-dim float32 embeddings.
 
 Architecture mirrors yolo-service:
   IEP2 × N  ──PUSH──►  PULL (osnet_input.sock)
@@ -13,7 +13,7 @@ Architecture mirrors yolo-service:
 R1: TRT engine only — .pt at runtime is banned.
 R3: Preprocessing owned by this service (decode/resize/normalise).
 R5: L2 normalisation before return.
-R6: Assert 512-dim output.
+R6: Assert 2048-dim output.
 R7: NOT_SERVING during load, SERVING after warmup.
 R8: ipc:// sockets only.
 """
@@ -36,10 +36,10 @@ OSNET_INPUT_SOCK       = os.environ.get("OSNET_INPUT_SOCK",       "ipc:///tmp/so
 OSNET_HEALTH_UNIX_SOCK = os.environ.get("OSNET_HEALTH_SOCK",      "unix:///tmp/sockets/osnet_health.sock")
 OSNET_HEALTH_TCP_ADDR  = os.environ.get("OSNET_HEALTH_TCP_ADDR",  "[::]:50053")
 
-OSNET_MODEL_PATH  = os.environ.get("OSNET_MODEL_PATH",  "osnet_x1_0.engine")
+OSNET_MODEL_PATH  = os.environ.get("OSNET_MODEL_PATH",  "resnet50_msmt17.engine")
 MAX_BATCH_SIZE    = int(os.environ.get("OSNET_MAX_BATCH_SIZE",    "64"))
 BATCH_TIMEOUT_MS  = float(os.environ.get("OSNET_BATCH_TIMEOUT_MS", "50"))
-EMBEDDING_DIM     = 512
+EMBEDDING_DIM     = 2048
 
 # ImageNet normalisation constants (R3).
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -107,7 +107,7 @@ def _infer_batch(engine, batch: np.ndarray) -> np.ndarray:
     """Run TRT inference.
 
     batch: float16 [B, 3, 256, 128] contiguous host array.
-    Returns: float32 [B, 512].
+    Returns: float32 [B, 2048].
     """
     import pycuda.driver as cuda
 
@@ -136,7 +136,7 @@ def _infer_batch(engine, batch: np.ndarray) -> np.ndarray:
 
 
 def _l2_normalize(emb: np.ndarray) -> np.ndarray:
-    """R5: L2 normalise a (512,) embedding in-place."""
+    """R5: L2 normalise a (2048,) embedding in-place."""
     norm = np.linalg.norm(emb)
     if norm < 1e-8:
         return emb
@@ -149,7 +149,7 @@ def _infer_and_pack(engine, batch_items: list[dict]) -> list[dict]:
     tensors = [_preprocess_crop(item["crop"]) for item in batch_items]
     batch   = np.stack(tensors, axis=0)              # [B, 3, 256, 128] fp16
 
-    embeddings = _infer_batch(engine, batch)          # [B, 512] fp32
+    embeddings = _infer_batch(engine, batch)          # [B, 2048] fp32
 
     responses = []
     for item, emb in zip(batch_items, embeddings):
