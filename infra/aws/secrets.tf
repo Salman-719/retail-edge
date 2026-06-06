@@ -28,8 +28,9 @@ locals {
     redis_password    = random_password.redis.result
     jwt_secret        = random_password.jwt.result
     agent_secret      = random_password.agent.result
-    # In-cluster Redis (TLS) — no auth configured in redis.conf.
-    redis_url     = "rediss://redis-server:6380"
+    # In-cluster Redis (TLS, private-CA cert) — ssl_cert_reqs=none so redis-py
+    # clients skip CA verification on this intra-cluster connection.
+    redis_url     = "rediss://redis-server:6380?ssl_cert_reqs=none"
     s3_access_key = aws_iam_access_key.s3.id
     s3_secret_key = aws_iam_access_key.s3.secret
   }
