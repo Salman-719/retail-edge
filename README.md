@@ -105,10 +105,18 @@ retail-edge/
 - **Docker Desktop** (includes Docker Compose v2)
 - **Git**
 - **bash** (for the cert-generation script — Git Bash on Windows)
+- **Node.js 18+ / npm** — only if you use the **dev pipeline screens** (`/dev/e2e`,
+  `/dev/vision`), which require the Vite dev server (`npm run dev`). Not needed for
+  the production Docker frontend on `:3000`.
 
-No local Python or Node.js install required. All services run inside Docker.
+The backend runs entirely in Docker — no local Python required.
 
 > **Linux Docker socket:** On Linux add your user to the `docker` group: `sudo usermod -aG docker $USER`, then log out and back in.
+
+> **GPU inference is off by default** (services run on CPU). To run the detector +
+> ReID on an **NVIDIA** GPU — including installing the driver and NVIDIA Container
+> Toolkit — follow [Running inference on a GPU (NVIDIA)](#running-inference-on-a-gpu-nvidia).
+> Intel GPUs are not supported via Docker (see that section).
 
 ---
 
@@ -193,9 +201,169 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d yolo-servic
 
 ### 6. Open the web UI
 
-The frontend is served by the compose `frontend` service:
+There are **two ways** to run the frontend, and they are **not equivalent** — pick
+based on what you're doing:
 
-Open **http://localhost:3000**. API docs at **http://localhost:8000/docs**.
+| Method | URL | Build | Dev-only screens (`/dev/vision`, `/dev/e2e`) |
+|---|---|---|---|
+| **A. Docker `frontend` service** | http://localhost:3000 | production (`vite build`) | **stripped out** — not available |
+| **B. Vite dev server** (`npm run dev`) | http://localhost:5173 | development | **available** |
+
+The dev-only screens are gated behind `import.meta.env.DEV`, which is dead code in
+a production build. So the Docker frontend on `:3000` shows the normal app but
+**never** the dev pipeline screens.
+
+**A — Docker frontend (production build, no Node.js needed):**
+
+Already running if you started the `frontend` service. Open **http://localhost:3000**.
+Use this to exercise the production build or the normal onboarding/app flow.
+
+**B — Vite dev server (required for the dev pipeline screens):**
+
+```bash
+cd frontend
+npm install
+npm run dev          # → http://localhost:5173
+```
+
+Use this when you need:
+- **`/store/<slug>/dev/e2e`** — the end-to-end IEP1→IEP2→IEP3 split-screen tester
+  (CPU/GPU toggle, live feeds, per-camera tracking tables, IEP3 output, replay).
+- **`/store/<slug>/dev/vision`** — the single-camera vision debug console.
+- Hot-reload while editing frontend code.
+
+API docs (either method): **http://localhost:8000/docs**.
+
+> **Which to use?** Day-to-day pipeline testing → **Vite `:5173`** (it has the dev
+> screens). Verifying the shippable production bundle or the plain app → **Docker
+> `:3000`**. Both talk to the same backend on `:8000`.
+
+### 6b. (Dev pipeline only) RTSP stream simulator
+
+The `/dev/e2e` tester drives the real pipeline from the stream URLs in store config.
+For dev without physical cameras you can either point cameras at a **file path**
+(`/workspace/testing-data/<clip>.mp4`, mounted into `iep1-daemon`) or at the bundled
+**RTSP simulator** (mediamtx + ffmpeg looping the test clips):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev up -d \
+  rtsp-server rtsp-cam1 rtsp-cam2
+# Camera 1 URL: rtsp://rtsp-server:8554/cam1
+# Camera 2 URL: rtsp://rtsp-server:8554/cam2
+```
+
+IEP1 samples either source at `target_fps` (stride-based for files), so both behave
+the same downstream. Pressing **Start** on `/dev/e2e` resets all track tables and
+restarts IEP1/IEP2/IEP3 fresh from frame 1.
+
+---
+
+## Running inference on a GPU (NVIDIA)
+
+The detector + ReID run on CPU by default. To run them on an **NVIDIA GPU**, follow
+this section top to bottom — it covers everything, including installing the driver
+and the NVIDIA Container Toolkit. Do every step in order; don't skip the verifies.
+
+> **Scope:** NVIDIA GPUs only, on **Linux** or **Windows 11 + WSL2 (Docker Desktop)**.
+> An **Intel** GPU cannot be used this way — Docker Desktop's WSL2 VM does not pass an
+> Intel GPU to Linux containers, and there is no `--gpus` equivalent for Intel. On
+> Intel you would need a native Linux host with `/dev/dri` + OpenVINO (not covered here).
+> You do **not** need to install the CUDA Toolkit on the host — the container's PyTorch
+> wheel bundles the CUDA runtime. You only need the **NVIDIA driver** + **Container Toolkit**.
+
+### Step G1 — Check if your GPU is already usable from Docker
+
+Run this first. If it prints a table with your GPU, **skip to Step G4**:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+```
+
+If it errors, do Step G2 (driver) and Step G3 (toolkit) for your OS.
+
+### Step G2 — Install the NVIDIA driver
+
+**Linux (Ubuntu/Debian):**
+```bash
+nvidia-smi  # if this already lists your GPU, the driver is installed — skip to G3
+sudo ubuntu-drivers autoinstall   # or: sudo apt-get install -y nvidia-driver-535
+sudo reboot
+```
+
+**Windows 11 + WSL2:**
+1. Install the latest **NVIDIA Windows driver** (GeForce/Studio or your data-center
+   driver) from nvidia.com. The Windows driver includes WSL2 GPU support.
+2. **Do NOT** install an NVIDIA driver *inside* WSL — only the Windows driver.
+3. Confirm in PowerShell: `nvidia-smi` (should list your GPU).
+
+### Step G3 — Give Docker access to the GPU
+
+**Linux — install the NVIDIA Container Toolkit:**
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+**Windows 11 + WSL2 — nothing to install in WSL.** Docker Desktop ships GPU support:
+1. Docker Desktop → **Settings → General →** enable **Use the WSL 2 based engine**.
+2. Docker Desktop → **Settings → Resources → WSL Integration →** enable your distro.
+3. Update Docker Desktop to a current version (GPU via WSL2 needs ≥ 4.x).
+
+**Verify (both OSes)** — this must print the GPU table before continuing:
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+```
+
+### Step G4 — Build the inference images with CUDA + start the stack
+
+These commands **replace** the build/start commands in Quick Start steps 3–5. They add
+`-f docker-compose.gpu.yml`, which builds the detector + ReID with CUDA PyTorch and
+reserves the GPU for them. Run from the `retail-edge/` directory.
+
+**Build (first time, or after pulling changes):**
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+  build yolo-service osnet-service
+```
+> CUDA PyTorch is a large download (~2.5 GB) — the first build takes several minutes.
+> If your NVIDIA driver is older than CUDA 12.1 (driver < 525), edit
+> `docker-compose.gpu.yml` and change `cu121` to `cu118`, then rebuild.
+
+**Start the full stack (GPU detector + ReID, everything else as usual):**
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml up -d \
+  postgres pgbouncer redis minio \
+  eep iep3_reconciliation live_bridge \
+  yolo-service osnet-service iep1-daemon
+```
+
+### Step G5 — Verify the services are on the GPU
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+  exec yolo-service python -c "import torch; print('cuda:', torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+Expected: `cuda: True <your GPU name>`. Then check both services published GPU capability:
+```bash
+docker exec retail-edge-redis-1 redis-cli GET inference:capability:detector
+docker exec retail-edge-redis-1 redis-cli GET inference:capability:reid
+# both should show  "cuda": true
+```
+
+### Step G6 — Use it from the dev screen
+
+Start the Vite frontend (Step B / `npm run dev`) and open `/store/<slug>/dev/e2e`.
+The **GPU** indicator shows **available** and the CPU/GPU toggle **auto-selects GPU**.
+Press **Start** — detection + ReID now run on the GPU. (You can still toggle back to
+CPU per run.) On a machine with no NVIDIA GPU, the toggle stays on CPU and choosing
+GPU returns "This machine has no usable GPU" — by design.
 
 ---
 

@@ -1,0 +1,46 @@
+# NVIDIA GPU overlay for the dev inference services.
+#
+# Adds CUDA PyTorch to the detector + ReID images and reserves the host GPU for
+# them. Stack on TOP of the dev overlay:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+#     build yolo-service osnet-service
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+#     up -d yolo-service osnet-service
+#
+# Requires: NVIDIA driver + NVIDIA Container Toolkit on the host (see README
+# "Running inference on a GPU"). The CUDA torch wheel bundles its own CUDA
+# runtime — no host CUDA Toolkit install is needed.
+#
+# cu121 wheels suit NVIDIA drivers supporting CUDA 12.1 (driver >= 525). If your
+# driver is older, change TORCH_INDEX_URL to .../whl/cu118.
+
+services:
+
+  yolo-service:
+    build:
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
+    environment:
+      INFERENCE_DEVICE: "gpu"      # warm up + default to GPU; toggle still overrides per run
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  osnet-service:
+    build:
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
+    environment:
+      INFERENCE_DEVICE: "gpu"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

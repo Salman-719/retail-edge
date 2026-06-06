@@ -279,7 +279,11 @@ export default function DevE2E() {
       } catch (e) {
         setError('Failed to load store/cameras')
       }
-      try { setGpu(await getDevGpuStatus()) } catch { setGpu({ gpu_available: false }) }
+      try {
+        const g = await getDevGpuStatus()
+        setGpu(g)
+        if (g.gpu_available) setDevice('gpu')   // prefer GPU when the machine has one
+      } catch { setGpu({ gpu_available: false }) }
     })()
   }, [slug])
 
