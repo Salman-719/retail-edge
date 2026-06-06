@@ -50,7 +50,7 @@ spec:
             # Through pgbouncer (transaction pooling). $(PG_PASSWORD) is expanded
             # by kubelet from the env var defined above.
             - name: DATABASE_URL_EEP
-              value: "postgresql+asyncpg://{{ .Values.postgres.user }}:$(PG_PASSWORD)@pgbouncer:5432/{{ .Values.postgres.database }}"
+              value: "postgresql+asyncpg://{{ .Values.postgres.user }}:$(PG_PASSWORD)@{{ .Values.database.host }}:5432/{{ .Values.postgres.database }}"
             # EEP reads REDIS_URL (not SERVER_REDIS_URL) — see config.py
             - name: REDIS_URL
               valueFrom:

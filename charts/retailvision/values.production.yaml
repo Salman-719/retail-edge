@@ -1,19 +1,27 @@
 # Production overrides — full replica count, production-grade resources.
 # Populate iep3.stores with actual store UUIDs before deploying.
 
+# Lean single-node profile (fits a 2-vCPU t4g.large): direct-to-Postgres (no
+# pgbouncer), single replicas, HPA off. Scale up on a bigger node / more nodes.
+database:
+  host: postgres
+
+pgbouncer:
+  enabled: false
+
 eep:
-  replicas: 2
+  replicas: 1
   grpcHost: eep.retailvision.example.com   # set the real gRPC hostname before deploy
   hpa:
-    enabled: true
-    minReplicas: 2
-    maxReplicas: 8
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
 
 iep3:
   stores: []   # set at deploy time: --set iep3.stores={uuid1,uuid2,...}
 
 frontend:
-  replicas: 2
+  replicas: 1
 
 postgres:
   storage: 50Gi
