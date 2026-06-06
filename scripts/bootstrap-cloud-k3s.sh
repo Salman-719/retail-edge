@@ -45,9 +45,9 @@ echo "[1/7] NTP (chrony) enabled"
 # 2. Install k3s server. Keep ServiceLB (klipper) so type=LoadBalancer binds the
 #    node's public IP; disable traefik (we use ingress-nginx). A fixed K3S_TOKEN
 #    (set by Terraform) lets agent nodes join for scale-out.
+# K3S_TOKEN (if set) is read from the environment by the installer automatically.
 curl -sfL https://get.k3s.io | \
     INSTALL_K3S_VERSION="${K3S_VERSION}" \
-    ${K3S_TOKEN:+K3S_TOKEN="${K3S_TOKEN}"} \
     sh -s - \
     --disable=traefik \
     --write-kubeconfig-mode=644 \
