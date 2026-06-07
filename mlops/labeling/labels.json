@@ -1,0 +1,9 @@
+{
+  "_comment": "Ground truth for the two eval clips. Phase 1: total_people (one integer per clip). Phase 2 (add later): per_frame map {frame_index: people_count} on a few sampled frames. See docs/MLFLOW_GUIDE.md §11.",
+  "clip_mannequin.mp4": {
+    "total_people": null
+  },
+  "clip_cashier.mp4": {
+    "total_people": null
+  }
+}

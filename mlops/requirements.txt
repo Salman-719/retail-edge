@@ -1,0 +1,12 @@
+# Offline ML-lifecycle (eval) dependencies ONLY.
+# Intentionally separate from services/*/requirements.txt so production images
+# stay lean and can never import mlflow. Pin versions before submitting.
+
+mlflow==2.16.2
+boto3>=1.34
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8
+opencv-python>=4.9
+ultralytics>=8.2        # RT-DETR / YOLO detectors for the detection experiment
+boxmot>=10.0.84         # BoT-SORT / ByteTrack / OC-SORT / StrongSORT + ReID backbones
