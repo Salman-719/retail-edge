@@ -49,6 +49,17 @@ Redis topology
 
 ---
 
+## Documentation & MLOps
+
+| Doc | What it covers |
+|---|---|
+| [`docs/MLFLOW_GUIDE.md`](docs/MLFLOW_GUIDE.md) | MLflow setup + how to run the offline model experiments |
+| [`docs/MLOPS_PIPELINE.md`](docs/MLOPS_PIPELINE.md) | Lifecycle: CI, experiment tracking, promotion gate + model registry |
+| [`docs/docs_models/detection/DETECTION_RESULTS.md`](docs/docs_models/detection/DETECTION_RESULTS.md) | Detection experiment — 24 runs, model comparison + decision |
+| [`docs/DETECTION_SCREENSHOTS.md`](docs/DETECTION_SCREENSHOTS.md) | MLflow screenshots (runs, comparison, mannequin rejection, registry) |
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |
