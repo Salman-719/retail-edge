@@ -37,14 +37,14 @@ EOF
     echo "[1b] GHCR registry credentials written"
 fi
 
-# 2. Install k3s (single-node, no CNI, no traefik)
+# 2. Install k3s (single-node, default flannel CNI, no traefik/servicelb)
 #    --bind-address=127.0.0.1: API server loopback-only (R5 — never network-accessible)
+#    NOTE: flannel is kept (do NOT pass --flannel-backend=none) or the node stays
+#    NotReady and non-hostNetwork pods (yolo/osnet/iep2) never schedule.
 curl -sfL https://get.k3s.io | \
     INSTALL_K3S_VERSION="v1.29.4+k3s1" \
     K3S_KUBECONFIG_MODE="644" \
     sh -s - \
-    --flannel-backend=none \
-    --disable-network-policy \
     --disable=traefik \
     --disable=servicelb \
     --bind-address=127.0.0.1 \
