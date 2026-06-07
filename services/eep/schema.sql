@@ -934,3 +934,32 @@ CREATE INDEX IF NOT EXISTS idx_gth_zone_ts
 CREATE INDEX IF NOT EXISTS idx_gth_version
     ON global_tracking_history(version_id)
     WHERE version_id IS NOT NULL;
+
+
+-- ─── IEP6 agent (AI analytics agent) ────────────────────────────────────────
+-- Stored insight reports and AI-detected alerts (see alembic 0006).
+CREATE TABLE IF NOT EXISTS agent_insights (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id    UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    kind        VARCHAR(40) NOT NULL DEFAULT 'daily_summary',
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    metrics     JSONB,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_insights_store_ts
+    ON agent_insights(store_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_alerts (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id     UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    kind         VARCHAR(40) NOT NULL,
+    severity     VARCHAR(10) NOT NULL DEFAULT 'info'
+                 CHECK (severity IN ('info', 'warning', 'critical')),
+    message      TEXT NOT NULL,
+    details      JSONB,
+    resolved_at  TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_alerts_store_ts
+    ON agent_alerts(store_id, created_at DESC);

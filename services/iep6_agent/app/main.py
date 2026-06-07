@@ -1,8 +1,24 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
+from app import scheduler
 from app.api.routers import agent
 
-app = FastAPI(title="IEP6 — Agent")
+logging.basicConfig(level=logging.INFO)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.shutdown()
+
+
+app = FastAPI(title="IEP6 — Agent", lifespan=lifespan)
 app.include_router(agent.router)
 
 
