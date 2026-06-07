@@ -48,15 +48,67 @@
 
 ## 3. Model promotion logic
 
-A model version is promoted to production when ALL of the following hold:
+A model version is promoted to production when ALL **applicable** thresholds below
+hold. Thresholds are derived from the actual benchmark results in `docs_models/`
+(the winning models: `rtdetr-x` for detection, `BoT-SORT` for tracking) and use the
+exact MLflow metric keys logged by `mlops/eval/run_detection_eval.py`. The gate is
+implemented in `scripts/check_promotion.py`.
 
-| Metric | Threshold | Source |
-|---|---|---|
-| ReID Rank-1 accuracy | ≥ TODO% | MLflow run |
-| IEP2 frame latency (p95) | ≤ TODO ms | MLflow run |
-| False merge rate | ≤ TODO% | MLflow run |
+> **Why these metrics and not mAP / FPS / Rank-1 accuracy?** Those were never
+> measured in `docs_models/` — they were aspirational placeholders. The experiments
+> recorded *proxy* metrics (confidence, ID switches, distinct counts, false
+> positives). The gate only checks metrics that runs actually log; inventing
+> missing ones would make every run report MISSING.
 
-**Decision record:** TODO (link to the MLflow run that was promoted, or the PR that updated the model)
+| Metric | Threshold | Direction | Source | MLflow key |
+|---|---|---|---|---|
+| Avg detection confidence (%) | 86.0 | ≥ | docs_models/detection/detection_experiments.md (Round 4: rtdetr-x = 86.1%) | `avg_confidence` |
+| ID switches | 12 | ≤ | docs_models/detection/detection_experiments.md (Round 4: rtdetr-x = 12, yolov8x = 16) | `id_switches` |
+| People count error (scene=crowded) | 2 | ≤ | mlops/labeling/labels.json (GT = 16 people) — ⚠️ tolerance is an estimate | `count_error` |
+| Peak count error (scene=crowded) | 2 | ≤ | mlops/labeling/labels.json (GT = peak 14) — ⚠️ tolerance is an estimate | `peak_count_error` |
+| False positives (scene=mannequin/hand_ad) | 0 | ≤ | docs_models/detection/detection_experiments.md (Round 4: rtdetr-x = 0 mannequin FP) | `false_positive_total` |
+
+**Scene applicability:** `false_positive_total` is only checked on 0-people clips
+(`scene=mannequin`/`hand_ad`); `count_error`/`peak_count_error` only on
+`scene=crowded`. The script skips non-applicable metrics so a run is not failed for
+a metric that does not apply to its clip. ⚠️ Note `rtdetr-x` rejects 3-D mannequins
+but not the 2-D printed hand-ad (Case 3), so a `hand_ad` run will fail the FP gate
+by design — set per-scene expectations before promoting on that clip.
+
+### Usage
+
+```bash
+# After logging a new MLflow experiment run:
+python scripts/check_promotion.py --run-id <your-run-id>
+
+# With a remote MLflow server:
+python scripts/check_promotion.py --run-id <your-run-id> --tracking-uri http://your-mlflow-server:5000
+```
+
+### Promotion process (manual gate)
+
+Promotion is a **manual checkpoint**, run locally before a model is deployed — it is
+deliberately not wired into GitHub Actions, because CI runs in the cloud and cannot
+reach the MLflow server running on `localhost:5000`. The gate is the human
+decision step, not an auto-deploy:
+
+1. Run an experiment — `python mlops/eval/run_detection_eval.py` (logs runs to MLflow).
+2. Find the run in the MLflow UI (http://localhost:5000) and copy its run ID.
+3. Run the gate — `python scripts/check_promotion.py --run-id <id>`.
+   - **Exit 0 / "PROMOTE"** → proceed to step 4.
+   - **Exit 1 / "DO NOT PROMOTE"** → tune hyperparameters and re-run.
+4. On PROMOTE: update the model reference in `services/iep2_vision/` and
+   `services/iep3_reconciliation/`, then record the run below in
+   **Current promoted model**.
+
+The non-zero exit code makes this scriptable later if the MLflow server is ever
+hosted somewhere CI can reach (see TRADEOFFS / future work).
+
+## Current promoted model
+- **Run ID:** TODO — paste the MLflow run ID of the currently deployed model
+- **Promoted on:** TODO — date
+- **Promoted by:** TODO — team member name
+- **All thresholds at promotion:** see MLflow run linked above
 
 ## 4. Retraining trigger
 

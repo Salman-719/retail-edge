@@ -11,11 +11,14 @@ EMBEDDING_DIM from services/iep2_vision/reid/reid.py = 2048 (resnet50); osnet = 
 """
 from __future__ import annotations
 
+import os
+
 from mlflow_utils import log_run  # noqa: F401
 
+_CLIPS_DIR = os.environ.get("CLIPS_DIR", "testing-data")
 VIDEOS = {
-    "mannequin": "testing-data/clip_mannequin.mp4",
-    "crowded":   "testing-data/clip_cashier.mp4",
+    "mannequin": os.path.join(_CLIPS_DIR, "clip_mannequin.mp4"),
+    "crowded":   os.path.join(_CLIPS_DIR, "clip_cashier.mp4"),
 }
 
 COMPARISON_MODELS = [

@@ -62,3 +62,4 @@ docsme/
 # TLS private keys — never commit
 *.key
 certs/*.key
+mlops/outputs/
