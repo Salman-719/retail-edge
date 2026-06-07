@@ -2,11 +2,12 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
 import {
-  activateDraft, computeHomography, createCamera, createDraft, createObstacle, createZone,
+  activateDraft, computeHomography, computeTps, createCamera, createDraft, createObstacle, createZone,
   deleteCameraConfig, deleteCamera, deleteDraft, deleteObstacle, deleteZone,
   getActiveVersion, getDraft, getDraftCameraConfigs, getDraftFloorPlan, getDraftObstacles,
   getDraftZones, getCalibrations, listSections, patchCamera, placeCameraConfig,
   setFloorPlanScale, updateCameraConfig, uploadCameraFrame, uploadFloorPlan, verifyCalibration,
+  projectPoint,
 } from '../api'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -17,7 +18,7 @@ const STEPS = [
   { n: 3, label: 'Place Cameras' },
   { n: 4, label: 'Camera Frames' },
   { n: 5, label: 'Correspondences' },
-  { n: 6, label: 'Compute Homography' },
+  { n: 6, label: 'Compute Calibration' },
   { n: 7, label: 'Verify Calibration' },
   { n: 8, label: 'Draw Zones' },
   { n: 9, label: 'Activate' },
@@ -461,6 +462,11 @@ export default function StoreConfigEdit() {
   const [pendingCameraPlacement, setPendingCameraPlacement] = useState(null)
   const [newCameraName, setNewCameraName] = useState('')
   const [newCameraHeight, setNewCameraHeight] = useState('')
+  const [newCameraLens, setNewCameraLens] = useState('')
+  const [newCameraHFov, setNewCameraHFov] = useState('')
+  const [newCameraVFov, setNewCameraVFov] = useState('')
+  const [newCameraStreamWidth, setNewCameraStreamWidth] = useState('')
+  const [newCameraStreamHeight, setNewCameraStreamHeight] = useState('')
 
   // Steps 4-7 — selected camera; derived from cameraConfigs to avoid stale state
   const [selectedConfigId, setSelectedConfigId] = useState(null)
@@ -476,10 +482,8 @@ export default function StoreConfigEdit() {
   const [calibResultsMap, setCalibResultsMap] = useState({})
   const [pendingPixelPt, setPendingPixelPt] = useState(null)
 
-  // Step 7 — per-camera verification preview + correction mode
+  // Step 7 — per-camera verification test points (array of {pixel, mapPt})
   const [verifyPreviewMap, setVerifyPreviewMap] = useState({})
-  const [correctionMode, setCorrectionMode] = useState(false)
-  const [correctionPixel, setCorrectionPixel] = useState(null)
 
   // Step 8 — polygon drawing
   const [step8Skipped, setStep8Skipped] = useState(false)
@@ -622,7 +626,13 @@ export default function StoreConfigEdit() {
         if (current) {
           calibMap[cc.id] = current
           if (current.correspondences?.length) {
-            corrMap[cc.id] = current.correspondences
+            const raw = current.correspondences
+            // TPS format: {frame_px, frame_py, map_px, map_py, ...}
+            // Homography format: {pixel: [x,y], world: [x,y]}
+            // Normalise to {pixel, world} so step-5 rendering is format-agnostic.
+            corrMap[cc.id] = raw[0]?.frame_px !== undefined
+              ? raw.map(c => ({ pixel: [c.frame_px, c.frame_py], world: [c.map_px, c.map_py] }))
+              : raw
           }
         }
       }
@@ -634,7 +644,7 @@ export default function StoreConfigEdit() {
     setPendingPixelPt(null)
     setInProgressPoints([])
     setPendingPolygon(null)
-    setVerifyPreviewMap({})
+    setVerifyPreviewMap({})   // each camera's entry is an array of {pixel, mapPt}
     setPendingCameraPlacement(null)
   }
 
@@ -656,7 +666,7 @@ export default function StoreConfigEdit() {
     setInProgressPoints([])
     setPendingPolygon(null)
     setPendingCameraPlacement(null)
-    setVerifyPreviewMap({})
+    setVerifyPreviewMap({})   // array-per-camera cleared
     if (draft) await loadSectionData(section.id, slug)
   }
 
@@ -759,6 +769,11 @@ export default function StoreConfigEdit() {
       const cam = await createCamera(slug, {
         name: newCameraName.trim(),
         ...(newCameraStreamUrl.trim() ? { cloud_stream_url: newCameraStreamUrl.trim() } : {}),
+        ...(newCameraLens !== '' ? { lens_focal_length_mm: parseFloat(newCameraLens) } : {}),
+        ...(newCameraHFov !== '' ? { h_fov_deg: parseFloat(newCameraHFov) } : {}),
+        ...(newCameraVFov !== '' ? { v_fov_deg: parseFloat(newCameraVFov) } : {}),
+        ...(newCameraStreamWidth !== '' ? { stream_width: parseInt(newCameraStreamWidth, 10) } : {}),
+        ...(newCameraStreamHeight !== '' ? { stream_height: parseInt(newCameraStreamHeight, 10) } : {}),
       })
       const cc = await placeCameraConfig(slug, selectedSection.id, {
         physical_camera_id: cam.id,
@@ -771,6 +786,11 @@ export default function StoreConfigEdit() {
       setSelectedConfigId(cc.id)
       setPendingCameraPlacement(null)
       setNewCameraStreamUrl('')
+      setNewCameraLens('')
+      setNewCameraHFov('')
+      setNewCameraVFov('')
+      setNewCameraStreamWidth('')
+      setNewCameraStreamHeight('')
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
     } finally {
@@ -837,16 +857,25 @@ export default function StoreConfigEdit() {
     }))
   }
 
-  async function handleComputeHomographyFor(configId) {
+  async function handleComputeCalibrationFor(configId) {
     const corr = correspondencesMap[configId] || []
     if (corr.length < 8) return
     setSaving(true)
     try {
-      const result = await computeHomography(slug, configId, corr)
+      // Map stored correspondence format { pixel, world } → TPS format { frame_px, frame_py, map_px, map_py }
+      const tpsCorr = corr.map(c => ({
+        frame_px: c.pixel[0],
+        frame_py: c.pixel[1],
+        map_px:   c.world[0],
+        map_py:   c.world[1],
+      }))
+      const result = await computeTps(slug, configId, tpsCorr)
       setCalibResultsMap(prev => ({ ...prev, [configId]: result }))
       setCameraConfigs(prev => prev.map(c =>
         c.id === configId ? { ...c, status: 'calibrated' } : c
       ))
+      // Clear verification test points when recalibrating
+      setVerifyPreviewMap(prev => ({ ...prev, [configId]: [] }))
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
     } finally {
@@ -856,19 +885,28 @@ export default function StoreConfigEdit() {
 
   // ─── Step 7: Verify ───────────────────────────────────────────────────────
 
-  function projectPixelToWorld(configId, px, py) {
-    const H = calibResultsMap[configId]?.homography_matrix
-    if (!H) return null
-    const X = H[0][0] * px + H[0][1] * py + H[0][2]
-    const Y = H[1][0] * px + H[1][1] * py + H[1][2]
-    const W = H[2][0] * px + H[2][1] * py + H[2][2]
-    return [X / W, Y / W]
-  }
-
-  function handleFrameClickForVerify(x, y) {
+  async function handleFrameClickForVerify(x, y) {
     if (!selectedConfigId) return
-    const world = projectPixelToWorld(selectedConfigId, x, y)
-    setVerifyPreviewMap(prev => ({ ...prev, [selectedConfigId]: { pixel: [x, y], world } }))
+    const configId = selectedConfigId
+    // Add pending entry immediately so the frame dot appears right away.
+    setVerifyPreviewMap(prev => ({
+      ...prev,
+      [configId]: [...(prev[configId] || []), { pixel: [x, y], mapPt: null }],
+    }))
+    try {
+      const res = await projectPoint(slug, configId, x, y)
+      // Use map_px/map_py (canvas pixels) for the floor plan overlay.
+      const mapPt = (res.map_px != null && res.map_py != null) ? [res.map_px, res.map_py] : null
+      setVerifyPreviewMap(prev => {
+        const pts = (prev[configId] || []).slice()
+        // Resolve the most-recently-added pending point for this pixel.
+        const idx = pts.findLastIndex(p => p.pixel[0] === x && p.pixel[1] === y && p.mapPt === null)
+        if (idx >= 0) pts[idx] = { pixel: [x, y], mapPt }
+        return { ...prev, [configId]: pts }
+      })
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message)
+    }
   }
 
   async function handleVerifyCalibration() {
@@ -886,28 +924,6 @@ export default function StoreConfigEdit() {
     }
   }
 
-  function handleFrameClickForCorrection(x, y) {
-    setCorrectionPixel([x, y])
-  }
-
-  async function handleMapClickForCorrection(x, y) {
-    if (!correctionPixel || !selectedConfigId) return
-    const newCorr = [...(correspondencesMap[selectedConfigId] || []), { pixel: correctionPixel, world: [x, y] }]
-    setCorrespondencesMap(prev => ({ ...prev, [selectedConfigId]: newCorr }))
-    setCorrectionPixel(null)
-    setCorrectionMode(false)
-    setSaving(true)
-    try {
-      const result = await computeHomography(slug, selectedConfigId, newCorr)
-      setCalibResultsMap(prev => ({ ...prev, [selectedConfigId]: result }))
-      setCameraConfigs(prev => prev.map(c => c.id === selectedConfigId ? { ...c, status: 'calibrated' } : c))
-      setVerifyPreviewMap(prev => ({ ...prev, [selectedConfigId]: null }))
-    } catch (err) {
-      setError(err?.response?.data?.error || err.message)
-    } finally {
-      setSaving(false)
-    }
-  }
 
   // ─── Step 8: Drawing zones and obstacles ─────────────────────────────────
 
@@ -1017,7 +1033,7 @@ export default function StoreConfigEdit() {
   }
 
   const activeCorrespondences = selectedConfigId ? (correspondencesMap[selectedConfigId] || []) : []
-  const verifyPreview = selectedConfigId ? (verifyPreviewMap[selectedConfigId] ?? null) : null
+  const verifyTestPoints = selectedConfigId ? (verifyPreviewMap[selectedConfigId] || []) : []
 
   return (
     <div className="flex h-full">
@@ -1352,6 +1368,53 @@ export default function StoreConfigEdit() {
                   onChange={e => setNewCameraStreamUrl(e.target.value)}
                   className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm font-mono"
                 />
+                <p className="text-xs font-medium text-gray-500 pt-1">Lens & field of view (for 3D calibration)</p>
+                <select
+                  value={newCameraLens}
+                  onChange={e => setNewCameraLens(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                >
+                  <option value="">Lens focal length (optional)…</option>
+                  {[2.8, 4.0, 6.0, 8.0, 12.0, 16.0].map(mm => (
+                    <option key={mm} value={mm}>{mm} mm</option>
+                  ))}
+                </select>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    placeholder="Horizontal FOV° (e.g. 97)"
+                    value={newCameraHFov}
+                    onChange={e => setNewCameraHFov(e.target.value)}
+                    step="0.1" min="1" max="180"
+                    className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Vertical FOV° (e.g. 67)"
+                    value={newCameraVFov}
+                    onChange={e => setNewCameraVFov(e.target.value)}
+                    step="0.1" min="1" max="180"
+                    className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    placeholder="Stream width px (e.g. 3072)"
+                    value={newCameraStreamWidth}
+                    onChange={e => setNewCameraStreamWidth(e.target.value)}
+                    step="1" min="1"
+                    className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Stream height px (e.g. 2048)"
+                    value={newCameraStreamHeight}
+                    onChange={e => setNewCameraStreamHeight(e.target.value)}
+                    step="1" min="1"
+                    className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                  />
+                </div>
                 <div className="flex gap-2">
                   <button
                     type="submit"
@@ -1624,8 +1687,8 @@ export default function StoreConfigEdit() {
         {step === 6 && (
           <div className="space-y-4 max-w-xl">
             <div>
-              <h2 className="text-xl font-semibold mb-1">Compute Homography</h2>
-              <p className="text-sm text-gray-500">Compute the pixel-to-world mapping for each camera.</p>
+              <h2 className="text-xl font-semibold mb-1">Compute Calibration</h2>
+              <p className="text-sm text-gray-500">Fit a Thin-Plate Spline mapping for each camera. Need ≥ 8 well-spread correspondence pairs.</p>
             </div>
 
             {cameraConfigs.length === 0 && (
@@ -1645,34 +1708,26 @@ export default function StoreConfigEdit() {
                     }`}>{cc.status}</span>
                   </div>
 
-                  {alreadyDone && !calib && (
-                    <p className="text-sm text-green-700">✓ Already calibrated — can proceed to Step 7.</p>
-                  )}
-
-                  {!alreadyDone && (
-                    <button
-                      onClick={() => handleComputeHomographyFor(cc.id)}
-                      disabled={corr.length < 8 || saving}
-                      className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm disabled:opacity-50"
-                    >
-                      {saving ? 'Computing…' : `Compute (${corr.length} pairs)`}
-                    </button>
-                  )}
+                  <button
+                    onClick={() => handleComputeCalibrationFor(cc.id)}
+                    disabled={corr.length < 8 || saving}
+                    className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm disabled:opacity-50"
+                  >
+                    {saving ? 'Computing…' : alreadyDone ? `Recompute (${corr.length} pairs)` : `Compute (${corr.length} pairs)`}
+                  </button>
 
                   {calib && (
                     <div className="grid grid-cols-2 gap-1.5 text-xs text-gray-600 bg-gray-50 rounded p-3">
-                      <span>RMS Error</span>
-                      <span className={`font-mono font-medium ${
-                        (calib.rms_reprojection_error || 0) < 5 ? 'text-green-600' : 'text-yellow-600'
-                      }`}>{calib.rms_reprojection_error?.toFixed(3)} px</span>
-                      <span>Max Error</span>
-                      <span className="font-mono">{calib.max_reprojection_error?.toFixed(3)} px</span>
                       <span>Coverage</span>
-                      <span className="font-mono">{((calib.coverage_score || 0) * 100).toFixed(1)}%</span>
-                      <span>Condition #</span>
-                      <span className={`font-mono ${
-                        (calib.condition_number || 0) < 1000 ? 'text-green-600' : 'text-red-600'
-                      }`}>{calib.condition_number?.toFixed(1)}</span>
+                      <span className={`font-mono font-medium ${
+                        calib.quality === 'excellent' ? 'text-green-600' : 'text-yellow-600'
+                      }`}>{((calib.coverage_score || 0) * 100).toFixed(1)}%</span>
+                      <span>Quality</span>
+                      <span className={`font-mono font-medium ${
+                        calib.quality === 'excellent' ? 'text-green-600' : 'text-yellow-600'
+                      }`}>{calib.quality}</span>
+                      <span>Points</span>
+                      <span className="font-mono">{calib.point_count}</span>
                     </div>
                   )}
                 </div>
@@ -1712,80 +1767,53 @@ export default function StoreConfigEdit() {
 
             {selectedConfig && (
               <>
-                {correctionMode ? (
-                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
-                    {!correctionPixel
-                      ? '1. Click the inaccurate point on the camera frame.'
-                      : '2. Now click its correct location on the floor plan.'}
-                    <button onClick={() => { setCorrectionMode(false); setCorrectionPixel(null) }}
-                      className="ml-3 text-xs text-amber-600 underline">Cancel</button>
-                  </div>
-                ) : null}
-
                 <div className="space-y-4">
                   <div>
-                    <p className="text-xs text-gray-500 mb-1 font-medium">
-                      {correctionMode && !correctionPixel ? '→ Click inaccurate point on frame' : 'Camera Frame — click a point to project'}
-                    </p>
+                    <p className="text-xs text-gray-500 mb-1 font-medium">Camera Frame — click any point to project it onto the floor plan</p>
                     <FrameStage
                       frameUrl={selectedConfig.frame_url}
                       width={900} height={480}
-                      points={correctionMode && correctionPixel
-                        ? [correctionPixel]
-                        : verifyPreview?.pixel ? [verifyPreview.pixel] : []}
-                      onCanvasClick={correctionMode && !correctionPixel
-                        ? handleFrameClickForCorrection
-                        : (!correctionMode ? handleFrameClickForVerify : null)}
+                      points={verifyTestPoints.map(p => p.pixel)}
+                      onCanvasClick={handleFrameClickForVerify}
                     />
                   </div>
                   <div>
-                    <p className="text-xs text-gray-500 mb-1 font-medium">
-                      {correctionMode && correctionPixel ? '→ Click correct location on floor plan' : 'Floor Plan — projected location'}
-                    </p>
+                    <p className="text-xs text-gray-500 mb-1 font-medium">Floor Plan — projected locations</p>
                     <FloorPlanStage
                       floorPlan={floorPlan}
                       cameraConfigs={cameraConfigs}
                       activeConfigId={selectedConfigId}
-                      correspondencePoints={verifyPreview?.world && !correctionMode ? [verifyPreview.world] : []}
+                      correspondencePoints={verifyTestPoints.filter(p => p.mapPt).map(p => p.mapPt)}
                       worldBounds={floorPlan?.boundary_polygon || []}
-                      onCanvasClick={correctionMode && correctionPixel ? handleMapClickForCorrection : null}
                       width={1400} height={2400}
                     />
                   </div>
                 </div>
 
-                {verifyPreview?.world && !correctionMode && (
-                  <p className="text-sm text-gray-600">
-                    Projected: ({verifyPreview.world[0].toFixed(2)}, {verifyPreview.world[1].toFixed(2)}) m
-                  </p>
-                )}
-
-                {!calibResultsMap[selectedConfigId] && ['calibrated', 'verified'].includes(selectedConfig.status) && (
-                  <p className="text-sm text-amber-600 bg-amber-50 px-3 py-2 rounded">
-                    Calibration loaded from server — live projection preview is unavailable. You can still verify.
-                  </p>
+                {verifyTestPoints.length > 0 && (
+                  <div className="flex gap-3 items-center text-sm text-gray-500">
+                    <span>{verifyTestPoints.filter(p => p.mapPt).length} / {verifyTestPoints.length} projected</span>
+                    <button
+                      onClick={() => setVerifyPreviewMap(prev => ({ ...prev, [selectedConfigId]: [] }))}
+                      className="text-xs text-gray-400 hover:text-gray-600 underline"
+                    >
+                      Clear test points
+                    </button>
+                  </div>
                 )}
 
                 <div className="flex gap-3 items-center flex-wrap">
                   <button
                     onClick={handleVerifyCalibration}
-                    disabled={saving || selectedConfig.status === 'verified' || correctionMode}
+                    disabled={saving || selectedConfig.status === 'verified'}
                     className="px-5 py-2 bg-green-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
                   >
                     {saving ? 'Saving…' : selectedConfig.status === 'verified' ? '✓ Verified' : 'Looks Good'}
                   </button>
-                  {!correctionMode && calibResultsMap[selectedConfigId] && (
-                    <button
-                      onClick={() => { setCorrectionMode(true); setCorrectionPixel(null) }}
-                      disabled={saving}
-                      className="px-5 py-2 bg-amber-500 text-white rounded-lg text-sm font-medium hover:bg-amber-600 disabled:opacity-50"
-                    >
-                      Correct Point
-                    </button>
-                  )}
                   {selectedConfig.status === 'verified' && cameraConfigs.some(cc => cc.status !== 'verified') && (
                     <p className="text-sm text-gray-500">Switch to the next camera above to verify it.</p>
                   )}
+                  <p className="text-xs text-gray-400">To improve calibration, go back to step 5 and add more correspondence points.</p>
                 </div>
               </>
             )}

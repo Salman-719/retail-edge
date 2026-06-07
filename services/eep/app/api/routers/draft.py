@@ -28,6 +28,7 @@ from app.schemas.draft import (
     ActivateDraftRequest,
     CalibrationResponse,
     CameraConfigResponse,
+    CameraIntrinsicsResponse,
     CreateCameraRequest,
     CreateDraftRequest,
     CreateSectionRequest,
@@ -40,12 +41,19 @@ from app.schemas.draft import (
     ObstacleResponse,
     ObstacleUpdate,
     PatchCameraRequest,
+    CameraPositionWorld,
+    PnpCalibrationResponse,
+    PnpRequest,
+    ProjectPointRequest,
+    ProjectPointResponse,
     PatchSectionRequest,
     PhysicalCameraResponse,
     PlaceCameraConfigRequest,
     ScaleRequest,
     SectionResponse,
     SyncEventResponse,
+    TpsCalibrationResponse,
+    TpsRequest,
     UpdateCameraConfigRequest,
     VersionActivateRequest,
     VersionActivateResponse,
@@ -55,11 +63,70 @@ from app.schemas.draft import (
     ZoneUpdate,
 )
 from app.utils.homography import compute_homography
+from app.utils.pnp import classify_quality, compute_pnp, project_pixel_to_world
+from app.utils.intrinsics import apply_intrinsics
 from app.utils.calibration_xml import parse_intrinsic_xml, parse_extrinsic_xml
 from app.utils.shapely_utils import clamp_to_polygon, polygons_overlap
 from app.core.redis_client import get_redis
 
 router = APIRouter(tags=["draft"])
+
+import logging as _log
+_logger = _log.getLogger(__name__)
+
+
+# ─── Coordinate conversion helpers ───────────────────────────────────────────
+
+async def _get_floor_plan_scale(
+    version_id: uuid.UUID,
+    section_id: uuid.UUID,
+    db: AsyncSession,
+) -> FloorPlan:
+    """Load the floor plan for (version_id, section_id) and assert scale_defined.
+
+    Raises HTTP 422 if the floor plan is missing or scale is not yet defined.
+    """
+    fp_result = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == version_id,
+            FloorPlan.section_id == section_id,
+        )
+    )
+    fp = fp_result.scalar_one_or_none()
+    if not fp or not fp.scale_defined:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "Floor plan scale not defined. Complete step 2 before saving.",
+                "code": "SCALE_NOT_DEFINED",
+            },
+        )
+    return fp
+
+
+def _px_to_world(points: list, fp: FloorPlan) -> list:
+    """Convert [[canvas_px, canvas_py], ...] to [[world_x_m, world_y_m], ...] (metres)."""
+    return [
+        [(p[0] - fp.origin_x) / fp.pixels_per_meter,
+         (p[1] - fp.origin_y) / fp.pixels_per_meter]
+        for p in points
+    ]
+
+
+def _world_to_px(points: list, fp: FloorPlan) -> list:
+    """Convert [[world_x_m, world_y_m], ...] (metres) to [[canvas_px, canvas_py], ...]."""
+    return [
+        [w[0] * fp.pixels_per_meter + fp.origin_x,
+         w[1] * fp.pixels_per_meter + fp.origin_y]
+        for w in points
+    ]
+
+
+def _fp_boundary_to_px(fp: FloorPlan) -> list | None:
+    """Return boundary_polygon converted from world metres to canvas pixels."""
+    if not fp.boundary_polygon or not fp.scale_defined:
+        return fp.boundary_polygon
+    return _world_to_px(fp.boundary_polygon, fp)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -87,18 +154,31 @@ def _require_draft_access(draft: StoreConfigVersion, ctx: StoreContext) -> None:
         raise HTTPException(status_code=403, detail={"error": "Not your draft", "code": "DRAFT_ACCESS_DENIED"})
 
 
-async def _camera_config_response(cc: CameraConfig, db: AsyncSession) -> CameraConfigResponse:
+async def _camera_config_response(
+    cc: CameraConfig,
+    db: AsyncSession,
+    fp: FloorPlan | None = None,
+) -> CameraConfigResponse:
     pc_result = await db.execute(select(PhysicalCamera).where(PhysicalCamera.id == cc.physical_camera_id))
     pc = pc_result.scalar_one()
     frame_url = s3_client.generate_presigned_url_public(cc.frame_s3_key) if cc.frame_s3_key else None
+
+    # Convert stored world metres back to canvas pixels for the frontend.
+    if fp and fp.scale_defined:
+        pos_x = cc.position_x * fp.pixels_per_meter + fp.origin_x
+        pos_y = cc.position_y * fp.pixels_per_meter + fp.origin_y
+    else:
+        pos_x = cc.position_x
+        pos_y = cc.position_y
+
     return CameraConfigResponse(
         id=cc.id,
         version_id=cc.version_id,
         physical_camera_id=cc.physical_camera_id,
         physical_camera_name=pc.name,
         section_id=cc.section_id,
-        position_x=cc.position_x,
-        position_y=cc.position_y,
+        position_x=pos_x,
+        position_y=pos_y,
         height_meters=cc.height_meters,
         fov_deg=cc.fov_deg,
         stream_url=pc.cloud_stream_url,
@@ -548,7 +628,7 @@ async def get_draft_floor_plan(
         world_x_max=fp.world_x_max,
         world_y_min=fp.world_y_min,
         world_y_max=fp.world_y_max,
-        boundary_polygon=fp.boundary_polygon,
+        boundary_polygon=_fp_boundary_to_px(fp),
         image_uploaded=fp.image_uploaded,
         scale_defined=fp.scale_defined,
     )
@@ -591,7 +671,15 @@ async def set_floor_plan_scale(
     fp.pixels_per_meter = pixels_per_meter
     fp.scale_defined = True
     if body.boundary_polygon is not None:
-        fp.boundary_polygon = body.boundary_polygon if len(body.boundary_polygon) >= 3 else None
+        if len(body.boundary_polygon) >= 3:
+            # Convert boundary from canvas pixels to world metres before storing.
+            fp.boundary_polygon = [
+                [(p[0] - body.origin_x) / pixels_per_meter,
+                 (p[1] - body.origin_y) / pixels_per_meter]
+                for p in body.boundary_polygon
+            ]
+        else:
+            fp.boundary_polygon = None
     fp.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
@@ -606,7 +694,7 @@ async def set_floor_plan_scale(
         pixels_per_meter=fp.pixels_per_meter,
         world_x_min=fp.world_x_min, world_x_max=fp.world_x_max,
         world_y_min=fp.world_y_min, world_y_max=fp.world_y_max,
-        boundary_polygon=fp.boundary_polygon,
+        boundary_polygon=_fp_boundary_to_px(fp),
         image_uploaded=fp.image_uploaded, scale_defined=fp.scale_defined,
     )
 
@@ -653,12 +741,32 @@ async def set_floor_plan_boundary_polygon(
         pixels_per_meter=fp.pixels_per_meter,
         world_x_min=fp.world_x_min, world_x_max=fp.world_x_max,
         world_y_min=fp.world_y_min, world_y_max=fp.world_y_max,
-        boundary_polygon=fp.boundary_polygon,
+        boundary_polygon=_fp_boundary_to_px(fp),
         image_uploaded=fp.image_uploaded, scale_defined=fp.scale_defined,
     )
 
 
 # ─── Zones ────────────────────────────────────────────────────────────────────
+
+def _zone_to_response(zone: Zone, fp: FloorPlan | None) -> dict:
+    """Return a dict suitable for ZoneResponse, converting points world→canvas pixels."""
+    points = zone.points
+    if fp and fp.scale_defined and points:
+        points = _world_to_px(points, fp)
+    return {
+        "id": zone.id,
+        "version_id": zone.version_id,
+        "section_id": zone.section_id,
+        "name": zone.name,
+        "type": zone.type,
+        "points": points,
+        "queue_threshold_people": zone.queue_threshold_people,
+        "queue_threshold_minutes": zone.queue_threshold_minutes,
+        "staff_absence_minutes": zone.staff_absence_minutes,
+        "created_at": zone.created_at,
+        "updated_at": zone.updated_at,
+    }
+
 
 @router.get("/store/{slug}/draft/sections/{section_id}/zones", response_model=list[ZoneResponse])
 async def list_draft_zones(
@@ -671,7 +779,15 @@ async def list_draft_zones(
     result = await db.execute(
         select(Zone).where(Zone.version_id == draft.id, Zone.section_id == section_id)
     )
-    return result.scalars().all()
+    zones = result.scalars().all()
+    fp_result = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == draft.id,
+            FloorPlan.section_id == section_id,
+        )
+    )
+    fp = fp_result.scalar_one_or_none()
+    return [_zone_to_response(z, fp) for z in zones]
 
 
 @router.post(
@@ -722,12 +838,15 @@ async def create_zone(
     if existing_name.scalar_one_or_none():
         raise HTTPException(status_code=409, detail={"error": "Zone name already exists", "code": "ZONE_NAME_TAKEN"})
 
-    # Check polygon overlap with existing zones
+    # Convert incoming canvas pixels to world metres for storage.
+    world_points = _px_to_world(body.points, fp)
+
+    # Check polygon overlap with existing zones (comparison in world metres — consistent).
     existing_zones = await db.execute(
         select(Zone).where(Zone.version_id == draft.id, Zone.section_id == section_id)
     )
     for existing in existing_zones.scalars().all():
-        if polygons_overlap(body.points, existing.points):
+        if polygons_overlap(world_points, existing.points):
             raise HTTPException(
                 status_code=422,
                 detail={"error": f"Zone overlaps with '{existing.name}'", "code": "ZONE_OVERLAP"},
@@ -738,7 +857,7 @@ async def create_zone(
         section_id=section_id,
         name=body.name,
         type=body.type,
-        points=body.points,
+        points=world_points,
         queue_threshold_people=body.queue_threshold_people,
         queue_threshold_minutes=body.queue_threshold_minutes,
         staff_absence_minutes=body.staff_absence_minutes,
@@ -746,7 +865,7 @@ async def create_zone(
     db.add(zone)
     await db.commit()
     await db.refresh(zone)
-    return zone
+    return _zone_to_response(zone, fp)
 
 
 @router.put(
@@ -775,7 +894,8 @@ async def update_zone(
     if not zone:
         raise HTTPException(status_code=404, detail={"error": "Zone not found", "code": "NOT_FOUND"})
 
-    new_points = body.points if body.points is not None else zone.points
+    fp: FloorPlan | None = None
+    new_world_points = zone.points  # default: keep existing (already in world metres)
 
     if body.points is not None:
         fp_result = await db.execute(
@@ -785,13 +905,17 @@ async def update_zone(
             )
         )
         fp = fp_result.scalar_one_or_none()
-        if fp:
+        if fp and fp.scale_defined:
             for point in body.points:
                 if not (0 <= point[0] <= fp.width_px and 0 <= point[1] <= fp.height_px):
                     raise HTTPException(
                         status_code=422,
                         detail={"error": f"Point {point} is outside floor plan bounds ({fp.width_px}x{fp.height_px})", "code": "POINT_OUT_OF_BOUNDS"},
                     )
+            # Convert incoming canvas pixels to world metres.
+            new_world_points = _px_to_world(body.points, fp)
+        elif fp:
+            new_world_points = body.points
 
         existing_zones = await db.execute(
             select(Zone).where(
@@ -801,7 +925,7 @@ async def update_zone(
             )
         )
         for existing in existing_zones.scalars().all():
-            if polygons_overlap(new_points, existing.points):
+            if polygons_overlap(new_world_points, existing.points):
                 raise HTTPException(
                     status_code=422,
                     detail={"error": f"Zone overlaps with '{existing.name}'", "code": "ZONE_OVERLAP"},
@@ -812,7 +936,7 @@ async def update_zone(
     if body.type is not None:
         zone.type = body.type
     if body.points is not None:
-        zone.points = body.points
+        zone.points = new_world_points
     if body.queue_threshold_people is not None:
         zone.queue_threshold_people = body.queue_threshold_people
     if body.queue_threshold_minutes is not None:
@@ -823,7 +947,7 @@ async def update_zone(
 
     await db.commit()
     await db.refresh(zone)
-    return zone
+    return _zone_to_response(zone, fp)
 
 
 @router.delete("/store/{slug}/draft/sections/{section_id}/zones/{zone_id}", status_code=204)
@@ -947,6 +1071,36 @@ async def delete_obstacle(
 
 # ─── Physical Cameras ─────────────────────────────────────────────────────────
 
+async def _invalidate_calibrations(db: AsyncSession, physical_camera_id: uuid.UUID) -> None:
+    """Reject all current calibrations for a physical camera's configs.
+
+    Called when lens/FOV changes: old rvec/tvec were computed against the old
+    intrinsics and are now wrong. History is preserved (is_current=FALSE), not
+    deleted. Force recalibration.
+    """
+    config_ids = (
+        await db.execute(
+            select(CameraConfig.id).where(
+                CameraConfig.physical_camera_id == physical_camera_id
+            )
+        )
+    ).scalars().all()
+    if not config_ids:
+        return
+    await db.execute(
+        update(Calibration)
+        .where(
+            Calibration.camera_config_id.in_(config_ids),
+            Calibration.is_current == True,
+        )
+        .values(is_current=False, status="rejected")
+    )
+    import logging as _log
+    _log.getLogger(__name__).info(
+        "calibration invalidated due to lens/FOV change, camera_id=%s", physical_camera_id
+    )
+
+
 @router.post("/store/{slug}/cameras", response_model=PhysicalCameraResponse, status_code=201)
 async def create_camera(
     slug: str,
@@ -964,7 +1118,15 @@ async def create_camera(
         cloud_stream_url=body.cloud_stream_url,
         stream_username=body.stream_username,
         stream_password=body.stream_password,
+        lens_focal_length_mm=body.lens_focal_length_mm,
+        h_fov_deg=body.h_fov_deg,
+        v_fov_deg=body.v_fov_deg,
+        stream_width=body.stream_width,
+        stream_height=body.stream_height,
     )
+    # Stream resolution is user-supplied; compute intrinsics when FOV + resolution
+    # are both present (skipped silently otherwise).
+    apply_intrinsics(camera)
     db.add(camera)
     await db.commit()
     await db.refresh(camera)
@@ -990,13 +1152,68 @@ async def patch_camera(
     if not camera:
         raise HTTPException(status_code=404, detail={"error": "Camera not found", "code": "NOT_FOUND"})
 
-    for field, value in body.model_dump(exclude_none=True).items():
+    updates = body.model_dump(exclude_none=True)
+    # Any of these change the intrinsic matrix (fx/fy/cx/cy), so they force a
+    # recompute and invalidate prior extrinsic calibrations.
+    intrinsics_fields = {
+        "lens_focal_length_mm", "h_fov_deg", "v_fov_deg",
+        "stream_width", "stream_height",
+    }
+    intrinsics_changed = any(
+        field in updates and updates[field] != getattr(camera, field)
+        for field in intrinsics_fields
+    )
+
+    for field, value in updates.items():
         setattr(camera, field, value)
     camera.updated_at = datetime.now(timezone.utc)
+
+    if intrinsics_changed:
+        apply_intrinsics(camera)
+        await _invalidate_calibrations(db, camera.id)
 
     await db.commit()
     await db.refresh(camera)
     return camera
+
+
+@router.get(
+    "/store/{slug}/cameras/{camera_id}/intrinsics",
+    response_model=CameraIntrinsicsResponse,
+)
+async def get_camera_intrinsics(
+    slug: str,
+    camera_id: uuid.UUID,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(PhysicalCamera).where(
+            PhysicalCamera.id == camera_id,
+            PhysicalCamera.store_id == ctx.store_id,
+        )
+    )
+    camera = result.scalar_one_or_none()
+    if not camera:
+        raise HTTPException(status_code=404, detail={"error": "Camera not found", "code": "NOT_FOUND"})
+    if camera.fx is None or camera.fy is None or camera.cx is None or camera.cy is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Camera intrinsics not yet computed (set FOV and ensure stream resolution is detected)",
+                "code": "INTRINSICS_UNAVAILABLE",
+            },
+        )
+    return CameraIntrinsicsResponse(
+        camera_matrix=[
+            [camera.fx, 0.0, camera.cx],
+            [0.0, camera.fy, camera.cy],
+            [0.0, 0.0, 1.0],
+        ],
+        dist_coeffs=camera.dist_coeffs or [0.0, 0.0, 0.0, 0.0, 0.0],
+        source=camera.intrinsics_source,
+        resolution=[camera.stream_width, camera.stream_height],
+    )
 
 
 @router.delete("/store/{slug}/cameras/{camera_id}", status_code=204)
@@ -1035,7 +1252,15 @@ async def list_draft_camera_configs(
         ).order_by(CameraConfig.created_at.asc())
     )
     configs = result.scalars().all()
-    return [await _camera_config_response(cc, db) for cc in configs]
+    # Load floor plan once for position conversion.
+    fp_result = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == draft.id,
+            FloorPlan.section_id == section_id,
+        )
+    )
+    fp = fp_result.scalar_one_or_none()
+    return [await _camera_config_response(cc, db, fp=fp) for cc in configs]
 
 
 @router.post(
@@ -1077,19 +1302,21 @@ async def place_camera_config(
             detail={"error": "Camera already placed in this draft", "code": "CAMERA_ALREADY_PLACED"},
         )
 
+    # Convert canvas pixels to world metres before storing.
+    fp = await _get_floor_plan_scale(draft.id, section_id, db)
     cc = CameraConfig(
         version_id=draft.id,
         physical_camera_id=body.physical_camera_id,
         section_id=section_id,
-        position_x=body.position_x,
-        position_y=body.position_y,
+        position_x=(body.position_x - fp.origin_x) / fp.pixels_per_meter,
+        position_y=(body.position_y - fp.origin_y) / fp.pixels_per_meter,
         height_meters=body.height_meters,
         fov_deg=body.fov_deg,
     )
     db.add(cc)
     await db.commit()
     await db.refresh(cc)
-    return await _camera_config_response(cc, db)
+    return await _camera_config_response(cc, db, fp=fp)
 
 
 @router.put(
@@ -1116,13 +1343,24 @@ async def update_camera_config(
     if not cc:
         raise HTTPException(status_code=404, detail={"error": "Camera config not found", "code": "NOT_FOUND"})
 
-    for field, value in body.model_dump(exclude_none=True).items():
+    updates = body.model_dump(exclude_none=True)
+
+    # If position is being updated, convert canvas pixels → world metres.
+    fp: FloorPlan | None = None
+    if "position_x" in updates or "position_y" in updates:
+        fp = await _get_floor_plan_scale(draft.id, cc.section_id, db)
+        if "position_x" in updates:
+            updates["position_x"] = (updates["position_x"] - fp.origin_x) / fp.pixels_per_meter
+        if "position_y" in updates:
+            updates["position_y"] = (updates["position_y"] - fp.origin_y) / fp.pixels_per_meter
+
+    for field, value in updates.items():
         setattr(cc, field, value)
     cc.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(cc)
-    return await _camera_config_response(cc, db)
+    return await _camera_config_response(cc, db, fp=fp)
 
 
 @router.delete("/store/{slug}/draft/camera-configs/{config_id}", status_code=204)
@@ -1321,6 +1559,393 @@ async def compute_homography_calibration(
         )
 
     return cal
+
+
+@router.post(
+    "/store/{slug}/draft/camera-configs/{config_id}/calibration/pnp",
+    response_model=PnpCalibrationResponse,
+    status_code=201,
+)
+async def compute_pnp_calibration(
+    slug: str,
+    config_id: uuid.UUID,
+    body: PnpRequest,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """Solve camera extrinsics from 2D-3D correspondences (angled cameras).
+
+    Replaces homography for non-top-down cameras. Reads intrinsics fresh from
+    physical_cameras (never reuses a prior calibration's snapshot).
+    """
+    draft = await _require_draft(ctx.store_id, db)
+    _require_draft_access(draft, ctx)
+
+    cc_result = await db.execute(
+        select(CameraConfig).where(
+            CameraConfig.id == config_id,
+            CameraConfig.version_id == draft.id,
+        )
+    )
+    cc = cc_result.scalar_one_or_none()
+    if not cc:
+        raise HTTPException(status_code=404, detail={"error": "Camera config not found", "code": "NOT_FOUND"})
+
+    # Load intrinsics fresh from the physical camera.
+    pc_result = await db.execute(
+        select(PhysicalCamera).where(PhysicalCamera.id == cc.physical_camera_id)
+    )
+    camera = pc_result.scalar_one_or_none()
+    if camera is None or camera.fx is None or camera.fy is None or camera.cx is None or camera.cy is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "Camera intrinsics not set. Configure lens FOV on this camera before calibrating.",
+                "code": "INTRINSICS_NOT_SET",
+            },
+        )
+
+    camera_matrix = [
+        [camera.fx, 0.0, camera.cx],
+        [0.0, camera.fy, camera.cy],
+        [0.0, 0.0, 1.0],
+    ]
+    dist_coeffs = camera.dist_coeffs or [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    corr_list = [
+        {
+            "frame_px": c.frame_px,
+            "frame_py": c.frame_py,
+            "world_x": c.world_x,
+            "world_y": c.world_y,
+            "world_z": c.world_z,
+        }
+        for c in body.correspondences
+    ]
+
+    try:
+        result = compute_pnp(corr_list, camera_matrix, dist_coeffs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": str(exc), "code": "PNP_FAILED"})
+
+    quality = classify_quality(result["rms_reprojection_error"], camera.stream_width)
+    now = datetime.now(timezone.utc)
+
+    # Demote any prior current calibration for this config.
+    await db.execute(
+        update(Calibration)
+        .where(Calibration.camera_config_id == config_id, Calibration.is_current == True)
+        .values(is_current=False)
+    )
+
+    cal = Calibration(
+        camera_config_id=config_id,
+        method="pnp",
+        status="ok",
+        is_current=True,
+        correspondences=corr_list,
+        intrinsic_matrix=camera_matrix,        # snapshot
+        dist_coeffs=list(dist_coeffs),         # snapshot
+        rotation_vector=result["rotation_vector"],
+        translation_vector=result["translation_vector"],
+        camera_world_x=result["camera_world_x"],
+        camera_world_y=result["camera_world_y"],
+        camera_world_z=result["camera_world_z"],
+        rms_reprojection_error=result["rms_reprojection_error"],
+        max_reprojection_error=result["max_reprojection_error"],
+        point_count=result["point_count"],
+        computed_at=now,
+    )
+    db.add(cal)
+
+    cc.status = "calibrated"
+    cc.updated_at = now
+
+    await db.commit()
+    await db.refresh(cal)
+
+    # Signal IEP2 to reload calibration without pod restart (handled in M7-S3).
+    try:
+        await redis.publish(f"iep2:reload:{config_id}", "pnp")
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            "Failed to publish pnp reload signal  config_id=%s: %s", config_id, exc
+        )
+
+    return PnpCalibrationResponse(
+        calibration_id=cal.id,
+        method="pnp",
+        status="ok",
+        rms_reprojection_error=result["rms_reprojection_error"],
+        max_reprojection_error=result["max_reprojection_error"],
+        point_count=result["point_count"],
+        quality=quality,
+        camera_position_world=CameraPositionWorld(
+            x=result["camera_world_x"],
+            y=result["camera_world_y"],
+            z=result["camera_world_z"],
+        ),
+    )
+
+
+# ─── TPS Calibration ──────────────────────────────────────────────────────────
+
+def _project_tps(cal: "Calibration", frame_px: float, frame_py: float) -> tuple[float, float] | None:
+    """Reconstruct TPS interpolators from stored correspondences and project one point.
+
+    Returns (world_x_m, world_y_m) or None on failure.
+    """
+    try:
+        import numpy as np
+        from scipy.interpolate import RBFInterpolator
+
+        corr = cal.correspondences or []
+        if len(corr) < 4:
+            return None
+        frame_pts = np.array([[c["frame_px"], c["frame_py"]] for c in corr])
+        world_pts = np.array([[c["world_x_m"], c["world_y_m"]] for c in corr])
+
+        rbf_x = RBFInterpolator(frame_pts, world_pts[:, 0], kernel="thin_plate_spline", smoothing=0)
+        rbf_y = RBFInterpolator(frame_pts, world_pts[:, 1], kernel="thin_plate_spline", smoothing=0)
+
+        query = np.array([[frame_px, frame_py]])
+        return float(rbf_x(query)[0]), float(rbf_y(query)[0])
+    except Exception as exc:
+        _logger.warning("TPS projection failed: %s", exc)
+        return None
+
+
+def _tps_quality(coverage: float) -> str:
+    return "excellent" if coverage >= 0.70 else "good"
+
+
+@router.post(
+    "/store/{slug}/draft/camera-configs/{config_id}/calibration/tps",
+    response_model=TpsCalibrationResponse,
+    status_code=201,
+)
+async def compute_tps_calibration(
+    slug: str,
+    config_id: uuid.UUID,
+    body: TpsRequest,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """Fit a Thin-Plate Spline calibration from 2D frame↔floor-map correspondences."""
+    draft = await _require_draft(ctx.store_id, db)
+    _require_draft_access(draft, ctx)
+
+    cc_result = await db.execute(
+        select(CameraConfig).where(
+            CameraConfig.id == config_id,
+            CameraConfig.version_id == draft.id,
+        )
+    )
+    cc = cc_result.scalar_one_or_none()
+    if not cc:
+        raise HTTPException(status_code=404, detail={"error": "Camera config not found", "code": "NOT_FOUND"})
+
+    if len(body.correspondences) < 8:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Minimum 8 correspondences required.", "code": "TOO_FEW_POINTS"},
+        )
+
+    # Validate no duplicate frame points.
+    seen: set[tuple[float, float]] = set()
+    for c in body.correspondences:
+        key = (round(c.frame_px, 2), round(c.frame_py, 2))
+        if key in seen:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "Duplicate frame points detected. Each frame point must be unique.", "code": "DUPLICATE_FRAME_POINTS"},
+            )
+        seen.add(key)
+
+    # Load floor plan scale for map_px → world metres conversion.
+    fp = await _get_floor_plan_scale(draft.id, cc.section_id, db)
+
+    # Build corr_list with both pixel and world-metre values.
+    corr_list = []
+    for c in body.correspondences:
+        world_x = (c.map_px - fp.origin_x) / fp.pixels_per_meter
+        world_y = (c.map_py - fp.origin_y) / fp.pixels_per_meter
+        corr_list.append({
+            "frame_px":  c.frame_px,
+            "frame_py":  c.frame_py,
+            "map_px":    c.map_px,
+            "map_py":    c.map_py,
+            "world_x_m": world_x,
+            "world_y_m": world_y,
+        })
+
+    try:
+        import numpy as np
+        from scipy.interpolate import RBFInterpolator
+        from shapely.geometry import MultiPoint
+
+        frame_pts = np.array([[c["frame_px"], c["frame_py"]] for c in corr_list])
+        world_pts = np.array([[c["world_x_m"], c["world_y_m"]] for c in corr_list])
+
+        # Fit TPS (will raise if degenerate).
+        RBFInterpolator(frame_pts, world_pts[:, 0], kernel="thin_plate_spline", smoothing=0)
+        RBFInterpolator(frame_pts, world_pts[:, 1], kernel="thin_plate_spline", smoothing=0)
+
+        # Coverage score: convex hull of frame points vs stream resolution.
+        hull_area = float(MultiPoint(frame_pts).convex_hull.area)
+        pc_result = await db.execute(
+            select(PhysicalCamera).where(PhysicalCamera.id == cc.physical_camera_id)
+        )
+        pc = pc_result.scalar_one()
+        if pc.stream_width and pc.stream_height and pc.stream_width > 0 and pc.stream_height > 0:
+            frame_area = pc.stream_width * pc.stream_height
+            coverage_score = hull_area / frame_area
+        else:
+            x_range = float(frame_pts[:, 0].max() - frame_pts[:, 0].min())
+            y_range = float(frame_pts[:, 1].max() - frame_pts[:, 1].min())
+            bbox_area = x_range * y_range
+            coverage_score = hull_area / bbox_area if bbox_area > 0 else 0.0
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": f"TPS fitting failed: {exc}", "code": "TPS_FAILED"},
+        )
+
+    if coverage_score < 0.40:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": f"Point coverage too low ({coverage_score:.2f}). Spread points across more of the frame.",
+                "code": "POOR_COVERAGE",
+            },
+        )
+
+    now = datetime.now(timezone.utc)
+
+    # Demote prior current calibration.
+    await db.execute(
+        update(Calibration)
+        .where(Calibration.camera_config_id == config_id, Calibration.is_current == True)
+        .values(is_current=False)
+    )
+
+    cal = Calibration(
+        camera_config_id=config_id,
+        method="tps",
+        status="ok",
+        is_current=True,
+        correspondences=corr_list,
+        coverage_score=coverage_score,
+        point_count=len(corr_list),
+        computed_at=now,
+    )
+    db.add(cal)
+    cc.status = "calibrated"
+    cc.updated_at = now
+
+    await db.commit()
+    await db.refresh(cal)
+
+    try:
+        await redis.publish(f"iep2:reload:{config_id}", "tps")
+    except Exception as exc:
+        _logger.warning("Failed to publish tps reload signal config_id=%s: %s", config_id, exc)
+
+    return TpsCalibrationResponse(
+        calibration_id=cal.id,
+        method="tps",
+        status="ok",
+        coverage_score=coverage_score,
+        point_count=len(corr_list),
+        quality=_tps_quality(coverage_score),
+    )
+
+
+@router.post(
+    "/store/{slug}/draft/camera-configs/{config_id}/project-point",
+    response_model=ProjectPointResponse,
+)
+async def project_point(
+    slug: str,
+    config_id: uuid.UUID,
+    body: ProjectPointRequest,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Project a frame pixel to floor world coords using the current calibration.
+
+    Method-agnostic: uses PnP ray-plane projection or homography depending on
+    the active calibration, so the onboarding verification preview matches IEP2's
+    runtime projection. Never exposes rvec/tvec to the client.
+    """
+    draft = await _require_draft(ctx.store_id, db)
+    _require_draft_access(draft, ctx)
+
+    cc_result = await db.execute(
+        select(CameraConfig).where(
+            CameraConfig.id == config_id,
+            CameraConfig.version_id == draft.id,
+        )
+    )
+    cc = cc_result.scalar_one_or_none()
+    if not cc:
+        raise HTTPException(status_code=404, detail={"error": "Camera config not found", "code": "NOT_FOUND"})
+
+    cal_result = await db.execute(
+        select(Calibration).where(
+            Calibration.camera_config_id == config_id,
+            Calibration.is_current == True,
+            Calibration.status.in_(("ok", "verified")),
+        )
+    )
+    cal = cal_result.scalar_one_or_none()
+    if cal is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "No current calibration to project with", "code": "NO_CALIBRATION"},
+        )
+
+    if cal.method == "tps":
+        world = _project_tps(cal, body.frame_px, body.frame_py)
+    else:
+        world = project_pixel_to_world(
+            cal.method,
+            body.frame_px,
+            body.frame_py,
+            homography_matrix=cal.homography_matrix,
+            intrinsic_matrix=cal.intrinsic_matrix,
+            dist_coeffs=cal.dist_coeffs,
+            rotation_vector=cal.rotation_vector,
+            translation_vector=cal.translation_vector,
+        )
+
+    if world is None:
+        return ProjectPointResponse(method=cal.method, world_x=None, world_y=None, map_px=None, map_py=None)
+
+    world_x, world_y = world
+
+    # For TPS: convert world metres → canvas pixels for the frontend overlay.
+    map_px: float | None = world_x
+    map_py: float | None = world_y
+    if cal.method == "tps":
+        fp_result = await db.execute(
+            select(FloorPlan).where(
+                FloorPlan.version_id == draft.id,
+                FloorPlan.section_id == cc.section_id,
+            )
+        )
+        fp_row = fp_result.scalar_one_or_none()
+        if fp_row and fp_row.scale_defined:
+            map_px = world_x * fp_row.pixels_per_meter + fp_row.origin_x
+            map_py = world_y * fp_row.pixels_per_meter + fp_row.origin_y
+
+    return ProjectPointResponse(method=cal.method, world_x=world_x, world_y=world_y, map_px=map_px, map_py=map_py)
 
 
 @router.post(
