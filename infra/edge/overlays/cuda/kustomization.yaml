@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Profile: CUDA (laptop/PC with a discrete NVIDIA GPU). yolo/reid use the CUDA
+# torch images (-cuda, built in CI from Dockerfile.dev). nvidia.com/gpu request
+# kept; INFERENCE_DEVICE=gpu so service_dev runs on the GPU.
+# Change `salman-719` to your GHCR owner if you fork.
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/your-org/retailvision/iep1
+    newName: ghcr.io/salman-719/retailvision/iep1
+    newTag: "1.0.0"
+  - name: ghcr.io/your-org/retailvision/yolo
+    newName: ghcr.io/salman-719/retailvision/yolo
+    newTag: "1.0.0-cuda"
+  - name: ghcr.io/your-org/retailvision/reid
+    newName: ghcr.io/salman-719/retailvision/reid
+    newTag: "1.0.0-cuda"
+
+patches:
+  - target: { kind: Deployment, name: yolo-service }
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: INFERENCE_DEVICE, value: "gpu" }
+  - target: { kind: Deployment, name: reid-service }
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: INFERENCE_DEVICE, value: "gpu" }

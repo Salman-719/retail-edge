@@ -260,33 +260,39 @@ Part C with only `STORE` changed.
 
 ---
 
-## PART C — Edge device (per store, Jetson)
+## PART C — Edge device (per store)
 
 Prerequisite: the **cloud must already be deployed** (Part A) and the **store
 created** (Part B) — you need its UUID.
 
+### Device profiles (auto-detected)
+The bootstrap **detects the device** and applies the matching kustomize overlay
+(`infra/edge/overlays/<profile>`). Override with `EDGE_PROFILE=jetson|cuda|cpu`.
+
+| Profile | Detected when | yolo/reid image | GPU | Notes |
+|---|---|---|---|---|
+| `jetson` | `/etc/nv_tegra_release` present | `:1.0.0` (L4T TensorRT) | yes | **built on the device** (C4) |
+| `cuda` | `nvidia-smi` works (not Jetson) | `:1.0.0-cuda` (CI) | yes | discrete NVIDIA laptop/PC |
+| `cpu` | no NVIDIA GPU | `:1.0.0-cpu` (CI) | no | dev/low-throughput; Macs too |
+
+`iep1`/`iep2`/`edge-agent` are identical across profiles.
+
 ### C0. Prerequisites
 
 **On the [LOCAL] workstation** (to fetch the agent secret + CA — same tools as Part A):
-- `aws` CLI v2 configured with the `adsal` profile (`aws configure set region eu-west-1 --profile adsal`)
-- `terraform` (to read outputs from `infra/aws`)
-- AWS Session Manager plugin (`brew install --cask session-manager-plugin`)
-- this git repo cloned locally (you already have it from Part A)
+- `aws` CLI v2 (`aws configure set region eu-west-1 --profile adsal`)
+- `terraform`; AWS Session Manager plugin; this repo cloned.
 
-**On the [EDGE] Jetson device:**
-- Ubuntu with **JetPack / NVIDIA drivers** installed (the bootstrap assumes the
-  GPU + container runtime are present; it installs `nvidia-container-toolkit`).
-- `git` and `curl`:
-  ```bash
-  sudo apt-get update && sudo apt-get install -y git curl
-  ```
-- Network egress from the store to:
-  - `eep.<your-EIP>.nip.io:50051` (gRPC to EEP) and `:6380` (server Redis, TLS)
-  - `ghcr.io` (to pull edge images) and `get.k3s.io` (to install k3s)
-- Root/sudo. The bootstrap installs k3s itself — you do **not** pre-install it.
-- Edge images present on GHCR (`iep1`, `iep2`, `yolo`, `reid`, `edge-agent`,
-  arm64). They were built by the `v1.0.0` tag in Part A; make those packages
-  **Public**, or set `GHCR_USER`/`GHCR_TOKEN` below for private pulls.
+**On the [EDGE] device:**
+- Ubuntu; `git` + `curl`: `sudo apt-get update && sudo apt-get install -y git curl`.
+- **jetson**: JetPack/NVIDIA drivers installed (ships `nvidia-container-toolkit`).
+  **cuda**: NVIDIA driver + `nvidia-smi` working (bootstrap installs the toolkit).
+  **cpu**: nothing extra.
+- Network egress to: `eep.<your-EIP>.nip.io:50051` + `:6380`, `ghcr.io`, `get.k3s.io`.
+- Root/sudo. The bootstrap installs k3s itself.
+- GHCR images public (or `GHCR_USER`/`GHCR_TOKEN`): `iep1`, `iep2`, `edge-agent`
+  (all profiles); **`yolo`/`reid`** `:1.0.0-cpu` & `:1.0.0-cuda` from CI for those
+  profiles; `yolo`/`reid` `:1.0.0` (Jetson) built on-device in C4.
 
 ### C1. [LOCAL] Collect the inputs (agent secret + gRPC CA + store UUID)
 
@@ -357,10 +363,15 @@ journalctl -u retailvision-edge-agent -f
 **[SERVER]**, `k3s kubectl -n retailvision logs deploy/eep | grep <STORE-UUID>`
 shows it connect. `yolo`/`reid` stay `Pending` until C4 + C5 below.
 
-### C4. [EDGE] Build the GPU images (`yolo`/`reid`) — Jetson-only, one-time
+### C4. [EDGE] Build the GPU images (`yolo`/`reid`) — **`jetson` profile only**, one-time
 
-These are **not** in CI: they use a Jetson L4T/CUDA base and export a TensorRT
-engine at build time (needs a real GPU), so they must be built **on the Jetson**.
+> Skip C4 + C5 for the **`cpu`** and **`cuda`** profiles — their `yolo`/`reid`
+> images (`-cpu`/`-cuda`) are built in CI and pulled automatically. C4/C5 apply
+> only to the Jetson L4T/TensorRT images.
+
+The Jetson images are **not** in CI: they use a Jetson L4T base and export a
+TensorRT engine at build time (needs a real GPU), so they must be built **on the
+Jetson**.
 
 Prereqs on the Jetson:
 - Docker's **default runtime must be `nvidia`** (so the build-time TRT export gets

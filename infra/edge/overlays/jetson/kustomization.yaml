@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Profile: JETSON (arm64 integrated GPU). yolo/reid are the L4T TensorRT images
+# built ON the device (see DEPLOYMENT_GUIDE C4). nvidia.com/gpu request kept.
+# Change `salman-719` to your GHCR owner if you fork.
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/your-org/retailvision/iep1
+    newName: ghcr.io/salman-719/retailvision/iep1
+    newTag: "1.0.0"
+  - name: ghcr.io/your-org/retailvision/yolo
+    newName: ghcr.io/salman-719/retailvision/yolo
+    newTag: "1.0.0"
+  - name: ghcr.io/your-org/retailvision/reid
+    newName: ghcr.io/salman-719/retailvision/reid
+    newTag: "1.0.0"

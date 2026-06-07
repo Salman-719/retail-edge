@@ -1,8 +1,10 @@
 #!/bin/bash
-# Bootstrap a Jetson edge device with k3s and the RetailVision edge stack.
+# Bootstrap an edge device (Jetson, NVIDIA laptop, or CPU laptop) with k3s and the
+# RetailVision edge stack. The device profile is auto-detected.
 # Usage: sudo ./bootstrap-edge-k3s.sh <store_uuid> <version> <eep_host> <agent_secret>
-# Optional env for pulling private GHCR images:
-#   GHCR_USER, GHCR_TOKEN   (a GitHub PAT with read:packages)
+# Optional env:
+#   GHCR_USER, GHCR_TOKEN   (a GitHub PAT with read:packages) for private images
+#   EDGE_PROFILE            force jetson|cuda|cpu (skip auto-detection)
 set -euo pipefail
 
 STORE_UUID=$1
@@ -12,7 +14,22 @@ AGENT_SECRET=$4
 GHCR_USER="${GHCR_USER:-}"
 GHCR_TOKEN="${GHCR_TOKEN:-}"
 
-echo "=== RetailVision k3s bootstrap for store ${STORE_UUID} ==="
+# Detect device profile (override with EDGE_PROFILE=jetson|cuda|cpu):
+#   jetson = Jetson integrated GPU (TensorRT)   cuda = discrete NVIDIA GPU
+#   cpu    = no NVIDIA GPU
+EDGE_PROFILE="${EDGE_PROFILE:-}"
+if [ -z "${EDGE_PROFILE}" ]; then
+    if [ -e /etc/nv_tegra_release ] || grep -qi jetson /proc/device-tree/model 2>/dev/null; then
+        EDGE_PROFILE=jetson
+    elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+        EDGE_PROFILE=cuda
+    else
+        EDGE_PROFILE=cpu
+    fi
+fi
+case "${EDGE_PROFILE}" in jetson|cuda|cpu) ;; *) echo "ERROR: invalid EDGE_PROFILE=${EDGE_PROFILE}"; exit 1;; esac
+
+echo "=== RetailVision k3s bootstrap for store ${STORE_UUID} (profile: ${EDGE_PROFILE}) ==="
 
 # 1. NTP sync — clocks must be aligned before stream timestamps are meaningful
 apt-get install -y chrony
@@ -57,29 +74,35 @@ until k3s kubectl get node &>/dev/null; do
 done
 echo "[2/7] k3s installed — API server bound to 127.0.0.1"
 
-# 3. NVIDIA container toolkit + device plugin (Jetson-specific)
-#    JetPack already ships the toolkit; only install if missing so we never try to
-#    downgrade the (newer) JetPack version, which aborts apt.
-if dpkg -s nvidia-container-toolkit >/dev/null 2>&1; then
-    echo "[3/7] nvidia-container-toolkit already present — skipping install"
-else
-    apt-get install -y nvidia-container-toolkit
-fi
-systemctl restart containerd 2>/dev/null || true
+# 3. NVIDIA container toolkit + device plugin — only on GPU profiles.
+#    cpu: skipped entirely (the cpu overlay removes the nvidia.com/gpu request).
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-k3s kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml
-echo "[3/7] NVIDIA device plugin installed"
+if [ "${EDGE_PROFILE}" = "cpu" ]; then
+    echo "[3/7] CPU profile — skipping NVIDIA toolkit + device plugin"
+else
+    # Install the toolkit only if missing (JetPack already ships a newer one;
+    # a forced install would try to downgrade and abort apt).
+    if dpkg -s nvidia-container-toolkit >/dev/null 2>&1; then
+        echo "  nvidia-container-toolkit already present — skipping install"
+    else
+        apt-get install -y nvidia-container-toolkit
+    fi
+    systemctl restart containerd 2>/dev/null || true
+    k3s kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml
+    echo "[3/7] NVIDIA device plugin installed (${EDGE_PROFILE})"
+    echo "  NOTE: if 'nvidia.com/gpu' is not advertised, set the nvidia runtime as"
+    echo "        containerd default (DEPLOYMENT_GUIDE C5), then restart k3s."
+fi
 
 # 4. Shared host paths for pod IPC (inference ↔ IEP2)
 mkdir -p /dev/shm/sockets /dev/shm/frames
 chmod 1777 /dev/shm/sockets /dev/shm/frames
 echo "[4/7] Shared host paths created"
 
-# 5. Apply base k3s manifests (namespace, RBAC, inference services, IEP1)
-#    Manifests live at infra/edge/base/ in the repo (bootstrap-edge-k3s.sh
-#    expects to run from the repo root)
+# 5. Apply the edge manifests for the detected profile (selects yolo/reid image
+#    variant + GPU request). Run from the repo root.
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-k3s kubectl apply -k infra/edge/base/
+k3s kubectl apply -k "infra/edge/overlays/${EDGE_PROFILE}/"
 
 echo "[5/7] Base manifests applied — waiting for rollout (non-fatal)..."
 k3s kubectl rollout status deployment/iep1-daemon   -n retailvision --timeout=90s  || echo "  WARN iep1 not ready yet (check node Ready / images)"

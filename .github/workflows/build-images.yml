@@ -37,10 +37,15 @@ jobs:
           - { name: live-bridge, context: services/live_bridge,        platforms: "linux/amd64,linux/arm64" }
           - { name: edge-agent,  context: services/edge_agent,         platforms: "linux/amd64,linux/arm64" }
           - { name: frontend,    context: frontend,                    platforms: "linux/amd64,linux/arm64" }
-          # NOTE: yolo + reid are intentionally NOT built here. They use a
-          # Jetson-only L4T/CUDA base and export a TensorRT engine at build time
-          # (needs a real GPU), so they cannot build on GitHub runners. Build them
-          # ON the Jetson — see docs/operations/DEPLOYMENT_GUIDE.md "GPU edge images".
+          # CPU + CUDA variants of the GPU services, built from Dockerfile.dev
+          # (plain python base → buildable in CI). Pushed with a -cpu/-cuda tag
+          # suffix and selected by the edge overlays (cpu/cuda profiles).
+          # The Jetson yolo/reid (:<tag>, L4T TensorRT) are built ON the device —
+          # see docs/operations/DEPLOYMENT_GUIDE.md (Part C4).
+          - { key: yolo-cpu,  name: yolo, context: ".",                    file: services/yolo_service/Dockerfile.dev, tag_suffix: "-cpu",  platforms: "linux/amd64,linux/arm64" }
+          - { key: reid-cpu,  name: reid, context: services/reid_service,  file: services/reid_service/Dockerfile.dev, tag_suffix: "-cpu",  platforms: "linux/amd64,linux/arm64" }
+          - { key: yolo-cuda, name: yolo, context: ".",                    file: services/yolo_service/Dockerfile.dev, tag_suffix: "-cuda", platforms: "linux/amd64", build_args: "TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121" }
+          - { key: reid-cuda, name: reid, context: services/reid_service,  file: services/reid_service/Dockerfile.dev, tag_suffix: "-cuda", platforms: "linux/amd64", build_args: "TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121" }
     steps:
       - uses: actions/checkout@v4
 
@@ -64,14 +69,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push ${{ matrix.name }}
+      - name: Build & push ${{ matrix.key || matrix.name }}
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
+          file: ${{ matrix.file || format('{0}/Dockerfile', matrix.context) }}
+          build-args: ${{ matrix.build_args }}
           platforms: ${{ matrix.platforms }}
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/retailvision/${{ matrix.name }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/retailvision/${{ matrix.name }}:latest
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/retailvision/${{ matrix.name }}:${{ steps.meta.outputs.tag }}${{ matrix.tag_suffix }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/retailvision/${{ matrix.name }}:latest${{ matrix.tag_suffix }}
+          cache-from: type=gha,scope=${{ matrix.key || matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.key || matrix.name }},mode=max
