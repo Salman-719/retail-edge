@@ -352,10 +352,58 @@ sudo systemctl restart retailvision-edge-agent
 sudo k3s kubectl get pods -n retailvision
 journalctl -u retailvision-edge-agent -f
 ```
-**Expect:** `iep1-daemon`, `yolo-service`, `osnet-service` `Running`; the journal
-prints `heartbeat sent store_id=<UUID>` every 30s. On the **[SERVER]**,
-`k3s kubectl -n retailvision logs deploy/eep | grep <STORE-UUID>` shows it connect.
-Add cameras via the UI; the Edge Agent creates per-camera IEP2 pods on demand.
+**Expect:** `iep1-daemon` `Running` and the journal prints
+`heartbeat sent store_id=<UUID>` every 30s (edge ↔ cloud connected). On the
+**[SERVER]**, `k3s kubectl -n retailvision logs deploy/eep | grep <STORE-UUID>`
+shows it connect. `yolo`/`osnet` stay `Pending` until C4 + C5 below.
+
+### C4. [EDGE] Build the GPU images (`yolo`/`osnet`) — Jetson-only, one-time
+
+These are **not** in CI: they use a Jetson L4T/CUDA base and export a TensorRT
+engine at build time (needs a real GPU), so they must be built **on the Jetson**.
+
+Prereqs on the Jetson:
+- Docker's **default runtime must be `nvidia`** (so the build-time TRT export gets
+  the GPU). Check and set:
+  ```bash
+  grep -q '"default-runtime": "nvidia"' /etc/docker/daemon.json || {
+    sudo nvidia-ctk runtime configure --runtime=docker --set-as-default
+    sudo systemctl restart docker
+  }
+  ```
+- A GitHub **PAT with `write:packages`**.
+
+Build from the **repo root** and push:
+```bash
+cd ~/path/to/retail-edge
+echo "$GHCR_TOKEN" | docker login ghcr.io -u salman-719 --password-stdin
+docker build -f services/yolo_service/Dockerfile  -t ghcr.io/salman-719/retailvision/yolo:1.0.0  .
+docker push ghcr.io/salman-719/retailvision/yolo:1.0.0
+docker build -f services/osnet_service/Dockerfile -t ghcr.io/salman-719/retailvision/osnet:1.0.0 .
+docker push ghcr.io/salman-719/retailvision/osnet:1.0.0
+```
+Then make `retailvision/yolo` and `retailvision/osnet` **Public** (GitHub →
+Packages), like the others.
+
+### C5. [EDGE] Expose the GPU to k3s
+
+`yolo`/`osnet` request `nvidia.com/gpu: 1`; the node must advertise it. k3s uses
+its **own** containerd, so set the nvidia runtime as its default via a template
+override, then restart:
+```bash
+# seed the template from the running config, set nvidia as the default runtime:
+sudo cp /var/lib/rancher/k3s/agent/etc/containerd/config.toml \
+        /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+sudo sed -i 's/default_runtime_name = "runc"/default_runtime_name = "nvidia"/' \
+        /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+sudo systemctl restart k3s
+# device plugin should now advertise the GPU:
+sudo k3s kubectl get node -o jsonpath='{.items[0].status.allocatable}'; echo
+```
+**Expect:** `nvidia.com/gpu` appears → `yolo`/`osnet` schedule and pull. If it's
+still absent, the Jetson integrated GPU may need NVIDIA's Jetson-specific device
+plugin config — check the device-plugin pod logs
+(`k3s kubectl -n kube-system logs ds/nvidia-device-plugin-daemonset`).
 
 ---
 

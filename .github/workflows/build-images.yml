@@ -37,10 +37,10 @@ jobs:
           - { name: live-bridge, context: services/live_bridge,        platforms: "linux/amd64,linux/arm64" }
           - { name: edge-agent,  context: services/edge_agent,         platforms: "linux/amd64,linux/arm64" }
           - { name: frontend,    context: frontend,                    platforms: "linux/amd64,linux/arm64" }
-          # Edge GPU services — arm64 (Jetson/L4T) only. May need a self-hosted
-          # arm64 builder if the CUDA base image won't build under QEMU emulation.
-          - { name: yolo,        context: services/yolo_service,       platforms: "linux/arm64" }
-          - { name: osnet,       context: services/osnet_service,      platforms: "linux/arm64" }
+          # NOTE: yolo + osnet are intentionally NOT built here. They use a
+          # Jetson-only L4T/CUDA base and export a TensorRT engine at build time
+          # (needs a real GPU), so they cannot build on GitHub runners. Build them
+          # ON the Jetson — see docs/operations/DEPLOYMENT_GUIDE.md "GPU edge images".
     steps:
       - uses: actions/checkout@v4
 
