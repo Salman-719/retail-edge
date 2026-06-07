@@ -173,8 +173,10 @@ export const devPipelineStart = (body) =>
 export const devPipelineStop = (body) =>
   api.post('/debug/dev/pipeline/stop', body).then(r => r.data)
 
-export const getDevTracking = (cameraId, limit = 50) =>
-  api.get('/debug/dev/tracking', { params: { camera_id: cameraId, limit } }).then(r => r.data)
+export const getDevTracking = (cameraId, limit = 50, sinceTs = null) =>
+  api.get('/debug/dev/tracking', {
+    params: { camera_id: cameraId, limit, ...(sinceTs != null ? { since_ts: sinceTs } : {}) },
+  }).then(r => r.data)
 
 export const getDevIep3 = (storeId, limit = 50) =>
   api.get('/debug/dev/iep3', { params: { store_id: storeId, limit } }).then(r => r.data)
@@ -263,6 +265,16 @@ export const uploadCameraFrame = (slug, configId, file) => {
 export const computeHomography = (slug, configId, correspondences) =>
   api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/homography`, { correspondences }).then(r => r.data)
 
+// PnP (M7-S2) — correspondences: [{ frame_px, frame_py, world_x, world_y, world_z }]
+// frame_px/frame_py must be in full stream resolution (not display pixels).
+export const computePnp = (slug, configId, correspondences) =>
+  api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/pnp`, { method: 'pnp', correspondences }).then(r => r.data)
+
+// TPS — correspondences: [{ frame_px, frame_py, map_px, map_py }]
+// map_px/map_py are canvas pixel coords on the floor plan (backend converts to metres).
+export const computeTps = (slug, configId, correspondences) =>
+  api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/tps`, { correspondences }).then(r => r.data)
+
 export const uploadCalibrationFiles = (slug, configId, intrinsicFile, extrinsicFile) => {
   const fd = new FormData()
   fd.append('intrinsic', intrinsicFile)
@@ -272,6 +284,11 @@ export const uploadCalibrationFiles = (slug, configId, intrinsicFile, extrinsicF
 
 export const verifyCalibration = (slug, configId) =>
   api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/verify`).then(r => r.data)
+
+// Project a frame pixel to floor world coords using the current calibration
+// (PnP ray-plane or homography). Used by the verification preview.
+export const projectPoint = (slug, configId, framePx, framePy) =>
+  api.post(`/store/${slug}/draft/camera-configs/${configId}/project-point`, { frame_px: framePx, frame_py: framePy }).then(r => r.data)
 
 export const getCalibrations = (slug, configId) =>
   api.get(`/store/${slug}/draft/camera-configs/${configId}/calibrations`).then(r => r.data)

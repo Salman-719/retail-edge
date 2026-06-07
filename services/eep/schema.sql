@@ -497,7 +497,8 @@ CREATE TABLE calibrations (
         CHECK (
             status != 'verified' OR
             rms_reprojection_error IS NOT NULL OR
-            intrinsic_matrix IS NOT NULL
+            intrinsic_matrix IS NOT NULL OR
+            coverage_score IS NOT NULL
         ),
     CONSTRAINT homography_has_matrix
         CHECK (
@@ -700,6 +701,11 @@ CREATE TABLE IF NOT EXISTS tracking_history (
     zone_id          UUID        REFERENCES zones(id) ON DELETE SET NULL,
     bbox_confidence  REAL        NOT NULL,
     bbox_area        INTEGER     NOT NULL,
+    -- Full-resolution bbox pixels (the unscaled bbox fed to the projector).
+    bbox_x1          INTEGER,
+    bbox_y1          INTEGER,
+    bbox_x2          INTEGER,
+    bbox_y2          INTEGER,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -934,3 +940,29 @@ CREATE INDEX IF NOT EXISTS idx_gth_zone_ts
 CREATE INDEX IF NOT EXISTS idx_gth_version
     ON global_tracking_history(version_id)
     WHERE version_id IS NOT NULL;
+
+-- ============================================================================
+-- M7-S1 — Camera Intrinsics + PnP Calibration Foundation
+-- Idempotent: safe to run against both fresh and existing databases.
+-- ============================================================================
+
+-- Intrinsic fields on physical_cameras. stream_width / stream_height already
+-- exist from the Domain 9 migration above — do NOT re-add them.
+ALTER TABLE physical_cameras
+    ADD COLUMN IF NOT EXISTS lens_focal_length_mm  FLOAT,
+    ADD COLUMN IF NOT EXISTS h_fov_deg             FLOAT,
+    ADD COLUMN IF NOT EXISTS v_fov_deg             FLOAT,
+    ADD COLUMN IF NOT EXISTS fx                    FLOAT,
+    ADD COLUMN IF NOT EXISTS fy                    FLOAT,
+    ADD COLUMN IF NOT EXISTS cx                    FLOAT,
+    ADD COLUMN IF NOT EXISTS cy                    FLOAT,
+    ADD COLUMN IF NOT EXISTS dist_coeffs           JSONB,
+    ADD COLUMN IF NOT EXISTS intrinsics_source     VARCHAR(20)
+                             CHECK (intrinsics_source IN ('estimated', 'chessboard'));
+
+-- Add 'pnp' and 'tps' to the calibrations method enum.
+ALTER TABLE calibrations
+    DROP CONSTRAINT IF EXISTS calibrations_method_check;
+ALTER TABLE calibrations
+    ADD CONSTRAINT calibrations_method_check
+    CHECK (method IN ('homography', 'calibration_files', 'pnp', 'tps'));

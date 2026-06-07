@@ -9,6 +9,7 @@ import uuid
 from collections import namedtuple
 
 import asyncpg
+import cv2
 import numpy as np
 from shapely.geometry import Point, Polygon
 from shapely.ops import nearest_points
@@ -19,13 +20,21 @@ log = logging.getLogger("iep2.projector")
 # was outside the floor boundary and was snapped to the nearest boundary edge.
 ProjectionResult = namedtuple("ProjectionResult", ["x", "y", "clamped"])
 
-_HOMOGRAPHY_SQL = """
-SELECT c.homography_matrix
+# Loads whichever calibration is current, regardless of method. The mode switch
+# in load() decides how project() interprets it. Only one row can be current per
+# config (partial unique index), so LIMIT 1 is unambiguous.
+_CALIBRATION_SQL = """
+SELECT c.method,
+       c.homography_matrix,
+       c.intrinsic_matrix,
+       c.dist_coeffs,
+       c.rotation_vector,
+       c.translation_vector,
+       c.correspondences
 FROM calibrations c
 WHERE c.camera_config_id = $1
   AND c.is_current = true
   AND c.status IN ('ok', 'verified')
-  AND c.method = 'homography'
 LIMIT 1
 """
 
@@ -41,7 +50,8 @@ WHERE cc.id = $1
 _BOUNDARY_SQL = """
 SELECT fp.boundary_polygon,
        fp.world_x_min, fp.world_x_max,
-       fp.world_y_min, fp.world_y_max
+       fp.world_y_min, fp.world_y_max,
+       fp.origin_x, fp.origin_y, fp.pixels_per_meter
 FROM camera_configs cc
 JOIN store_config_versions scv ON scv.id = cc.version_id
 JOIN floor_plans fp             ON fp.version_id = scv.id
@@ -70,41 +80,139 @@ def _parse_points(raw) -> list:
     return raw
 
 
+def _parse_matrix(raw) -> np.ndarray:
+    """Normalize a JSONB matrix/vector to a float64 numpy array (any shape)."""
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    return np.array(raw, dtype=np.float64)
+
+
 class FloorProjector:
     def __init__(self):
+        # mode: 'homography' | 'pnp' | 'tps' | None
+        self._mode: str | None = None
+        # Homography mode state.
         self._H: np.ndarray | None = None
+        # PnP mode state (all precomputed in load() — never in project()).
+        self._camera_matrix: np.ndarray | None = None
+        self._dist_coeffs: np.ndarray | None = None
+        self._R: np.ndarray | None = None
+        self._tvec: np.ndarray | None = None
+        self._camera_center: np.ndarray | None = None
+        self._K_inv: np.ndarray | None = None
+        # TPS mode state (RBFInterpolators fitted at load time).
+        self._rbf_x = None
+        self._rbf_y = None
+
         self._zones: list[tuple[uuid.UUID, Polygon]] = []
         self._boundary: Polygon | None = None
         self._world_bounds: tuple[float, float, float, float] | None = None
+        # Floor plan pixel→meter conversion (homography mode only).
+        # Homography maps camera pixels → floor plan image pixels. These three
+        # values convert those pixel coords to world meters:
+        #   world_x = (px - origin_x) / pixels_per_meter
+        #   world_y = (py - origin_y) / pixels_per_meter
+        self._fp_origin_x: float | None = None
+        self._fp_origin_y: float | None = None
+        self._fp_ppm: float | None = None
         self._camera_config_id: uuid.UUID | None = None
         self._clamp_count: int = 0
 
-    async def load(self, pool: asyncpg.Pool, camera_config_id: uuid.UUID) -> None:
-        """Load homography matrix, zone polygons, and floor boundary. Uses the shared asyncpg pool."""
-        self._camera_config_id = camera_config_id
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(_HOMOGRAPHY_SQL, camera_config_id)
-            if row is None or row["homography_matrix"] is None:
-                log.warning(
-                    "No active homography calibration found  camera_config_id=%s  "
+    def _load_calibration(self, row) -> None:
+        """Set projection mode and precompute state from a calibration row."""
+        # Reset all calibration state; zones/boundary are loaded separately.
+        self._mode = None
+        self._H = None
+        self._camera_matrix = self._dist_coeffs = None
+        self._R = self._tvec = self._camera_center = self._K_inv = None
+        self._rbf_x = None
+        self._rbf_y = None
+
+        if row is None:
+            log.warning(
+                "No active calibration found  camera_config_id=%s  "
+                "— floor_x/floor_y will be NULL",
+                self._camera_config_id,
+            )
+            return
+
+        method = row["method"]
+        if method == "pnp":
+            try:
+                K = _parse_matrix(row["intrinsic_matrix"]).reshape(3, 3)
+                dist = _parse_matrix(row["dist_coeffs"]).reshape(-1, 1)
+                rvec = _parse_matrix(row["rotation_vector"]).reshape(3, 1)
+                tvec = _parse_matrix(row["translation_vector"]).reshape(3, 1)
+                R, _ = cv2.Rodrigues(rvec)
+                self._camera_matrix = K
+                self._dist_coeffs = dist
+                self._R = R
+                self._tvec = tvec
+                self._camera_center = (-R.T @ tvec).flatten()
+                self._K_inv = np.linalg.inv(K)
+                self._mode = "pnp"
+                log.info("PnP calibration loaded  camera_config_id=%s", self._camera_config_id)
+            except Exception as exc:
+                log.error(
+                    "Failed to load PnP calibration  camera_config_id=%s: %s  "
                     "— floor_x/floor_y will be NULL",
-                    camera_config_id,
+                    self._camera_config_id, exc,
                 )
-                self._H = None
+                self._mode = None
+        elif method == "homography":
+            if row["homography_matrix"] is None:
+                log.warning(
+                    "Homography calibration has no matrix  camera_config_id=%s",
+                    self._camera_config_id,
+                )
             else:
                 self._H = _parse_homography(row["homography_matrix"])
-                log.info("Homography loaded  camera_config_id=%s", camera_config_id)
+                self._mode = "homography"
+                log.info("Homography loaded  camera_config_id=%s", self._camera_config_id)
+        elif method == "tps":
+            try:
+                import numpy as _np
+                from scipy.interpolate import RBFInterpolator
 
-            zone_rows = await conn.fetch(_ZONES_SQL, camera_config_id)
-            self._zones = []
-            for r in zone_rows:
-                points = _parse_points(r["points"])
-                self._zones.append((r["id"], Polygon(points)))
-            log.info(
-                "Zones loaded  count=%d  camera_config_id=%s",
-                len(self._zones), camera_config_id,
+                raw_corr = row["correspondences"]
+                if isinstance(raw_corr, str):
+                    raw_corr = json.loads(raw_corr)
+                if not raw_corr or len(raw_corr) < 4:
+                    log.warning(
+                        "TPS calibration has too few control points  camera_config_id=%s",
+                        self._camera_config_id,
+                    )
+                    return
+                frame_pts = _np.array([[c["frame_px"], c["frame_py"]] for c in raw_corr])
+                world_pts = _np.array([[c["world_x_m"], c["world_y_m"]] for c in raw_corr])
+                self._rbf_x = RBFInterpolator(frame_pts, world_pts[:, 0], kernel="thin_plate_spline", smoothing=0)
+                self._rbf_y = RBFInterpolator(frame_pts, world_pts[:, 1], kernel="thin_plate_spline", smoothing=0)
+                self._mode = "tps"
+                log.info(
+                    "TPS calibration loaded  camera_config_id=%s  control_points=%d",
+                    self._camera_config_id, len(raw_corr),
+                )
+            except Exception as exc:
+                log.error(
+                    "Failed to load TPS calibration  camera_config_id=%s: %s  "
+                    "— floor_x/floor_y will be NULL",
+                    self._camera_config_id, exc,
+                )
+                self._mode = None
+        else:
+            log.warning(
+                "Unsupported calibration method=%s  camera_config_id=%s",
+                method, self._camera_config_id,
             )
 
+    async def load(self, pool: asyncpg.Pool, camera_config_id: uuid.UUID) -> None:
+        """Load current calibration (PnP or homography), zones, and floor boundary."""
+        self._camera_config_id = camera_config_id
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(_CALIBRATION_SQL, camera_config_id)
+            self._load_calibration(row)
+
+            # Load floor plan scale first — zone conversion depends on it.
             fp_row = await conn.fetchrow(_BOUNDARY_SQL, camera_config_id)
             if fp_row is None or fp_row["boundary_polygon"] is None:
                 log.info(
@@ -114,8 +222,22 @@ class FloorProjector:
                 )
                 self._boundary = None
                 self._world_bounds = None
+                self._fp_origin_x = None
+                self._fp_origin_y = None
+                self._fp_ppm = None
             else:
                 pts = _parse_points(fp_row["boundary_polygon"])
+                ox  = fp_row["origin_x"]
+                oy  = fp_row["origin_y"]
+                ppm = fp_row["pixels_per_meter"]
+                self._fp_origin_x = ox
+                self._fp_origin_y = oy
+                self._fp_ppm      = ppm
+                # Convert boundary polygon from image pixels to meters so
+                # zone_of() and clamp comparisons are consistent with the
+                # projected floor_x/floor_y values (also in meters).
+                if ppm and ppm > 0 and ox is not None and oy is not None:
+                    pts = [((x - ox) / ppm, (y - oy) / ppm) for x, y in pts]
                 self._boundary = Polygon(pts)
                 self._world_bounds = (
                     fp_row["world_x_min"],
@@ -124,43 +246,135 @@ class FloorProjector:
                     fp_row["world_y_max"],
                 )
                 log.info(
-                    "Floor boundary loaded  camera_config_id=%s  world_bounds=%s",
+                    "Floor boundary loaded  camera_config_id=%s  world_bounds=%s  "
+                    "origin=(%s,%s)  ppm=%s",
                     camera_config_id, self._world_bounds,
+                    self._fp_origin_x, self._fp_origin_y, self._fp_ppm,
                 )
 
+            zone_rows = await conn.fetch(_ZONES_SQL, camera_config_id)
+            self._zones = []
+            for r in zone_rows:
+                points = _parse_points(r["points"])
+                # Zone polygons are stored in floor plan image pixels (same space
+                # as the homography output). Convert to meters so zone_of() works
+                # correctly with meter floor_x/floor_y.
+                ox  = self._fp_origin_x
+                oy  = self._fp_origin_y
+                ppm = self._fp_ppm
+                if ppm and ppm > 0 and ox is not None and oy is not None:
+                    points = [((x - ox) / ppm, (y - oy) / ppm) for x, y in points]
+                self._zones.append((r["id"], Polygon(points)))
+            log.info(
+                "Zones loaded  count=%d  camera_config_id=%s",
+                len(self._zones), camera_config_id,
+            )
+
+    def _project_foot(self, x1: int, y1: int, x2: int, y2: int) -> tuple[float, float] | None:
+        """Project the bbox bottom-centre foot point to floor coords.
+
+        Mode-aware. Returns (floor_x, floor_y) or None. Contains no matrix
+        inversion — all heavy precompute happens in load().
+        """
+        # Bottom-centre is the ONLY valid projection point.
+        u = (x1 + x2) / 2.0
+        v = float(y2)
+
+        if self._mode == "homography":
+            src = np.array([u, v, 1.0], dtype=np.float64)
+            dst = self._H @ src
+            px = float(dst[0] / dst[2])
+            py = float(dst[1] / dst[2])
+            # Homography maps camera pixels → floor plan image pixels.
+            # Convert to world meters using the floor plan scale if available.
+            if (self._fp_ppm is not None and self._fp_ppm > 0
+                    and self._fp_origin_x is not None
+                    and self._fp_origin_y is not None):
+                return (
+                    (px - self._fp_origin_x) / self._fp_ppm,
+                    (py - self._fp_origin_y) / self._fp_ppm,
+                )
+            # No floor plan scale configured — return raw pixel coords.
+            return px, py
+
+        if self._mode == "pnp":
+            return self._project_pnp_ray(u, v)
+
+        if self._mode == "tps":
+            return self._project_tps(u, v)
+
+        return None
+
+    def _project_pnp_ray(self, u: float, v: float) -> tuple[float, float] | None:
+        """Ray-plane intersection: cast pixel (u, v) onto the Z=0 floor plane."""
+        # Undistort even when dist_coeffs are zero — keeps the path consistent
+        # for when real distortion values are added later.
+        pixel = np.array([[[u, v]]], dtype=np.float64)
+        undistorted = cv2.undistortPoints(
+            pixel, self._camera_matrix, self._dist_coeffs, P=self._camera_matrix
+        )
+        u_corr = undistorted[0][0][0]
+        v_corr = undistorted[0][0][1]
+
+        # Ray direction in world coordinates.
+        point_cam = self._K_inv @ np.array([u_corr, v_corr, 1.0], dtype=np.float64)
+        ray_dir = self._R.T @ point_cam
+        norm = np.linalg.norm(ray_dir)
+        if norm < 1e-12:
+            return None
+        ray_dir = ray_dir / norm
+
+        cam_center = self._camera_center  # (3,)
+
+        # Ray parallel to floor — no intersection.
+        if abs(ray_dir[2]) < 1e-6:
+            return None
+
+        t = -cam_center[2] / ray_dir[2]
+
+        # Intersection behind the camera — point was above the camera.
+        if t < 0:
+            return None
+
+        floor_x = cam_center[0] + t * ray_dir[0]
+        floor_y = cam_center[1] + t * ray_dir[1]
+        return float(floor_x), float(floor_y)
+
+    def _project_tps(self, u: float, v: float) -> tuple[float, float] | None:
+        """Project via TPS RBFInterpolators. Returns (world_x_m, world_y_m) or None."""
+        try:
+            import numpy as _np
+            query = _np.array([[u, v]])
+            return float(self._rbf_x(query)[0]), float(self._rbf_y(query)[0])
+        except Exception as exc:
+            log.warning(
+                "TPS projection failed  camera_config_id=%s: %s",
+                self._camera_config_id, exc,
+            )
+            return None
+
     def project(self, x1: int, y1: int, x2: int, y2: int) -> tuple[float, float] | None:
-        """Project bbox foot point to floor coordinates via homography.
+        """Project bbox foot point to floor coordinates.
 
         Foot point is the bottom-centre of the bounding box.
-        Returns (floor_x, floor_y) in world units, or None if no homography loaded.
+        Returns (floor_x, floor_y) in world units, or None if no calibration.
         """
-        if self._H is None:
-            return None
-        px = (x1 + x2) / 2.0
-        py = float(y2)
-        src = np.array([px, py, 1.0], dtype=np.float64)
-        dst = self._H @ src
-        return float(dst[0] / dst[2]), float(dst[1] / dst[2])
+        return self._project_foot(x1, y1, x2, y2)
 
     def project_and_clamp(self, x1: int, y1: int, x2: int, y2: int) -> "ProjectionResult | None":
         """Project bbox foot point with boundary enforcement.
 
         Returns:
-          None               — no homography loaded (HOMOGRAPHY_ABSENT).
+          None               — no calibration loaded (projection absent).
           ProjectionResult(x, y, clamped=False) — projected point is inside boundary
                                                    (or no boundary loaded).
           ProjectionResult(x, y, clamped=True)  — projected point was outside boundary
                                                    and was snapped to the nearest edge.
         """
-        if self._H is None:
+        foot = self._project_foot(x1, y1, x2, y2)
+        if foot is None:
             return None
-
-        px = (x1 + x2) / 2.0
-        py = float(y2)
-        src = np.array([px, py, 1.0], dtype=np.float64)
-        dst = self._H @ src
-        fx = float(dst[0] / dst[2])
-        fy = float(dst[1] / dst[2])
+        fx, fy = foot
 
         if self._boundary is None:
             return ProjectionResult(fx, fy, clamped=False)
@@ -209,6 +423,7 @@ if __name__ == "__main__":
 
     proj = FloorProjector()
     proj._H = H
+    proj._mode = 'homography'
     proj._boundary = square
 
     # ── Test 1: H is None → None ──────────────────────────────────────────────
@@ -220,6 +435,7 @@ if __name__ == "__main__":
     # ── Test 2: boundary is None → unclamped result ───────────────────────────
     proj_no_boundary = FloorProjector()
     proj_no_boundary._H = H
+    proj_no_boundary._mode = 'homography'
     # bbox: x1=100, y1=0, x2=200, y2=300 → foot=(150, 300) → floor=(1.5, 3.0)
     result = proj_no_boundary.project_and_clamp(100, 0, 200, 300)
     assert result is not None
@@ -254,6 +470,7 @@ if __name__ == "__main__":
     # ── Test 6: rate-limited logging counter increments correctly ─────────────
     proj2 = FloorProjector()
     proj2._H = H
+    proj2._mode = 'homography'
     proj2._boundary = square
     for _ in range(99):
         proj2.project_and_clamp(900, 0, 1100, 1000)
