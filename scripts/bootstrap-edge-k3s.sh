@@ -81,11 +81,11 @@ echo "[4/7] Shared host paths created"
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 k3s kubectl apply -k infra/edge/base/
 
-echo "[5/7] Base manifests applied — waiting for rollout..."
-k3s kubectl rollout status deployment/yolo-service  -n retailvision --timeout=120s
-k3s kubectl rollout status deployment/osnet-service -n retailvision --timeout=120s
-k3s kubectl rollout status deployment/iep1-daemon   -n retailvision --timeout=60s
-echo "[5/7] Inference services and IEP1 ready"
+echo "[5/7] Base manifests applied — waiting for rollout (non-fatal)..."
+k3s kubectl rollout status deployment/iep1-daemon   -n retailvision --timeout=90s  || echo "  WARN iep1 not ready yet (check node Ready / images)"
+k3s kubectl rollout status deployment/yolo-service  -n retailvision --timeout=120s || echo "  WARN yolo not ready yet (GPU image present/public?)"
+k3s kubectl rollout status deployment/osnet-service -n retailvision --timeout=120s || echo "  WARN osnet not ready yet (GPU image present/public?)"
+echo "[5/7] Rollout checked — continuing (agent install does not depend on pods being Ready)"
 
 # 6. Write Edge Agent environment file
 mkdir -p /etc/retailvision/certs
