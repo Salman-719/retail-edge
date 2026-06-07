@@ -420,6 +420,65 @@ plugin config — check the device-plugin pod logs
 
 ## PART D — Updating
 
+### D0. Release an update end-to-end (after merging reconfig-edge or ANY change)
+
+The canonical sequence to ship **any** change — new upstream code (e.g. a
+`reconfig-edge` merge), config, or chart edits. Pick a new version (e.g. `1.1.0`).
+
+**1. [LOCAL] Bring in changes + reconcile the deploy layer**
+```bash
+git checkout deploy/aws-k3s && git pull
+git fetch origin && git merge origin/reconfig-edge      # only if integrating branch updates
+```
+- Resolve conflicts keeping **our** deploy logic (bootstrap, `infra/edge/*`, the
+  `*/Dockerfile` build fixes).
+- **If `services/eep/schema.sql` changed**, re-vendor the Postgres seed copy:
+  ```bash
+  cp services/eep/schema.sql charts/retailvision/files/schema.sql
+  ```
+- **If the service set changed** (rename/add), update `infra/edge/overlays/*`,
+  `.github/workflows/build-images.yml`, and `charts/` accordingly.
+
+**2. [LOCAL] Bump the version (single source of truth) + build images**
+- Set the new tag in **`charts/retailvision/values.yaml`** (`eep.image.tag`,
+  `iep3.image.tag`, `frontend.image.tag`) and in the **`infra/edge/overlays/*`**
+  `newTag` values (iep1/yolo/reid). Commit + push.
+- Trigger the image build:
+  ```bash
+  git tag v1.1.0 && git push origin v1.1.0     # CI builds all images + -cpu/-cuda variants
+  ```
+  Wait for **Actions** green; ensure any new packages are **Public**.
+
+**3. [SERVER] Roll out the cloud** (EEP self-applies new Alembic migrations)
+```bash
+export EIP=34.248.161.113 OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
+export STORE=70ed5b0c-6c56-43ac-a9e0-a3a81d0db52f
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+cd /opt/retail-edge && git pull
+helm upgrade retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set "iep3.stores={$STORE}" -n retailvision
+k3s kubectl -n retailvision rollout status deploy/eep && k3s kubectl -n retailvision get pods
+```
+> Tags now come from `values.yaml` (step 2), so no per-image `--set …tag` needed.
+> ⚠️ If a migration is **incompatible with existing rows** (e.g. the 2048-dim
+> change vs old data), do the **clean reinstall** (Part E) so Postgres re-seeds.
+
+**4. [EDGE] Update each store's device** (`git pull` first)
+- **cpu / cuda**: re-run the bootstrap — it re-applies the overlay at the new tag
+  and pulls the new `-cpu`/`-cuda` images:
+  ```bash
+  cd ~/path/to/retail-edge && git pull
+  sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.1.0 "eep.$EIP.nip.io" "$AGENT_SECRET"
+  ```
+- **jetson**: rebuild `yolo`/`reid` on the device at the new tag (C4), then re-run
+  the bootstrap.
+- IEP2 (per-camera) uses `IEP2_IMAGE` in `/etc/retailvision/edge-agent.env`; the
+  bootstrap rewrites it to the version you pass — the next `StartCamera` uses it.
+
+**5. Verify**: `kubectl -n retailvision get pods` (cloud + each edge) all `Running`;
+hit `https://app.$EIP.nip.io`.
+
+The granular variants (D1–D5) below cover individual cases.
+
 ### D1. Update the application (new code → new image version)
 
 1. **[LOCAL]** merge your changes into `deploy/aws-k3s`, then tag & push:
