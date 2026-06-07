@@ -36,7 +36,7 @@ services:
       dockerfile: services/yolo_service/Dockerfile.dev
     environment:
       # Dev detector: YOLO11n at confidence 0.5.
-      DETECTOR_MODEL: "yolo11n.pt"
+      DETECTOR_MODEL: "rtdetr-x.pt"
       YOLO_CONF: "0.5"
       # Smaller batches and longer timeout suit single-thread CPU inference.
       # RT-DETR-x is much heavier than YOLOv8n on CPU — keep batch small.

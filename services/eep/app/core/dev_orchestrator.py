@@ -23,6 +23,7 @@ IEP1_CONTROL_SOCK = os.environ.get(
 
 # ── IEP2 container spawn parameters ─────────────────────────────────────────────
 IEP2_IMAGE         = os.environ.get("IEP2_IMAGE", "retail-edge-iep2_vision:latest")
+IEP3_IMAGE         = os.environ.get("IEP3_IMAGE", "retail-edge-iep3_reconciliation:latest")
 DOCKER_NETWORK     = os.environ.get("DOCKER_NETWORK", "retail-edge_default")
 IPC_SOCKETS_VOLUME = os.environ.get("IPC_SOCKETS_VOLUME", "retail-edge_ipc-sockets")
 FRAME_STORE_VOLUME = os.environ.get("FRAME_STORE_VOLUME", "retail-edge_frame-store")
@@ -215,15 +216,70 @@ def flush_pipeline_redis() -> None:
         pass
 
 
-def restart_iep3() -> None:
-    """Restart the IEP3 reconciliation container for a clean coordinator state."""
+def iep3_container_name(store_id: str) -> str:
+    return f"iep3_dev_{store_id}"
+
+
+def start_iep3(
+    store_id: str,
+    database_url_server: str,
+    window_seconds: float,
+) -> str:
+    """Spawn (or replace) a per-run IEP3 container scoped to store_id.
+
+    Mirrors start_iep2: removes any existing iep3_dev_<store_id> container
+    then spawns a fresh one with STORE_ID injected so its coordinator only
+    reconciles batches for this store (not the compose-service placeholder).
+    Returns the container name.
+    """
+    import docker
+
+    name   = iep3_container_name(store_id)
+    client = _docker_client()
+
+    try:
+        old = client.containers.get(name)
+        old.remove(force=True)
+        logger.info("Removed existing IEP3 container name=%s", name)
+    except docker.errors.NotFound:
+        pass
+
+    client.containers.run(
+        image=IEP3_IMAGE,
+        name=name,
+        environment={
+            "STORE_ID":            store_id,
+            "WINDOW_SECONDS":      str(window_seconds),
+            "DATABASE_URL_SERVER": database_url_server,
+            "SERVER_REDIS_URL":    SERVER_REDIS_URL,
+        },
+        network=DOCKER_NETWORK,
+        detach=True,
+        restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
+    )
+    logger.info("Started IEP3 container name=%s store=%s", name, store_id)
+    return name
+
+
+def stop_iep3(store_id: str) -> None:
+    """Remove the per-run IEP3 container for store_id."""
+    import docker
+    name = iep3_container_name(store_id)
+    try:
+        c = _docker_client().containers.get(name)
+        c.remove(force=True)
+        logger.info("Stopped+removed IEP3 container name=%s", name)
+    except docker.errors.NotFound:
+        logger.info("IEP3 container not found name=%s", name)
+
+
+def stop_all_iep3_dev() -> None:
+    """Remove all dev-spawned IEP3 containers (name prefix iep3_dev_)."""
     client = _docker_client()
     for c in client.containers.list(all=True):
-        if "iep3_reconciliation" in c.name:
+        if c.name.startswith("iep3_dev_"):
             try:
-                c.restart(timeout=10)
-                logger.info("Restarted IEP3 container name=%s", c.name)
+                c.remove(force=True)
+                logger.info("Removed IEP3 dev container name=%s", c.name)
             except Exception as exc:
-                logger.warning("Failed restarting IEP3 %s: %s", c.name, exc)
-            return
-    logger.warning("IEP3 container not found for restart")
+                logger.warning("Failed removing %s: %s", c.name, exc)
