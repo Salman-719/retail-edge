@@ -58,8 +58,13 @@ done
 echo "[2/7] k3s installed — API server bound to 127.0.0.1"
 
 # 3. NVIDIA container toolkit + device plugin (Jetson-specific)
-#    Assumes NVIDIA drivers already installed via JetPack
-apt-get install -y nvidia-container-toolkit
+#    JetPack already ships the toolkit; only install if missing so we never try to
+#    downgrade the (newer) JetPack version, which aborts apt.
+if dpkg -s nvidia-container-toolkit >/dev/null 2>&1; then
+    echo "[3/7] nvidia-container-toolkit already present — skipping install"
+else
+    apt-get install -y nvidia-container-toolkit
+fi
 systemctl restart containerd 2>/dev/null || true
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 k3s kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml
