@@ -243,56 +243,92 @@ k3s kubectl -n retailvision get pods -l app=iep3
 
 ## PART C — Edge device (per store, Jetson)
 
-### C1. [LOCAL] Collect the inputs
+Prerequisite: the **cloud must already be deployed** (Part A) and the **store
+created** (Part B) — you need its UUID.
+
+### C0. Prerequisites
+
+**On the [LOCAL] workstation** (to fetch the agent secret + CA — same tools as Part A):
+- `aws` CLI v2 configured with the `adsal` profile (`aws configure set region eu-west-1 --profile adsal`)
+- `terraform` (to read outputs from `infra/aws`)
+- AWS Session Manager plugin (`brew install --cask session-manager-plugin`)
+- this git repo cloned locally (you already have it from Part A)
+
+**On the [EDGE] Jetson device:**
+- Ubuntu with **JetPack / NVIDIA drivers** installed (the bootstrap assumes the
+  GPU + container runtime are present; it installs `nvidia-container-toolkit`).
+- `git` and `curl`:
+  ```bash
+  sudo apt-get update && sudo apt-get install -y git curl
+  ```
+- Network egress from the store to:
+  - `eep.<your-EIP>.nip.io:50051` (gRPC to EEP) and `:6380` (server Redis, TLS)
+  - `ghcr.io` (to pull edge images) and `get.k3s.io` (to install k3s)
+- Root/sudo. The bootstrap installs k3s itself — you do **not** pre-install it.
+- Edge images present on GHCR (`iep1`, `iep2`, `yolo`, `osnet`, `edge-agent`,
+  arm64). They were built by the `v1.0.0` tag in Part A; make those packages
+  **Public**, or set `GHCR_USER`/`GHCR_TOKEN` below for private pulls.
+
+### C1. [LOCAL] Collect the inputs (agent secret + gRPC CA + store UUID)
 
 ```bash
-cd infra/aws
-export AWS_PROFILE=adsal
-terraform output -raw agent_secret        # the shared secret
+cd ~/path/to/retail-edge/infra/aws
+export AWS_PROFILE=adsal AWS_DEFAULT_REGION=eu-west-1
+terraform output -raw agent_secret        # copy this — the shared secret
+terraform output -raw server_public_ip    # this is your <EIP>
 ```
-Export the gRPC CA so the edge trusts EEP:
+Get the gRPC CA so the edge trusts EEP — connect to the server and print it:
 ```bash
-aws ssm start-session --target $(terraform output -raw server_instance_id)
+aws ssm start-session --target "$(terraform output -raw server_instance_id)"
 ```
 **[SERVER]:**
 ```bash
 sudo k3s kubectl -n cert-manager get secret retailvision-ca -o jsonpath='{.data.tls\.crt}' | base64 -d
 ```
-Copy the printed PEM block into a file `ca.crt` on the **[EDGE]** device. You also
-need the store **UUID** (Part B).
+Copy the entire `-----BEGIN CERTIFICATE----- … -----END CERTIFICATE-----` block;
+you'll save it as `ca.crt` on the edge in C2. Type `exit` to leave the server.
+Also have the store **UUID** ready (from Part B / the `psql` query).
 
-### C2. [EDGE] Bootstrap the Jetson
+### C2. [EDGE] Get the code and bootstrap
 
-Prereqs: JetPack/NVIDIA drivers installed, Ubuntu, network egress to
-`eep.<your-EIP>.nip.io:50051`. Set variables (your EIP, the store UUID, and the
-agent secret from C1):
-```bash
-export EIP=34.248.161.113
-export STORE=00000000-0000-0000-0000-000000000001
-export AGENT_SECRET='paste-agent-secret-here'
-```
-Then:
+Clone the repo on the device:
 ```bash
 git clone https://github.com/Salman-719/retail-edge.git
-cd retail-edge && git checkout deploy/aws-k3s
-sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.0.0 "eep.$EIP.nip.io" "$AGENT_SECRET"
+cd retail-edge
+git checkout deploy/aws-k3s
 ```
-Install the CA and restart the agent:
+Save the CA you copied in C1:
 ```bash
 sudo mkdir -p /etc/retailvision/certs
-sudo cp ca.crt /etc/retailvision/certs/ca.crt
+sudo tee /etc/retailvision/certs/ca.crt >/dev/null   # paste the PEM block, then press Ctrl-D
+```
+Set variables (your EIP, the store UUID, the agent secret from C1; add GHCR creds
+only if the images are private):
+```bash
+export EIP=34.248.161.113
+export STORE=70ed5b0c-6c56-43ac-a9e0-a3a81d0db52f
+export AGENT_SECRET='paste-agent-secret-here'
+# export GHCR_USER=<github-user> GHCR_TOKEN=<PAT-with-read:packages>   # private images only
+```
+Run the bootstrap (installs k3s + NVIDIA plugin + edge manifests + the Edge Agent
+systemd service):
+```bash
+sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.0.0 "eep.$EIP.nip.io" "$AGENT_SECRET"
+```
+Restart the agent so it picks up the CA:
+```bash
 sudo systemctl restart retailvision-edge-agent
 ```
 
 ### C3. [EDGE] Verify
 
 ```bash
-k3s kubectl get pods -n retailvision
+sudo k3s kubectl get pods -n retailvision
 journalctl -u retailvision-edge-agent -f
 ```
 **Expect:** `iep1-daemon`, `yolo-service`, `osnet-service` `Running`; the journal
 prints `heartbeat sent store_id=<UUID>` every 30s. On the **[SERVER]**,
-`k3s kubectl -n retailvision logs deploy/eep | grep <UUID>` shows it connect.
+`k3s kubectl -n retailvision logs deploy/eep | grep <STORE-UUID>` shows it connect.
 Add cameras via the UI; the Edge Agent creates per-camera IEP2 pods on demand.
 
 ---
