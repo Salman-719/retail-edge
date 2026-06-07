@@ -181,8 +181,10 @@ k3s kubectl -n retailvision get pods
 
 ```bash
 k3s kubectl -n retailvision logs deploy/eep --tail=20
-# IEP6 agent — confirm it picked up the OpenAI key and is serving:
-curl -sk -o /dev/null -w "%{http_code}\n" "https://app.<EIP>.nip.io/api/agent/insights?store_id=test"   # 200
+# IEP6 agent — confirm it started and picked up the OpenAI key:
+k3s kubectl -n retailvision exec deploy/iep6-agent -- wget -qO- localhost:8006/health   # {"status":"ok"}
+# end-to-end (use a REAL store UUID, not 'test' — store_id is a uuid):
+# curl -sk "https://app.<EIP>.nip.io/api/agent/insights?store_id=<store-uuid>"
 ```
 **Expect:** EEP log shows `alembic … Running upgrade … 0006`, `Application startup
 complete`, `Uvicorn running on http://0.0.0.0:8000`, `GET /health 200 OK` — **no**

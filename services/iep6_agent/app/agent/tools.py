@@ -29,22 +29,22 @@ async def get_metrics(session: AsyncSession, metric: str, store_id: str,
 
     if metric == "footfall":
         q = text("SELECT count(*) AS visitors FROM global_identities "
-                 "WHERE store_id = :sid AND first_seen_ts >= :since")
+                 "WHERE store_id = CAST(:sid AS uuid) AND first_seen_ts >= :since")
     elif metric == "active_visitors":
         q = text("SELECT count(*) AS active FROM global_identities "
-                 "WHERE store_id = :sid AND state = 'active'")
+                 "WHERE store_id = CAST(:sid AS uuid) AND state = 'active'")
     elif metric == "avg_dwell_seconds":
         q = text("SELECT round(avg((last_seen_ts - first_seen_ts)/1000.0)::numeric, 1) "
                  "AS avg_dwell_seconds FROM global_identities "
-                 "WHERE store_id = :sid AND first_seen_ts >= :since")
+                 "WHERE store_id = CAST(:sid AS uuid) AND first_seen_ts >= :since")
     elif metric == "zone_breakdown":
         q = text("SELECT z.name AS zone, count(DISTINCT g.global_id) AS visitors "
                  "FROM global_tracking_history g LEFT JOIN zones z ON z.id = g.zone_id "
-                 "WHERE g.store_id = :sid AND g.timestamp_ms >= :since "
+                 "WHERE g.store_id = CAST(:sid AS uuid) AND g.timestamp_ms >= :since "
                  "GROUP BY z.name ORDER BY visitors DESC")
     elif metric == "camera_activity":
         q = text("SELECT camera_id, count(*) AS observations FROM tracking_history "
-                 "WHERE store_id = :sid AND timestamp_ms >= :since "
+                 "WHERE store_id = CAST(:sid AS uuid) AND timestamp_ms >= :since "
                  "GROUP BY camera_id ORDER BY observations DESC")
     else:
         return {"error": f"unknown metric '{metric}'"}
