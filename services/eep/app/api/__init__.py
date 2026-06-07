@@ -30,3 +30,5 @@ def register_routers(app: FastAPI) -> None:
     if settings.DEBUG_MODE:
         from app.api.routers.debug import router as debug_router
         app.include_router(debug_router)
+        from app.api.routers.dev_pipeline import router as dev_pipeline_router
+        app.include_router(dev_pipeline_router)

@@ -104,7 +104,7 @@ if __name__ == "__main__":
     rng = np.random.default_rng(42)
 
     def fake_emb():
-        v = rng.standard_normal(512).astype(np.float32)
+        v = rng.standard_normal(2048).astype(np.float32)
         return v / np.linalg.norm(v)
 
     g = EmbeddingGallery()
@@ -122,7 +122,7 @@ if __name__ == "__main__":
 
     c = g.snapshot_centroid()
     assert c is not None
-    assert c.shape == (512,), f"expected (512,), got {c.shape}"
+    assert c.shape == (2048,), f"expected (2048,), got {c.shape}"
     norm = float(np.linalg.norm(c))
     assert abs(norm - 1.0) < 1e-5, f"centroid norm should be ~1.0, got {norm:.6f}"
 

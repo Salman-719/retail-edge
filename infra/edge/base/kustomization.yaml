@@ -9,7 +9,7 @@ resources:
   - rbac.yaml
   - iep1-daemon.yaml
   - yolo-service.yaml
-  - osnet-service.yaml
+  - reid-service.yaml
 
 images:
   - name: ghcr.io/your-org/retailvision/iep1
@@ -18,6 +18,6 @@ images:
   - name: ghcr.io/your-org/retailvision/yolo
     newName: ghcr.io/salman-719/retailvision/yolo
     newTag: "1.0.0"
-  - name: ghcr.io/your-org/retailvision/osnet
-    newName: ghcr.io/salman-719/retailvision/osnet
+  - name: ghcr.io/your-org/retailvision/reid
+    newName: ghcr.io/salman-719/retailvision/reid
     newTag: "1.0.0"

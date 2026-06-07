@@ -1,23 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: osnet-service
+  name: reid-service
   namespace: retailvision
   labels:
-    app: osnet-service
+    app: reid-service
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: osnet-service
+      app: reid-service
   template:
     metadata:
       labels:
-        app: osnet-service
+        app: reid-service
     spec:
       containers:
-        - name: osnet-service
-          image: ghcr.io/your-org/retailvision/osnet:1.0.0
+        - name: reid-service
+          image: ghcr.io/your-org/retailvision/reid:1.0.0
           resources:
             limits:
               nvidia.com/gpu: 1
@@ -27,11 +27,11 @@ spec:
               memory: "512Mi"
               cpu: "250m"
           env:
-            - name: OSNET_MODEL_VARIANT
-              value: "osnet_x0_25"
-            - name: OSNET_MAX_BATCH_SIZE
+            - name: REID_MODEL_VARIANT
+              value: "resnet50_msmt17"
+            - name: REID_MAX_BATCH_SIZE
               value: "64"
-            - name: OSNET_BATCH_TIMEOUT_MS
+            - name: REID_BATCH_TIMEOUT_MS
               value: "20"
           volumeMounts:
             - name: ipc-sockets
@@ -39,7 +39,7 @@ spec:
           livenessProbe:
             exec:
               command: ["grpc_health_probe",
-                        "-addr=unix:///tmp/sockets/osnet_health.sock"]
+                        "-addr=unix:///tmp/sockets/reid_health.sock"]
             initialDelaySeconds: 60
             periodSeconds: 15
             failureThreshold: 3

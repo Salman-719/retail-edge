@@ -27,10 +27,10 @@ class Iep3Settings(BaseSettings):
     server_redis_url: str = Field(default="redis://redis:6379/0")
 
     # ── ReID parameters — every threshold configurable without code change ───
-    reid_threshold:     float = Field(default=0.75, ge=0.0, le=1.0)
+    reid_threshold:     float = Field(default=0.85, ge=0.0, le=1.0)
     max_speed_mps:      float = Field(default=1.5,  gt=0)
     grace_seconds:      float = Field(default=300.0, gt=0)
-    embedding_dim:      int   = Field(default=512,  gt=0)
+    embedding_dim:      int   = Field(default=2048, gt=0)
     centroid_ema_alpha: float = Field(default=0.3,  ge=0.0, le=1.0)
 
     # ── Coordinator ───────────────────────────────────────────────────────────

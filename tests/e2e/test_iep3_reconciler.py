@@ -50,16 +50,16 @@ BATCH_NUMBER = 99  # unlikely to collide with real data
 
 def _centroid_a() -> np.ndarray:
     """Person A appearance centroid — all-ones unit vector."""
-    v = np.ones(512, dtype=np.float32)
+    v = np.ones(2048, dtype=np.float32)
     return v / np.linalg.norm(v)
 
 
 def _centroid_b() -> np.ndarray:
     """
     Person B appearance centroid — orthogonal to centroid_a.
-    Cosine similarity with centroid_a ≈ 0 (far below 0.75 threshold).
+    Cosine similarity with centroid_a ≈ 0 (far below 0.85 threshold).
     """
-    v = np.zeros(512, dtype=np.float32)
+    v = np.zeros(2048, dtype=np.float32)
     v[0] = 1.0  # orthogonal to all-ones vector
     return v
 
@@ -71,9 +71,9 @@ def _make_settings(store_id: str) -> Iep3Settings:
         store_id=store_id,
         expected_cameras=frozenset([CAM_01, CAM_02, CAM_03]),
         coordinator_timeout_s=120.0,
-        reid_threshold=0.75,
+        reid_threshold=0.85,
         max_speed_mps=1.5,
-        embedding_dim=512,
+        embedding_dim=2048,
         selection_weight_area=0.7,
         selection_weight_confidence=0.3,
         grace_seconds=300.0,
@@ -236,7 +236,7 @@ async def test_three_camera_reconciliation(db_pool, seeded_batch):
 
     # Build real components against real DB
     pool = await create_pool(DATABASE_URL)
-    repo = Iep3Repository(pool, embedding_dim=512)
+    repo = Iep3Repository(pool, embedding_dim=2048)
 
     # Startup orphan sweep (should remove 0 — clean DB state)
     swept = await repo.orphan_sweep()
@@ -470,7 +470,7 @@ async def test_lost_then_exited_transitions(db_pool, seeded_batch):
     settings     = _make_settings(store_id_str)
 
     pool = await create_pool(DATABASE_URL)
-    repo = Iep3Repository(pool, embedding_dim=512)
+    repo = Iep3Repository(pool, embedding_dim=2048)
     reconciler = Reconciler(store_id_str, repo, settings)
 
     # Batch N: seed data already in DB, run first reconciliation

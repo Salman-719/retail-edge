@@ -49,6 +49,16 @@ python -m grpc_tools.protoc \
 sed -i 's/^import iep1_control_pb2/from services.edge_agent.app.grpc_generated import iep1_control_pb2/' \
   services/edge_agent/app/grpc_generated/iep1_control_pb2_grpc.py
 
+# ── EEP: iep1_control stubs (client — DEBUG_MODE dev pipeline) ───────────────
+python -m grpc_tools.protoc \
+  -I proto \
+  --python_out=services/eep/app/grpc_generated \
+  --grpc_python_out=services/eep/app/grpc_generated \
+  proto/iep1_control.proto
+
+sed -i 's/^import iep1_control_pb2/from app.grpc_generated import iep1_control_pb2/' \
+  services/eep/app/grpc_generated/iep1_control_pb2_grpc.py
+
 # ── IEP1: iep1_control stubs (server) ────────────────────────────────────────
 mkdir -p services/iep1_ingestion/app/grpc_generated
 python -m grpc_tools.protoc \

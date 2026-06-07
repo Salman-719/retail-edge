@@ -3,7 +3,7 @@ name: Build & Push Images
 # Builds all service images and pushes them to GitHub Container Registry.
 #   ghcr.io/<owner>/retailvision/<service>:<tag>
 # Cloud services (eep, iep3, frontend, ...) are multi-arch (amd64 + arm64) so they
-# run on Graviton or x86. Edge GPU services (yolo, osnet) are arm64-only for Jetson.
+# run on Graviton or x86. Edge GPU services (yolo, reid) are arm64-only for Jetson.
 on:
   push:
     tags: ["v*"]
@@ -37,7 +37,7 @@ jobs:
           - { name: live-bridge, context: services/live_bridge,        platforms: "linux/amd64,linux/arm64" }
           - { name: edge-agent,  context: services/edge_agent,         platforms: "linux/amd64,linux/arm64" }
           - { name: frontend,    context: frontend,                    platforms: "linux/amd64,linux/arm64" }
-          # NOTE: yolo + osnet are intentionally NOT built here. They use a
+          # NOTE: yolo + reid are intentionally NOT built here. They use a
           # Jetson-only L4T/CUDA base and export a TensorRT engine at build time
           # (needs a real GPU), so they cannot build on GitHub runners. Build them
           # ON the Jetson — see docs/operations/DEPLOYMENT_GUIDE.md "GPU edge images".

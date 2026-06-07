@@ -3,7 +3,7 @@
 
 > **Prerequisite:** All items in `INFRA_TESTS.md` Phase 2 Summary Checklist must
 > be ✓ before starting this guide. In particular: PostgreSQL, PgBouncer, Redis,
-> MinIO, EEP, YOLO, OSNet, and IEP1 must all be healthy.
+> MinIO, EEP, YOLO, ReID, and IEP1 must all be healthy.
 >
 > **Philosophy:** Store configuration is created through the UI wherever
 > possible, exactly as a real customer would do it. API and database
@@ -28,7 +28,7 @@ cd C:\Users\jawad\Desktop\RetailVision_New\retail-edge
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d `
   postgres pgbouncer redis minio `
   eep iep3_reconciliation live_bridge `
-  yolo-service osnet-service iep1-daemon
+  yolo-service reid-service iep1-daemon
 ```
 
 **[LIN/ORIN]**
@@ -38,7 +38,7 @@ cd /path/to/retail-edge
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d \
   postgres pgbouncer redis minio \
   eep iep3_reconciliation live_bridge \
-  yolo-service osnet-service iep1-daemon
+  yolo-service reid-service iep1-daemon
 ```
 
 Wait for health checks to pass (allow 60–90 s for YOLO model load on CPU dev):
@@ -1293,20 +1293,20 @@ $COMPOSE logs yolo-service | grep -i "batch\|TRT\|engine"
 # Expected: batch size = 32 (or configured YOLO_MAX_BATCH_SIZE)
 ```
 
-### 4.2 OSNet ZMQ Roundtrip
+### 4.2 ReID ZMQ Roundtrip
 
-Send a person crop to OSNet and verify a 512-dim L2-normalised embedding is returned.
+Send a person crop to ReID and verify a 2048-dim L2-normalised embedding is returned.
 
 **[WIN]**
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.dev.yml exec osnet-service python -c "
+docker compose -f docker-compose.yml -f docker-compose.dev.yml exec reid-service python -c "
 import zmq, msgpack, cv2, numpy as np, uuid, time
 
 ctx = zmq.Context()
 push = ctx.socket(zmq.PUSH)
-push.connect('ipc:///tmp/sockets/osnet_input.sock')
+push.connect('ipc:///tmp/sockets/reid_input.sock')
 pull = ctx.socket(zmq.PULL)
-pull.bind('ipc:///tmp/sockets/osnet_output_test-probe.sock')
+pull.bind('ipc:///tmp/sockets/reid_output_test-probe.sock')
 pull.setsockopt(zmq.RCVTIMEO, 5000)
 
 # Blank 128x256 crop (typical person crop dimensions)
@@ -1329,10 +1329,10 @@ assert resp.get('request_id') == req_id, 'FAIL: request_id mismatch'
 emb_bytes = resp.get('embedding')
 assert emb_bytes is not None, 'FAIL: no embedding in response'
 emb = np.frombuffer(emb_bytes, dtype=np.float32)
-assert emb.shape == (512,), f'FAIL: expected (512,) got {emb.shape}'
+assert emb.shape == (2048,), f'FAIL: expected (2048,) got {emb.shape}'
 norm = np.linalg.norm(emb)
 assert abs(norm - 1.0) < 1e-5, f'FAIL: embedding not L2-normalised (norm={norm:.6f})'
-print(f'PASS: OSNet roundtrip OK — embedding shape={emb.shape} norm={norm:.6f}')
+print(f'PASS: ReID roundtrip OK — embedding shape={emb.shape} norm={norm:.6f}')
 
 pull.close(); push.close(); ctx.term()
 " 2>&1; "Exit=$LASTEXITCODE (expect 0)"
@@ -1340,11 +1340,11 @@ pull.close(); push.close(); ctx.term()
 
 **[LIN/ORIN]**
 ```bash
-$COMPOSE exec osnet-service python -c "
+$COMPOSE exec reid-service python -c "
 import zmq, msgpack, cv2, numpy as np, uuid, time
 ctx=zmq.Context()
-push=ctx.socket(zmq.PUSH); push.connect('ipc:///tmp/sockets/osnet_input.sock')
-pull=ctx.socket(zmq.PULL); pull.bind('ipc:///tmp/sockets/osnet_output_test-probe.sock')
+push=ctx.socket(zmq.PUSH); push.connect('ipc:///tmp/sockets/reid_input.sock')
+pull=ctx.socket(zmq.PULL); pull.bind('ipc:///tmp/sockets/reid_output_test-probe.sock')
 pull.setsockopt(zmq.RCVTIMEO, 5000)
 ok,buf=cv2.imencode('.jpg',np.random.randint(0,255,(256,128,3),dtype=np.uint8))
 req_id=str(uuid.uuid4())
@@ -1353,10 +1353,10 @@ push.send(payload)
 resp=msgpack.unpackb(pull.recv(),raw=False)
 assert resp.get('request_id')==req_id,'request_id mismatch'
 emb=np.frombuffer(resp['embedding'],dtype=np.float32)
-assert emb.shape==(512,),f'shape={emb.shape}'
+assert emb.shape==(2048,),f'shape={emb.shape}'
 norm=np.linalg.norm(emb)
 assert abs(norm-1.0)<1e-5,f'norm={norm}'
-print(f'PASS: OSNet OK shape={emb.shape} norm={norm:.6f}')
+print(f'PASS: ReID OK shape={emb.shape} norm={norm:.6f}')
 pull.close();push.close();ctx.term()
 "
 ```

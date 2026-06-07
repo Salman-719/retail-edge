@@ -2,7 +2,7 @@
 
 Startup sequence:
   1. Init k8s clients (load kubeconfig)
-  2. Wait for YOLO + OSNet grpc.health.v1 = SERVING
+  2. Wait for YOLO + ReID grpc.health.v1 = SERVING
   3. Wait for IEP1 grpc.health.v1 = SERVING
   4. Restore active cameras from k3s Deployments
   5. Connect gRPC stream to EEP
@@ -53,7 +53,7 @@ IEP1_HEALTH_SOCK = os.environ.get(
 )
 # Inference services expose their gRPC health via hostPort on the node.
 YOLO_HEALTH_SOCK  = os.environ.get("YOLO_HEALTH_SOCK",  "localhost:50052")
-OSNET_HEALTH_SOCK = os.environ.get("OSNET_HEALTH_SOCK", "localhost:50053")
+REID_HEALTH_SOCK = os.environ.get("REID_HEALTH_SOCK", "localhost:50053")
 
 LOCAL_REDIS_URL      = os.environ.get("LOCAL_REDIS_URL",     "redis://localhost:6379/0")
 SERVER_REDIS_URL     = os.environ.get("SERVER_REDIS_URL",    "")
@@ -116,7 +116,7 @@ async def _startup() -> None:
 
     # Wait for inference services (exposed via hostPort from their k3s pods)
     await _wait_for_health("yolo",  YOLO_HEALTH_SOCK,  timeout=120)
-    await _wait_for_health("osnet", OSNET_HEALTH_SOCK, timeout=120)
+    await _wait_for_health("reid", REID_HEALTH_SOCK, timeout=120)
 
     # Wait for IEP1 daemon (unix socket via hostPath /dev/shm/sockets)
     await _wait_for_health("iep1", IEP1_HEALTH_SOCK, timeout=60)

@@ -878,7 +878,7 @@ CREATE INDEX IF NOT EXISTS idx_glm_global_active
     ON global_local_mapping(global_id, is_active);
 
 -- 6. global_embeddings — per-camera appearance centroid per GlobalID.
---    centroid is a float32[512] numpy array stored as raw bytes (.tobytes()).
+--    centroid is a float32[2048] numpy array stored as raw bytes (.tobytes()).
 --    Representative centroid is computed at query time, never stored.
 CREATE TABLE IF NOT EXISTS global_embeddings (
     global_id      UUID    NOT NULL
@@ -897,6 +897,9 @@ CREATE INDEX IF NOT EXISTS idx_global_embeddings_global
 --    for version activation (enforced in A2). version_id and zone_id use
 --    ON DELETE SET NULL to preserve history when configs are archived.
 --    batch_number is correlation metadata only — not used by the state machine.
+--    It carries the IEP3 coordinator's batch key, which is window_start_ms
+--    rounded to the window boundary (epoch milliseconds). BIGINT is required —
+--    epoch-ms values exceed INT4 range.
 CREATE TABLE IF NOT EXISTS global_tracking_history (
     id              BIGSERIAL        PRIMARY KEY,
     global_id       UUID             NOT NULL
@@ -905,7 +908,7 @@ CREATE TABLE IF NOT EXISTS global_tracking_history (
                     REFERENCES stores(id) ON DELETE CASCADE,
     version_id      UUID
                     REFERENCES store_config_versions(id) ON DELETE SET NULL,
-    batch_number    INT              NOT NULL,
+    batch_number    BIGINT           NOT NULL,
     timestamp_ms    BIGINT           NOT NULL,
     floor_x         DOUBLE PRECISION NOT NULL,
     floor_y         DOUBLE PRECISION NOT NULL,

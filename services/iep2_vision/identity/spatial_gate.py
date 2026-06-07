@@ -15,7 +15,7 @@ from dataclasses import dataclass
 @dataclass
 class SpatialGateConfig:
     max_walking_speed_mps: float = 1.4   # ~5 km/h, adult walking speed
-    base_threshold:        float = 0.75  # matches REID_THRESHOLD in manager.py
+    base_threshold:        float = 0.85  # ReID cosine threshold for resnet50_msmt17
     w_dist:                float = 0.2   # how much distance ratio raises threshold
     w_time:                float = 0.15  # how much time ratio lowers threshold
     min_threshold:         float = 0.35  # floor — never accept below this

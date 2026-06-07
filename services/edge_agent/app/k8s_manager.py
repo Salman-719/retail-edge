@@ -5,7 +5,7 @@ Replaces docker_manager.py in the M3-S4 k3s deployment model.
 Manages:
   - iep2-{camera_id}   Deployment + ConfigMap  (per-camera, started/stopped per command)
 
-YOLO-service, OSNet-service, and IEP1-daemon Deployments are applied once at
+YOLO-service, ReID-service, and IEP1-daemon Deployments are applied once at
 device setup (k3s Deployment YAML) — Edge Agent does not create or destroy them.
 
 All functions are synchronous blocking — call from a ThreadPoolExecutor only.

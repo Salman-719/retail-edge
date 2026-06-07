@@ -5,6 +5,9 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 const VisionDebugConsole = import.meta.env.DEV
   ? lazy(() => import('./pages/VisionDebugConsole'))
   : null
+const DevE2E = import.meta.env.DEV
+  ? lazy(() => import('./pages/DevE2E'))
+  : null
 import { AuthProvider } from './store'
 import PrivateRoute from './components/PrivateRoute'
 import StoreLayout from './components/StoreLayout'
@@ -62,6 +65,13 @@ export default function App() {
             <Route
               path="dev/vision"
               element={<Suspense fallback={null}><VisionDebugConsole /></Suspense>}
+            />
+          )}
+          {/* Dev-only: end-to-end IEP1→IEP2→IEP3 split-screen tester. */}
+          {import.meta.env.DEV && DevE2E && (
+            <Route
+              path="dev/e2e"
+              element={<Suspense fallback={null}><DevE2E /></Suspense>}
             />
           )}
         </Route>

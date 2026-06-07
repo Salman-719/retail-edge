@@ -13,7 +13,7 @@ IEP2_IMAGE          = os.environ.get("IEP2_IMAGE",             "retailvision-iep
 DOCKER_NETWORK      = os.environ.get("DOCKER_NETWORK",         "retail-edge_default")
 IPC_SOCKETS_VOLUME  = os.environ.get("IPC_SOCKETS_VOLUME",     "retail-edge_ipc-sockets")
 YOLO_HEALTH_TCP     = os.environ.get("YOLO_HEALTH_TCP_ADDR",   "yolo-service:50052")
-OSNET_HEALTH_TCP    = os.environ.get("OSNET_HEALTH_TCP_ADDR",  "osnet-service:50053")
+REID_HEALTH_TCP    = os.environ.get("REID_HEALTH_TCP_ADDR",  "reid-service:50053")
 ML_SERVICES_TIMEOUT = int(os.environ.get("ML_SERVICES_TIMEOUT_S", "120"))
 
 _client: docker.DockerClient | None = None
@@ -33,7 +33,7 @@ def container_name(store_id: str, physical_camera_id: str) -> str:
 def _wait_for_service_serving(addr: str, name: str, timeout_s: int) -> None:
     """Block until the named gRPC service reports SERVING via TCP health endpoint.
 
-    R7 (M2-S1/M2-S2): IEP2 containers must not start until both YOLO and OSNet
+    R7 (M2-S1/M2-S2): IEP2 containers must not start until both YOLO and ReID
     services are SERVING. EEP checks via TCP since unix sockets are not shared.
     """
     import grpc
@@ -63,9 +63,9 @@ def _wait_for_service_serving(addr: str, name: str, timeout_s: int) -> None:
 
 
 def _wait_for_ml_services() -> None:
-    """Wait for both YOLO and OSNet services to be SERVING before starting IEP2."""
+    """Wait for both YOLO and ReID services to be SERVING before starting IEP2."""
     _wait_for_service_serving(YOLO_HEALTH_TCP,  "yolo-service",  ML_SERVICES_TIMEOUT)
-    _wait_for_service_serving(OSNET_HEALTH_TCP, "osnet-service", ML_SERVICES_TIMEOUT)
+    _wait_for_service_serving(REID_HEALTH_TCP, "reid-service", ML_SERVICES_TIMEOUT)
 
 
 def start_iep2(

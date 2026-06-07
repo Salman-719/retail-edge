@@ -18,6 +18,7 @@ import io
 import logging
 import os
 import sys
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -32,7 +33,7 @@ from PIL import Image
 
 try:
     from .detector.detector import YoloClient
-    from .reid.reid import OsNetClient
+    from .reid.reid import ReidClient
     from .tracker.tracker import create_tracker, update
     from .video_ingestor.ingestor import extract_frames
     from .identity.manager import LocalIdentityManager
@@ -44,7 +45,7 @@ except ImportError:
     _root = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, _root)
     from detector.detector import YoloClient
-    from reid.reid import OsNetClient
+    from reid.reid import ReidClient
     from tracker.tracker import create_tracker, update
     from video_ingestor.ingestor import extract_frames
     from identity.manager import LocalIdentityManager
@@ -115,7 +116,7 @@ def _fetch_s3_frame(s3_client, bucket: str, key: str) -> np.ndarray | None:
 def _project_tracks(tracks: list[dict], projector: FloorProjector) -> None:
     """Project each confirmed track's bbox foot point and attach floor_x, floor_y, clamped in-place.
 
-    Called after ByteTrack update, before identity manager, so the manager and
+    Called after BoTSORT update, before identity manager, so the manager and
     the persist step both read projection results from the track dict rather than
     recomputing them independently.
     """
@@ -146,10 +147,10 @@ class IEP2Runtime:
         """Initialise service clients. No models loaded locally — both delegated via ZMQ."""
         self.settings = settings
         self.yolo_client  = YoloClient(camera_id=settings.camera_id)
-        self.osnet_client = OsNetClient(camera_id=settings.camera_id)
+        self.reid_client = ReidClient(camera_id=settings.camera_id)
         log.info(
             "IEP2Runtime initialised  camera=%s  "
-            "(YOLO→yolo-service, OSNet→osnet-service via ZMQ)",
+            "(YOLO→yolo-service, ReID→reid-service via ZMQ)",
             settings.camera_id,
         )
 
@@ -157,7 +158,7 @@ class IEP2Runtime:
     async def run(self, video_path: str, start_ms: int = 0):
         """Async context manager that yields the frame stream from a video file."""
         await self.yolo_client.start()
-        await self.osnet_client.start()
+        await self.reid_client.start()
         try:
             camera_id = self.settings.camera_id
             async with PostgresPersistence(
@@ -187,13 +188,13 @@ class IEP2Runtime:
                 yield self._stream_from_source(self._video_source(video_path), persistence, projector)
         finally:
             await self.yolo_client.close()
-            await self.osnet_client.close()
+            await self.reid_client.close()
 
     @asynccontextmanager
     async def run_from_iep1(self):
         """Async context manager that yields the frame stream from IEP1 via Redis + S3."""
         await self.yolo_client.start()
-        await self.osnet_client.start()
+        await self.reid_client.start()
         try:
             camera_id = self.settings.camera_id
             s3 = make_s3_client(
@@ -216,7 +217,7 @@ class IEP2Runtime:
                     yield self._stream_from_iep1(source, s3, self.settings.s3_bucket, persistence, projector, live_pub)
         finally:
             await self.yolo_client.close()
-            await self.osnet_client.close()
+            await self.reid_client.close()
 
     @staticmethod
     def _video_source(video_path: str) -> Iterator[Tuple[int, str | None, np.ndarray]]:
@@ -336,16 +337,16 @@ class IEP2Runtime:
         camera_id = self.settings.camera_id
         log.info("Stream started  camera=%s", camera_id)
         tracker        = create_tracker()
-        manager        = LocalIdentityManager(osnet_client=self.osnet_client)
+        manager        = LocalIdentityManager(reid_client=self.reid_client)
         seen_ids: set  = set()
         frame_index    = 0
         db_rows_written = 0
 
         for _capture_ts_ms, _s3_key, frame in source:
             detections = await self.yolo_client.detect(frame, _capture_ts_ms)
-            tracks     = update(tracker, detections)
+            tracks     = update(tracker, detections, frame)
             _project_tracks(tracks, projector)
-            enriched   = await manager.process_frame(frame, tracks, timestamp_ms=_capture_ts_ms)
+            enriched, _, __ = await manager.process_frame(frame, tracks, timestamp_ms=_capture_ts_ms)
 
             log.debug(
                 "Frame %4d  detections=%d  tracks=%d  confirmed=%d  pending=%d",
@@ -397,11 +398,31 @@ class IEP2Runtime:
         camera_id = self.settings.camera_id
         log.info("Stream started (IEP1)  camera=%s", camera_id)
         tracker        = create_tracker()
-        manager        = LocalIdentityManager(osnet_client=self.osnet_client)
+        manager        = LocalIdentityManager(reid_client=self.reid_client)
         seen_ids: set  = set()
         frame_index    = 0
         db_rows_written = 0
         _resolution_written = False  # write stream resolution once from first valid frame
+
+        async def _load_and_detect_s3(mfst: dict) -> tuple[list, list, list, list]:
+            """Fetch frames from S3/tmpfs and run detect_batch for one manifest.
+
+            Returns (frames, timestamps_ms, s3_keys, detections_per_frame).
+            Unreadable frames are excluded from all four lists.
+            """
+            raw_frames, raw_ts, raw_keys = [], [], []
+            for entry in mfst.get("frames", []):
+                ts  = int(entry[0])
+                key = entry[1]
+                f   = _fetch_s3_frame(s3_client, s3_bucket, key)
+                if f is not None:
+                    raw_frames.append(f)
+                    raw_ts.append(ts)
+                    raw_keys.append(key)
+            if not raw_frames:
+                return [], [], [], []
+            dets = await self.yolo_client.detect_batch(raw_frames, raw_ts)
+            return raw_frames, raw_ts, raw_keys, dets
 
         async for message_id, manifest in source.manifests():
             if manifest.get("status") == "offline":
@@ -412,30 +433,37 @@ class IEP2Runtime:
                 await source.ack(message_id)
                 continue
 
-            for frame_entry in manifest.get("frames", []):
-                capture_ts_ms = int(frame_entry[0])
-                s3_key        = frame_entry[1]
+            # Send entire batch to YOLO at once — measure wall time.
+            _t_yolo_s3 = time.monotonic()
+            batch_frames, batch_ts, batch_keys, batch_detections = await _load_and_detect_s3(manifest)
+            yolo_ms_s3 = (time.monotonic() - _t_yolo_s3) * 1000
 
-                frame = _fetch_s3_frame(s3_client, s3_bucket, s3_key)
-                if frame is None:
-                    continue
+            # Write stream resolution from the first valid frame of the run.
+            if not _resolution_written and batch_frames:
+                _h, _w = batch_frames[0].shape[:2]
+                if _w > 0 and _h > 0:
+                    await persistence.write_stream_resolution(camera_id, _w, _h)
+                else:
+                    log.warning(
+                        "Could not read stream resolution (width=%d height=%d) — skipping",
+                        _w, _h,
+                    )
+                _resolution_written = True
 
-                if not _resolution_written:
-                    _h, _w = frame.shape[:2]
-                    if _w > 0 and _h > 0:
-                        await persistence.write_stream_resolution(camera_id, _w, _h)
-                    else:
-                        log.warning(
-                            "Could not read stream resolution from source "
-                            "(width=%d height=%d) — stream_width/height not updated",
-                            _w, _h,
-                        )
-                    _resolution_written = True
-
-                detections = await self.yolo_client.detect(frame, capture_ts_ms)
-                tracks     = update(tracker, detections)
+            # Sequential tracker/reid/DB pass over the pre-detected frames.
+            reid_crops_s3   = 0
+            reid_batches_s3 = 0
+            tracker_ms_s3    = 0.0
+            for frame, capture_ts_ms, s3_key, detections in zip(
+                batch_frames, batch_ts, batch_keys, batch_detections
+            ):
+                _t_frame_s3 = time.monotonic()
+                tracks   = update(tracker, detections, frame)
                 _project_tracks(tracks, projector)
-                enriched   = await manager.process_frame(frame, tracks, timestamp_ms=capture_ts_ms)
+                enriched, _crops_s3, _batches_s3 = await manager.process_frame(frame, tracks, timestamp_ms=capture_ts_ms)
+                tracker_ms_s3    += (time.monotonic() - _t_frame_s3) * 1000
+                reid_crops_s3   += _crops_s3
+                reid_batches_s3 += _batches_s3
 
                 log.debug(
                     "Frame %4d  detections=%d  tracks=%d  confirmed=%d  pending=%d",
@@ -468,6 +496,15 @@ class IEP2Runtime:
                     new_entries=new_entries,
                 )
                 frame_index += 1
+
+            _avg_tracker_s3 = (tracker_ms_s3 / len(batch_frames)) if batch_frames else 0.0
+            log.info(
+                "Batch stats  camera=%s  batch=%s  frames=%d"
+                "  yolo_ms=%.0f  tracker_ms=%.0f  reid_recalls=%d  batch_reid_recalls=%d"
+                "  avg_tracker_ms_per_frame=%.1f",
+                camera_id, manifest.get("batch_number"), len(batch_frames),
+                yolo_ms_s3, tracker_ms_s3, reid_crops_s3, reid_batches_s3, _avg_tracker_s3,
+            )
 
             # Strict batch-close order: tracking writes → centroids → batch_complete → XACK.
             await self._flush_centroids(
@@ -505,12 +542,17 @@ def _make_settings_class():
             server_redis_url:    str   = _Field(...)
             database_url_server: str   = _Field(...)
             yolo_input_sock:     str   = _Field(default="ipc:///tmp/sockets/yolo_input.sock")
-            osnet_input_sock:    str   = _Field(default="ipc:///tmp/sockets/osnet_input.sock")
+            reid_input_sock:    str   = _Field(default="ipc:///tmp/sockets/reid_input.sock")
             tmpfs_frame_root:    str   = _Field(default="/dev/shm/frames")
             target_fps:          float = _Field(default=5.0, gt=0)
             health_sock:         str   = _Field(default="")
             # R7: CA cert for TLS verification of server Redis (shares CA with gRPC)
             redis_ca_cert_path:  str   = _Field(default="/etc/retailvision/certs/ca.crt")
+            # Live preview: publish per-frame detections to stream:iep2:live:{camera_id}.
+            # live_embed_frame base64-embeds the JPEG (dev — no S3). Both default off;
+            # enabled in dev via LIVE_STREAM_ENABLED / LIVE_EMBED_FRAME env vars.
+            live_stream_enabled: bool  = _Field(default=False)
+            live_embed_frame:    bool  = _Field(default=False)
 
             class Config:
                 env_file = ".env"
@@ -551,7 +593,7 @@ async def _cleanup_frames(manifest: dict) -> None:
 async def _run_health_service(settings) -> None:
     """R11 (M2-S4): gRPC health service on per-camera unix socket.
 
-    Reports NOT_SERVING if YOLO or OSNet TCP health endpoints are unreachable.
+    Reports NOT_SERVING if YOLO or ReID TCP health endpoints are unreachable.
     """
     try:
         import grpc
@@ -570,22 +612,22 @@ async def _run_health_service(settings) -> None:
         log.info("IEP2 health service  camera=%s  sock=%s", settings.camera_id, sock)
 
         yolo_addr  = os.environ.get("YOLO_HEALTH_TCP_ADDR",  "yolo-service:50052")
-        osnet_addr = os.environ.get("OSNET_HEALTH_TCP_ADDR", "osnet-service:50053")
+        reid_addr = os.environ.get("REID_HEALTH_TCP_ADDR", "reid-service:50053")
 
         while True:
             await asyncio.sleep(10)
             yolo_ok  = await _grpc_health_ping(yolo_addr)
-            osnet_ok = await _grpc_health_ping(osnet_addr)
+            reid_ok = await _grpc_health_ping(reid_addr)
             status = (
                 health_pb2.HealthCheckResponse.SERVING
-                if yolo_ok and osnet_ok
+                if yolo_ok and reid_ok
                 else health_pb2.HealthCheckResponse.NOT_SERVING
             )
             health_servicer.set("", status)
-            if not (yolo_ok and osnet_ok):
+            if not (yolo_ok and reid_ok):
                 log.warning(
-                    "Health degraded  camera=%s  yolo=%s  osnet=%s",
-                    settings.camera_id, yolo_ok, osnet_ok,
+                    "Health degraded  camera=%s  yolo=%s  reid=%s",
+                    settings.camera_id, yolo_ok, reid_ok,
                 )
     except asyncio.CancelledError:
         raise
@@ -659,7 +701,7 @@ async def run_daemon(settings) -> None:
 
     Reads IEP1 manifests from local Redis, processes frames from tmpfs,
     writes tracking_history to cloud DB, publishes batch_complete to server Redis.
-    ByteTrack and LocalIdentityManager state persist across all batch boundaries.
+    BoTSORT and LocalIdentityManager state persist across all batch boundaries.
     """
     import asyncio
     import redis as _sync_redis
@@ -667,7 +709,7 @@ async def run_daemon(settings) -> None:
 
     try:
         from .detector.detector import YoloClient
-        from .reid.reid import OsNetClient
+        from .reid.reid import ReidClient
         from .tracker.tracker import create_tracker, update
         from .identity.manager import LocalIdentityManager
         from .persistence.postgres import PostgresPersistence
@@ -677,7 +719,7 @@ async def run_daemon(settings) -> None:
         _root = os.path.dirname(os.path.abspath(__file__))
         sys.path.insert(0, _root)
         from detector.detector import YoloClient
-        from reid.reid import OsNetClient
+        from reid.reid import ReidClient
         from tracker.tracker import create_tracker, update
         from identity.manager import LocalIdentityManager
         from persistence.postgres import PostgresPersistence
@@ -710,14 +752,14 @@ async def run_daemon(settings) -> None:
 
         # ── ML clients ────────────────────────────────────────────────────────
         yolo_client  = YoloClient(camera_id=settings.camera_id)
-        osnet_client = OsNetClient(camera_id=settings.camera_id)
+        reid_client = ReidClient(camera_id=settings.camera_id)
         await yolo_client.start()
-        await osnet_client.start()
+        await reid_client.start()
 
         # ── Pipeline components ───────────────────────────────────────────────
         tracker  = create_tracker()
         manager  = LocalIdentityManager(
-            osnet_client=osnet_client,
+            reid_client=reid_client,
             camera_id=settings.camera_id,
             redis_local=sync_redis,
         )
@@ -734,6 +776,14 @@ async def run_daemon(settings) -> None:
             name=f"reload-watch-{settings.camera_id}",
         ) if settings.camera_config_id else None
 
+        # ── Live preview publisher (server Redis → Live Bridge) ───────────────
+        live_pub = LivePublisher(
+            camera_id=settings.camera_id,
+            redis_url=settings.server_redis_url,
+            enabled=bool(settings.live_stream_enabled or settings.live_embed_frame),
+            embed_frame=bool(settings.live_embed_frame),
+        )
+
         # ── Manifest consumer (local Redis, IEP1 stream) ──────────────────────
         consumer = RedisStreamFrameSource(
             camera_id=settings.camera_id,
@@ -745,28 +795,72 @@ async def run_daemon(settings) -> None:
         try:
             log.info("IEP2 daemon SERVING  camera=%s", settings.camera_id)
 
+            async def _load_and_detect(mfst: dict) -> tuple[list, list, list]:
+                """Load frames from tmpfs and run detect_batch for one manifest.
+
+                Returns (frames, timestamps_ms, detections_per_frame).
+                Skipped (unreadable) frames are excluded from all three lists.
+                """
+                raw_frames, raw_ts = [], []
+                for entry in mfst.get("frames", []):
+                    f = _read_frame_from_tmpfs(entry[1])
+                    if f is not None:
+                        raw_frames.append(f)
+                        raw_ts.append(int(entry[0]))
+                if not raw_frames:
+                    return [], [], []
+                dets = await yolo_client.detect_batch(raw_frames, raw_ts)
+                return raw_frames, raw_ts, dets
+
+            # Pipeline parallelism: while we run tracker/reid/DB on batch N,
+            # YOLO inference for batch N+1 runs concurrently as a background task.
+            yolo_task: asyncio.Task | None = None
+
             async for message_id, manifest in consumer.manifests():
                 if manifest.get("status") == "offline":
                     await consumer.ack(message_id)
                     continue
 
-                frames = manifest.get("frames", [])
-                frame_count = 0
+                # Launch YOLO for this manifest immediately so it overlaps with
+                # any remaining tracker work from the previous iteration.
+                this_yolo_task = asyncio.create_task(
+                    _load_and_detect(manifest),
+                    name=f"yolo-{settings.camera_id}-{manifest.get('batch_number', 0)}",
+                )
 
-                for entry in frames:
-                    capture_ts_ms = int(entry[0])
-                    path          = entry[1]
+                # If there was a previous YOLO task still running, await it now.
+                # (First iteration: yolo_task is None, skip.)
+                if yolo_task is not None:
+                    # yolo_task belongs to the *previous* manifest — it should already
+                    # be done; awaiting it here is just a safety drain.
+                    try:
+                        await yolo_task
+                    except Exception as exc:
+                        log.warning("Previous YOLO task error: %s", exc)
 
-                    frame = _read_frame_from_tmpfs(path)
-                    if frame is None:
-                        continue
+                # Await current batch YOLO results — measure wall time.
+                _t_yolo_start = time.monotonic()
+                batch_frames_data, batch_ts, batch_detections = await this_yolo_task
+                yolo_ms = (time.monotonic() - _t_yolo_start) * 1000
+                yolo_task = None
 
-                    detections = await yolo_client.detect(frame, capture_ts_ms)
-                    tracks     = update(tracker, detections)
+                # ── Sequential tracker/reid/DB pass ──────────────────────────
+                frame_count    = 0
+                reid_crops    = 0
+                reid_batches  = 0
+                tracker_ms     = 0.0
+                for frame, capture_ts_ms, detections in zip(batch_frames_data, batch_ts, batch_detections):
+                    _t_frame = time.monotonic()
+                    tracks   = update(tracker, detections, frame)
                     _project_tracks(tracks, projector)
-                    enriched   = await manager.process_frame(
+                    enriched, _crops, _batches = await manager.process_frame(
                         frame, tracks, timestamp_ms=capture_ts_ms
                     )
+                    tracker_ms    += (time.monotonic() - _t_frame) * 1000
+                    reid_crops   += _crops
+                    reid_batches += _batches
+
+                    live_pub.publish_frame(frame, capture_ts_ms, enriched)
 
                     for track in enriched:
                         if track["local_id"] is None:
@@ -811,15 +905,16 @@ async def run_daemon(settings) -> None:
                     maxlen=500,
                     approximate=True,
                 )
-                # XACK fires after centroids + batch_complete are written.
-                # Trade-off: IEP3 orphan sweep is the compensating control for
-                # any partial state if IEP2 crashes post-XACK. See M4-S3 R7.
                 await consumer.ack(message_id)
                 await _cleanup_frames(manifest)
 
+                avg_tracker = (tracker_ms / frame_count) if frame_count else 0.0
                 log.info(
-                    "Batch complete  camera=%s  batch=%s  frames=%d",
+                    "Batch stats  camera=%s  batch=%s  frames=%d"
+                    "  yolo_ms=%.0f  tracker_ms=%.0f  reid_recalls=%d  batch_reid_recalls=%d"
+                    "  avg_tracker_ms_per_frame=%.1f",
                     settings.camera_id, manifest.get("batch_number"), frame_count,
+                    yolo_ms, tracker_ms, reid_crops, reid_batches, avg_tracker,
                 )
 
         except asyncio.CancelledError:
@@ -834,7 +929,7 @@ async def run_daemon(settings) -> None:
                     except asyncio.CancelledError:
                         pass
             await yolo_client.close()
-            await osnet_client.close()
+            await reid_client.close()
             await consumer.close()
             await local_redis.aclose()
             await server_redis.aclose()

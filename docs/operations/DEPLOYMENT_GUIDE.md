@@ -14,7 +14,7 @@ bottom; do not skip.
   EEP (API/gRPC), per-store IEP3, in-cluster Postgres + Redis, and the frontend.
   One Elastic IP fronts everything via k3s ServiceLB. Object storage = S3.
   Secrets = AWS Secrets Manager. TLS = cert-manager.
-- **Edge**: k3s on a Jetson per store (IEP1 ingest + YOLO/OSNet GPU + per-camera
+- **Edge**: k3s on a Jetson per store (IEP1 ingest + YOLO/ReID GPU + per-camera
   IEP2), talking to the cloud EEP over TLS gRPC.
 - **No domain needed**: public hostnames are `app.<EIP>.nip.io` and
   `eep.<EIP>.nip.io` (nip.io resolves any `*.<ip>.nip.io` to that IP).
@@ -78,7 +78,7 @@ git push origin v1.0.0
 ```
 **Expect:** a "Build & Push Images" run starts in GitHub → **Actions**. Wait
 until the `eep`, `iep3`, and `frontend` matrix jobs are green (≈10–20 min). The
-`yolo`/`osnet` jobs may fail (arm64/CUDA emulation) — ignore them for cloud.
+`yolo`/`reid` jobs may fail (arm64/CUDA emulation) — ignore them for cloud.
 
 Then make the cloud images pullable without credentials:
 - GitHub → repo → **Packages** → open `eep`, `iep3`, `frontend` →
@@ -284,7 +284,7 @@ created** (Part B) — you need its UUID.
   - `eep.<your-EIP>.nip.io:50051` (gRPC to EEP) and `:6380` (server Redis, TLS)
   - `ghcr.io` (to pull edge images) and `get.k3s.io` (to install k3s)
 - Root/sudo. The bootstrap installs k3s itself — you do **not** pre-install it.
-- Edge images present on GHCR (`iep1`, `iep2`, `yolo`, `osnet`, `edge-agent`,
+- Edge images present on GHCR (`iep1`, `iep2`, `yolo`, `reid`, `edge-agent`,
   arm64). They were built by the `v1.0.0` tag in Part A; make those packages
   **Public**, or set `GHCR_USER`/`GHCR_TOKEN` below for private pulls.
 
@@ -355,9 +355,9 @@ journalctl -u retailvision-edge-agent -f
 **Expect:** `iep1-daemon` `Running` and the journal prints
 `heartbeat sent store_id=<UUID>` every 30s (edge ↔ cloud connected). On the
 **[SERVER]**, `k3s kubectl -n retailvision logs deploy/eep | grep <STORE-UUID>`
-shows it connect. `yolo`/`osnet` stay `Pending` until C4 + C5 below.
+shows it connect. `yolo`/`reid` stay `Pending` until C4 + C5 below.
 
-### C4. [EDGE] Build the GPU images (`yolo`/`osnet`) — Jetson-only, one-time
+### C4. [EDGE] Build the GPU images (`yolo`/`reid`) — Jetson-only, one-time
 
 These are **not** in CI: they use a Jetson L4T/CUDA base and export a TensorRT
 engine at build time (needs a real GPU), so they must be built **on the Jetson**.
@@ -379,15 +379,15 @@ cd ~/path/to/retail-edge
 echo "$GHCR_TOKEN" | docker login ghcr.io -u salman-719 --password-stdin
 docker build -f services/yolo_service/Dockerfile  -t ghcr.io/salman-719/retailvision/yolo:1.0.0  .
 docker push ghcr.io/salman-719/retailvision/yolo:1.0.0
-docker build -f services/osnet_service/Dockerfile -t ghcr.io/salman-719/retailvision/osnet:1.0.0 .
-docker push ghcr.io/salman-719/retailvision/osnet:1.0.0
+docker build -f services/reid_service/Dockerfile -t ghcr.io/salman-719/retailvision/reid:1.0.0 .
+docker push ghcr.io/salman-719/retailvision/reid:1.0.0
 ```
-Then make `retailvision/yolo` and `retailvision/osnet` **Public** (GitHub →
+Then make `retailvision/yolo` and `retailvision/reid` **Public** (GitHub →
 Packages), like the others.
 
 ### C5. [EDGE] Expose the GPU to k3s
 
-`yolo`/`osnet` request `nvidia.com/gpu: 1`; the node must advertise it. k3s uses
+`yolo`/`reid` request `nvidia.com/gpu: 1`; the node must advertise it. k3s uses
 its **own** containerd, so set the nvidia runtime as its default via a template
 override, then restart:
 ```bash
@@ -400,7 +400,7 @@ sudo systemctl restart k3s
 # device plugin should now advertise the GPU:
 sudo k3s kubectl get node -o jsonpath='{.items[0].status.allocatable}'; echo
 ```
-**Expect:** `nvidia.com/gpu` appears → `yolo`/`osnet` schedule and pull. If it's
+**Expect:** `nvidia.com/gpu` appears → `yolo`/`reid` schedule and pull. If it's
 still absent, the Jetson integrated GPU may need NVIDIA's Jetson-specific device
 plugin config — check the device-plugin pod logs
 (`k3s kubectl -n kube-system logs ds/nvidia-device-plugin-daemonset`).
@@ -471,7 +471,7 @@ k3s kubectl -n retailvision rollout restart statefulset/redis-server
 ```bash
 # [EDGE] update inference services to a new image tag:
 k3s kubectl -n retailvision set image deployment/yolo-service yolo-service=ghcr.io/salman-719/retailvision/yolo:1.0.1
-k3s kubectl -n retailvision set image deployment/osnet-service osnet-service=ghcr.io/salman-719/retailvision/osnet:1.0.1
+k3s kubectl -n retailvision set image deployment/reid-service reid-service=ghcr.io/salman-719/retailvision/reid:1.0.1
 # IEP2 (per-camera) uses IEP2_IMAGE from the agent env; bump it then:
 sudo sed -i 's#retailvision/iep2:.*#retailvision/iep2:1.0.1#' /etc/retailvision/edge-agent.env
 sudo systemctl restart retailvision-edge-agent

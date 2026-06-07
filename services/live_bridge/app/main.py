@@ -50,21 +50,33 @@ async def health():
 
 
 async def _on_frame(camera_id: str, payload: dict) -> None:
-    """Presign frame URL and broadcast to all queued clients for this camera."""
-    s3_key = payload.get("s3_key", "")
-    if not s3_key:
-        return
+    """Broadcast a frame to all queued clients for this camera.
 
-    frame_url = await generate_presigned_url(s3_key, PRESIGNED_URL_EXPIRY)
-    if frame_url is None:
-        return
+    Two transports:
+      - Embed mode (dev): payload carries a base64 JPEG in `frame_b64`; forward
+        it directly. No S3 round-trip.
+      - S3 mode (prod): payload carries `s3_key`; presign it to a browser URL.
+    """
+    frame_b64 = payload.get("frame_b64", "")
+    s3_key    = payload.get("s3_key", "")
 
-    msg = json.dumps({
-        "camera_id": payload.get("camera_id"),
+    out = {
+        "camera_id":    payload.get("camera_id"),
         "timestamp_ms": payload.get("timestamp_ms"),
-        "frame_url": frame_url,
-        "detections": payload.get("detections", []),
-    })
+        "detections":   payload.get("detections", []),
+    }
+
+    if frame_b64:
+        out["frame_b64"] = frame_b64
+    elif s3_key:
+        frame_url = await generate_presigned_url(s3_key, PRESIGNED_URL_EXPIRY)
+        if frame_url is None:
+            return
+        out["frame_url"] = frame_url
+    else:
+        out["frame_url"] = None  # overlay-only: no image, still forward detections
+
+    msg = json.dumps(out)
 
     for queue in list(_registry.get(camera_id, set())):
         try:

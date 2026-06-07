@@ -14,6 +14,16 @@ services:
       # Give CPU inference services more time to become SERVING before EEP
       # considers the ML stack unhealthy (ultralytics model load ~30-60 s on CPU).
       ML_SERVICES_TIMEOUT_S: "300"
+      # Dev pipeline orchestrator (DEBUG_MODE): spawns per-camera IEP2 containers
+      # and embeds live frames so the dev screen shows real video without S3.
+      IEP2_IMAGE: "retail-edge-iep2_vision:latest"
+      LOCAL_REDIS_URL: "redis://redis:6379/0"
+      LIVE_EMBED_FRAME: "true"
+      IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
+    volumes:
+      # Dev-only: EEP calls IEP1.AddCamera over this control socket. (docker.sock
+      # for spawning IEP2 containers is already mounted in the base compose.)
+      - iep1-sockets:/tmp/iep1-sockets
 
   # ── CPU dev replacements for Jetson-only inference services ─────────────────
   # Both services implement the identical ZMQ wire protocol as their TRT
@@ -21,21 +31,31 @@ services:
 
   yolo-service:
     build:
-      # Context is repo root so Dockerfile.dev can COPY yolov8n.pt.
+      # Context is repo root so Dockerfile.dev can bake the RT-DETR weights.
       context: .
       dockerfile: services/yolo_service/Dockerfile.dev
     environment:
+      # Dev detector: YOLO11n at confidence 0.5.
+      DETECTOR_MODEL: "yolo11n.pt"
+      YOLO_CONF: "0.5"
       # Smaller batches and longer timeout suit single-thread CPU inference.
-      YOLO_MAX_BATCH_SIZE: "4"
+      # RT-DETR-x is much heavier than YOLOv8n on CPU — keep batch small.
+      YOLO_MAX_BATCH_SIZE: "2"
       YOLO_BATCH_TIMEOUT_MS: "500"
+      # Device selection: reads the dev-screen CPU/GPU toggle from this Redis,
+      # publishes machine GPU capability. Default CPU until a GPU is requested.
+      SERVER_REDIS_URL: "redis://redis:6379/0"
+      INFERENCE_DEVICE: "cpu"
 
-  osnet-service:
+  reid-service:
     build:
-      context: ./services/osnet_service
+      context: ./services/reid_service
       dockerfile: Dockerfile.dev
     environment:
-      OSNET_MAX_BATCH_SIZE: "8"
-      OSNET_BATCH_TIMEOUT_MS: "200"
+      REID_MAX_BATCH_SIZE: "8"
+      REID_BATCH_TIMEOUT_MS: "200"
+      SERVER_REDIS_URL: "redis://redis:6379/0"
+      INFERENCE_DEVICE: "cpu"
 
   # ── RTSP stream simulator (dev only) ─────────────────────────────────────────
   # mediamtx acts as an RTSP server; FFmpeg publishers push test videos to it

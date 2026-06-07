@@ -18,6 +18,7 @@ message CameraConfig {
   float  target_fps     = 3;
   float  window_seconds = 4;
   string store_id       = 5;
+  int32  batch_frames   = 6;
 }
 
 message AddCameraResponse {

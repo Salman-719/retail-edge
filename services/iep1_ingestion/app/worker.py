@@ -109,21 +109,93 @@ class CameraWorker:
 
     # ── Capture thread ────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _is_file_source(url: str) -> bool:
+        """Return True if url is a local file path rather than a network stream.
+
+        cv2.VideoCapture accepts both file paths and network URLs. For files,
+        EOF (cap.read() → False) means the video finished normally and should
+        loop immediately. For network streams, False means a connection failure
+        that warrants backoff and a warning.
+        """
+        return not url.startswith(("rtsp://", "rtsps://", "rtmp://", "http://", "https://"))
+
     def _open_cap(self) -> cv2.VideoCapture:
         cap = cv2.VideoCapture(self._config.rtsp_url)
-        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+        if not self._is_file_source(self._config.rtsp_url):
+            # Network stream timeouts only apply to RTSP/RTMP — not file paths.
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
         return cap
 
+    def _enqueue_frame(self, frame) -> None:
+        """Hand a captured frame to the asyncio queue from the capture thread."""
+        item = (now_ms(), frame)
+
+        # put_nowait must run on the event-loop thread; schedule it there.
+        def _enqueue(q=self._frame_queue, it=item):
+            try:
+                q.put_nowait(it)
+            except asyncio.QueueFull:
+                self._frames_dropped += 1
+                if self._frames_dropped % 100 == 0:
+                    logger.warning(
+                        "camera=%s dropped %d frames (queue full)",
+                        self._config.camera_id, self._frames_dropped,
+                    )
+
+        self._loop.call_soon_threadsafe(_enqueue)
+
     def _capture_loop(self) -> None:
+        is_file = self._is_file_source(self._config.rtsp_url)
         cap = self._open_cap()
         consecutive_failures = 0
+        target_fps = self._config.target_fps if self._config.target_fps > 0 else 5.0
+
+        # ── File sampling: keep ~target_fps frames per second of real-time video ──
+        # A file decodes far faster than real-time, so we (a) skip frames using a
+        # stride derived from the video's native FPS, and (b) pace at native FPS so
+        # the window spans real footage time. Result: target_fps sampling across
+        # the actual video, not the first N consecutive frames.
+        native_fps = cap.get(cv2.CAP_PROP_FPS) if is_file else 0.0
+        if not (1.0 <= native_fps <= 240.0):
+            native_fps = target_fps                      # unknown/invalid → no skip
+        stride = max(1, round(native_fps / target_fps)) if is_file else 1
+        frame_period = (1.0 / native_fps) if is_file else 0.0
+        if is_file:
+            logger.info(
+                "camera=%s file sampling: native_fps=%.1f target_fps=%.1f stride=%d",
+                self._config.camera_id, native_fps, target_fps, stride,
+            )
+        idx = 0
 
         while not self._stop_event.is_set():
+            if is_file:
+                t0 = time.monotonic()
+                if not cap.grab():
+                    cap.release()
+                    logger.info("camera=%s video file ended — looping from start",
+                                self._config.camera_id)
+                    cap = self._open_cap()
+                    idx = 0
+                    continue
+                if idx % stride == 0:
+                    ok, frame = cap.retrieve()
+                    if ok:
+                        self._status = "capturing"
+                        self._enqueue_frame(frame)
+                idx += 1
+                # Pace to real-time so a window covers `window_seconds` of footage.
+                dt = time.monotonic() - t0
+                if frame_period > dt:
+                    time.sleep(frame_period - dt)
+                continue
+
+            # ── RTSP / network source ────────────────────────────────────────────
             ret, frame = cap.read()
             if not ret:
-                consecutive_failures += 1
                 cap.release()
+                consecutive_failures += 1
                 delay = min(2.0 * (2 ** consecutive_failures), 60.0)
                 self._status = "reconnecting"
                 logger.warning(
@@ -133,40 +205,35 @@ class CameraWorker:
                 time.sleep(delay)
                 cap = self._open_cap()
                 continue
-
             consecutive_failures = 0
             self._status = "capturing"
-            ts = now_ms()
-            # Schedule put_nowait on the event loop thread — the only correct
-            # way to call asyncio.Queue methods from a non-async thread.
-            # put_nowait is NOT a coroutine; passing it to run_coroutine_threadsafe
-            # evaluates it immediately and then passes None, raising TypeError.
-            item = (ts, frame)
-
-            def _enqueue(q=self._frame_queue, it=item):
-                try:
-                    q.put_nowait(it)
-                except asyncio.QueueFull:
-                    self._frames_dropped += 1
-                    if self._frames_dropped % 100 == 0:
-                        logger.warning(
-                            "camera=%s dropped %d frames (queue full)",
-                            self._config.camera_id, self._frames_dropped,
-                        )
-
-            self._loop.call_soon_threadsafe(_enqueue)
+            self._enqueue_frame(frame)
 
         cap.release()
         logger.info("camera=%s capture thread exiting", self._config.camera_id)
 
     # ── Async window loop ─────────────────────────────────────────────────────
 
-    async def _window_loop(self) -> None:
-        window_seconds_ms = int(self._config.window_seconds * 1000)
-        accumulator = WindowAccumulator(
+    def _make_accumulator(self) -> WindowAccumulator:
+        return WindowAccumulator(
             sample_fps=self._config.target_fps,
             batch_window_seconds=self._config.window_seconds,
+            batch_frames=self._config.batch_frames,
         )
+
+    async def _flush_accumulator(
+        self,
+        accumulator: WindowAccumulator,
+        window_start: int,
+        window_end: int,
+    ) -> None:
+        manifest = accumulator.close(window_start, window_end, self._batch_number)
+        await self._publish_manifest(manifest)
+        self._batch_number += 1
+
+    async def _window_loop(self) -> None:
+        window_seconds_ms = int(self._config.window_seconds * 1000) + 3500
+        accumulator  = self._make_accumulator()
         window_start = now_ms()
 
         try:
@@ -181,18 +248,24 @@ class CameraWorker:
                     self._last_frame_ts = ts
                     path = _write_to_tmpfs(self._config.camera_id, ts, frame)
                     if path is not None:
-                        accumulator.add(ts, path)
+                        batch_full = accumulator.add(ts, path)
+                        if batch_full:
+                            # Frame-count trigger: flush immediately.
+                            window_end   = ts
+                            await self._flush_accumulator(accumulator, window_start, window_end)
+                            window_start = window_end
+                            accumulator  = self._make_accumulator()
+                            continue
 
+                # Safety-flush: emit whatever has accumulated if the time budget
+                # expires — prevents frames from being held indefinitely when the
+                # source delivers fewer than batch_frames in window_seconds.
                 if now_ms() - window_start >= window_seconds_ms:
                     window_end = window_start + window_seconds_ms
-                    manifest = accumulator.close(window_start, window_end, self._batch_number)
-                    await self._publish_manifest(manifest)
-                    self._batch_number  += 1
-                    window_start        += window_seconds_ms  # fixed advance, no drift
-                    accumulator = WindowAccumulator(
-                        sample_fps=self._config.target_fps,
-                        batch_window_seconds=self._config.window_seconds,
-                    )
+                    await self._flush_accumulator(accumulator, window_start, window_end)
+                    window_start += window_seconds_ms  # fixed advance, no drift
+                    accumulator   = self._make_accumulator()
+
         except asyncio.CancelledError:
             # publish partial window before exiting (R8)
             if accumulator._frames:

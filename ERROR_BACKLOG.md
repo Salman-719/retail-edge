@@ -39,7 +39,7 @@ Each entry follows the format:
 
 ### BUG-002 — YOLO and OSNet services not runnable on x86 / Intel (no Jetson/CUDA)
 **Status:** Fixed  
-**Service(s):** `yolo-service`, `osnet-service`, `docker-compose.dev.yml`  
+**Service(s):** `yolo-service`, `reid-service`, `docker-compose.dev.yml`  
 **Severity:** Critical (blocks dev stack on any non-Jetson machine)  
 **Symptom:** `docker compose build` fails because `nvcr.io/nvidia/l4t-pytorch:r36.2.0-pth2.2-py3` is an ARM64/Jetson-only base image; TRT/pycuda deps are unavailable on x86.  
 **Root Cause:** Both inference service Dockerfiles are pinned to the Jetson JetPack base image and require TensorRT + pycuda, which are NVIDIA-GPU/ARM64-only. No CPU fallback existed.  
@@ -47,11 +47,11 @@ Each entry follows the format:
 - `services/yolo_service/Dockerfile.dev` — `python:3.11-slim` base, CPU torch, ultralytics `.pt` model
 - `services/yolo_service/service_dev.py` — identical ZMQ wire protocol, loads `yolov8n.pt` on CPU
 - `services/yolo_service/requirements.dev.txt`
-- `services/osnet_service/Dockerfile.dev` — `python:3.11-slim` base, CPU torch+torchvision, ResNet-18 (512-dim avgpool, same L2-norm wire format)
-- `services/osnet_service/service_dev.py` — identical ZMQ wire protocol, no TRT/pycuda
-- `services/osnet_service/requirements.dev.txt`
+- `services/reid_service/Dockerfile.dev` — `python:3.11-slim` base, CPU torch+torchvision, ResNet-18 (512-dim avgpool, same L2-norm wire format)
+- `services/reid_service/service_dev.py` — identical ZMQ wire protocol, no TRT/pycuda
+- `services/reid_service/requirements.dev.txt`
 - Updated `docker-compose.dev.yml` to override builds for both services + set `ML_SERVICES_TIMEOUT_S=300`  
-**Verification:** Run `docker compose -f docker-compose.yml -f docker-compose.dev.yml build yolo-service osnet-service`; both should build successfully on x86.  
+**Verification:** Run `docker compose -f docker-compose.yml -f docker-compose.dev.yml build yolo-service reid-service`; both should build successfully on x86.  
 **Notes:** ResNet-18 produces valid 512-dim L2-normalised embeddings — full pipeline works end-to-end. ReID matching quality is lower than OSNet but sufficient for dev testing. IEP2, IEP1, EEP, IEP3 are unchanged.
 
 ---
@@ -66,9 +66,9 @@ Each entry follows the format:
   2. The `protobuf==4.25.3` pin was incorrect across all services. Confirmed by `agent_pb2.py` header `# Protobuf Python Version: 5.26.1` — stubs were already generated with protobuf 5.x. The entire grpcio 1.64.0 ecosystem (`grpcio-tools`, `grpcio-reflection`, `grpcio-health-checking`) requires `protobuf>=5.26.1`.  
 **Fix:**  
   - Removed `grpcio-tools==1.64.0` from `services/eep/requirements.txt` and `services/edge_agent/requirements.txt` (not needed at runtime; stubs are pre-generated).  
-  - Upgraded `protobuf==4.25.3` → `protobuf==5.27.2` in all 8 requirements files (eep, edge_agent, iep1_ingestion, iep2_vision, yolo_service, osnet_service, yolo_service/requirements.dev.txt, osnet_service/requirements.dev.txt).  
+  - Upgraded `protobuf==4.25.3` → `protobuf==5.27.2` in all 8 requirements files (eep, edge_agent, iep1_ingestion, iep2_vision, yolo_service, reid_service, yolo_service/requirements.dev.txt, reid_service/requirements.dev.txt).  
   - Both stub styles (`agent_pb2.py` serialized-file approach and `iep1_control_pb2.py` dynamic descriptor approach) use APIs available in both protobuf 4.x and 5.x — no stub regeneration needed.  
-**Verification:** Re-run `docker compose -f docker-compose.yml -f docker-compose.dev.yml build yolo-service osnet-service eep`; all pip installs should resolve cleanly.  
+**Verification:** Re-run `docker compose -f docker-compose.yml -f docker-compose.dev.yml build yolo-service reid-service eep`; all pip installs should resolve cleanly.  
 **Notes:** To regenerate stubs in future: install `grpcio-tools==1.64.0` in a one-off container as documented in the README. IDE "package not installed" hints on requirements.txt files are the local Windows Python linter checking the host environment — not Docker build errors, safely ignored.
 
 ---
@@ -145,6 +145,41 @@ Each entry follows the format:
 **Fix:** Changed `fileConfig(config.config_file_name)` → `fileConfig(config.config_file_name, disable_existing_loggers=False)` in `services/eep/alembic/env.py`. Rebuild required: `docker compose build --no-cache eep`.  
 **Verification:** After rebuild, EEP logs should show "Application startup complete." and access log lines for every request.  
 **Notes:** This is a well-known Alembic gotcha when running migrations in-process (not in a subprocess). Always set `disable_existing_loggers=False` when calling `fileConfig` in a long-running application.
+
+---
+
+### BUG-014 — IEP3 `write_global_position` int32 overflow on batch_number
+**Status:** Fixed
+**Service(s):** `services/eep/schema.sql`, Alembic migration `0004`, `global_tracking_history`
+**Severity:** Critical (every IEP3 reconciliation crashes; no global positions ever written)
+**Symptom:** `asyncpg.exceptions.DataError: invalid input for query argument $4: 1780683120000 (value out of int32 range)` on every `write_global_position()` call.
+**Root Cause:** The IEP3 coordinator's R8 refactor changed the batch identifier from a small integer to `window_start_ms` rounded to the window boundary (a monotonic, restart-safe epoch-ms value ~1.78e12). That value flows into `global_tracking_history.batch_number`, which the schema still typed as `INT` (int32, max 2.15e9). The schema was never widened when the coordinator changed.
+**Fix:** Alembic migration `0004_batch_number_bigint.py` runs `ALTER TABLE global_tracking_history ALTER COLUMN batch_number TYPE BIGINT`; `schema.sql` updated to `BIGINT` for fresh DBs. Applied automatically via EEP lifespan `alembic upgrade head`.
+**Verification:** After migration, `batch_number` is `bigint`; IEP3 logs `positions_written: N` with no overflow; `global_tracking_history` accumulates rows from both cameras.
+
+---
+
+### BUG-015 — IEP1 WindowAccumulator never decimates → manifest frame flood on RTSP / fast sources
+**Status:** Fixed
+**Service(s):** `services/iep1_ingestion/app/window.py`
+**Severity:** High (IEP2 takes ~30 min per manifest; IEP3 never receives batches; pipeline appears hung)
+**Symptom:** IEP1 manifest `frame_count: 1673` with `expected_frames: 60` for a 60 s window at `target_fps=1.0`. IEP2 processes a single manifest for tens of minutes and never emits `batch_complete`, so IEP3 sits idle.
+**Root Cause:** `WindowAccumulator.add()` appended **every** frame the capture thread delivered; it computed `_sample_interval_ms` only for gap detection and never decimated to `sample_fps`. Decimation was implicitly relying on the capture rate. A file-source capture-thread `time.sleep(1/target_fps)` (added in a prior fix) masked this for file paths, but RTSP streams deliver at native FPS (~28) with no throttle, so the window accumulated ~28×60 frames.
+**Fix:** `WindowAccumulator.add()` now drops frames arriving sooner than `0.9 × _sample_interval_ms` since the last kept frame, making `target_fps` authoritative for any source (file or RTSP). The 0.9 factor tolerates capture jitter without under-sampling.
+**Verification:** After fix, a 60 s window at `target_fps=1.0` yields `frame_count: 60 status: online`; IEP2 completes each manifest in ~60 s; IEP3 reconciles both cameras per window (`partial=False`).
+**Notes:** The file-source capture-thread throttle is retained as a CPU optimisation (avoids decoding frames that would be dropped) but is no longer required for correctness.
+
+---
+
+### BUG-013 — IEP3 coordinator stuck in infinite `NOGROUP` loop after Redis stream deletion
+**Status:** Fixed  
+**Service(s):** `services/iep3_reconciliation/app/coordinator.py`  
+**Severity:** High (IEP3 stops reconciling permanently until manually restarted; `batch_complete` entries accumulate unread)  
+**Symptom:** IEP3 logs `ERROR XREADGROUP error: NOGROUP No such key 'stream:iep2:batch_complete' or consumer group ... in XREADGROUP` every 5 seconds indefinitely. No reconciliation occurs.  
+**Root Cause:** `coordinator.py:126–129` catches `aioredis.ResponseError` and sleeps 5 s before retrying `XREADGROUP`. When the error is `NOGROUP` (stream or consumer group deleted — happens on Redis restart, manual stream flush, or first publish before the stream exists), the retry fails with the same error forever because the group is never recreated. `_ensure_group()` exists and handles recreation correctly but was only called at startup, not on error.  
+**Trigger conditions:** Redis restart (data not persisted), `DEL stream:iep2:batch_complete`, Redis failover, any operational stream flush.  
+**Fix:** Added `NOGROUP` detection in the except block. When detected, calls `_ensure_group()` (which runs `XGROUP CREATE ... MKSTREAM` tolerating `BUSYGROUP`) before continuing. All other `ResponseError` subtypes keep the existing sleep-and-retry behaviour. No restart or manual intervention required.  
+**Verification:** After stream deletion, IEP3 logs `WARNING Consumer group lost — recreating` then `INFO Consumer group created` and resumes reading new messages without restart.
 
 ---
 

@@ -98,7 +98,7 @@ class YoloClient:
         """Send frame to yolo-service and await person detections.
 
         Returns list of {"label", "confidence", "bbox"} dicts compatible with
-        the existing ByteTrack pipeline.
+        the existing BoTSORT pipeline.
         """
         req_id = str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()
@@ -121,3 +121,43 @@ class YoloClient:
         )
         await self._push.send(payload)
         return await fut
+
+    async def detect_batch(
+        self,
+        frames: list[np.ndarray],
+        timestamps_ms: list[int],
+    ) -> list[list[dict]]:
+        """Send a batch of frames concurrently and await all results.
+
+        Dispatches all frames to yolo-service in one asyncio step, then waits
+        for all responses via asyncio.gather. Order of results matches input order.
+        Frames that fail JPEG encoding are returned as empty detection lists.
+        """
+        loop = asyncio.get_running_loop()
+        futs: list[asyncio.Future] = []
+        for frame, ts in zip(frames, timestamps_ms):
+            req_id = str(uuid.uuid4())
+            fut = loop.create_future()
+            self._pending[req_id] = fut
+
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not ok:
+                log.warning("JPEG encode failed for camera %s ts=%d — skipping", self._camera_id, ts)
+                del self._pending[req_id]
+                futs.append(loop.create_future())
+                futs[-1].set_result([])
+                continue
+
+            payload = msgpack.packb(
+                {
+                    "request_id":   req_id,
+                    "camera_id":    self._camera_id,
+                    "timestamp_ms": ts,
+                    "frame":        buf.tobytes(),
+                },
+                use_bin_type=True,
+            )
+            await self._push.send(payload)
+            futs.append(fut)
+
+        return list(await asyncio.gather(*futs))

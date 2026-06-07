@@ -40,13 +40,13 @@ WINDOW_END   = 1_700_000_060_000
 
 # ── Standard centroids ────────────────────────────────────────────────────────
 
-def unit_vec(dim: int = 512) -> np.ndarray:
+def unit_vec(dim: int = 2048) -> np.ndarray:
     """Return an L2-normalized all-ones vector."""
     v = np.ones(dim, dtype=np.float32)
     return v / np.linalg.norm(v)
 
 
-def orthogonal_vec(dim: int = 512) -> np.ndarray:
+def orthogonal_vec(dim: int = 2048) -> np.ndarray:
     """Return a vector orthogonal to unit_vec (only first element differs)."""
     v = np.zeros(dim, dtype=np.float32)
     v[0] = 1.0
@@ -63,9 +63,9 @@ def settings() -> Iep3Settings:
         store_id=STORE_ID,
         expected_cameras=frozenset([CAM_01, CAM_02]),
         coordinator_timeout_s=120.0,
-        reid_threshold=0.75,
+        reid_threshold=0.85,
         max_speed_mps=1.5,
-        embedding_dim=512,
+        embedding_dim=2048,
         selection_weight_area=0.7,
         selection_weight_confidence=0.3,
         grace_seconds=300.0,

@@ -124,8 +124,18 @@ class BatchCoordinator:
                     block=5000,  # ms — yields to event loop regularly
                 )
             except aioredis.ResponseError as exc:
-                logger.error("XREADGROUP error: %s — retrying in 5s", exc)
-                await asyncio.sleep(5)
+                if "NOGROUP" in str(exc):
+                    # Stream or consumer group was deleted (Redis restart, manual
+                    # flush, or first-ever publish). Recreate and continue — the
+                    # next XREADGROUP will succeed without any external intervention.
+                    logger.warning(
+                        "Consumer group lost (stream deleted or Redis restarted) — "
+                        "recreating: %s", exc,
+                    )
+                    await self._ensure_group()
+                else:
+                    logger.error("XREADGROUP error: %s — retrying in 5s", exc)
+                    await asyncio.sleep(5)
                 continue
 
             if not messages:

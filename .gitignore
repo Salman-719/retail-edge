@@ -64,3 +64,6 @@ infra/aws/.terraform.lock.hcl
 infra/aws/terraform.tfvars
 *.tfstate
 *.tfstate.*
+
+# Large test videos (not needed for deploy)
+testing-data/**/*.mp4

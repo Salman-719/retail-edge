@@ -166,6 +166,22 @@ export const patchCamera = (slug, cameraId, body) =>
 export const deleteCamera = (slug, cameraId) =>
   api.delete(`/store/${slug}/cameras/${cameraId}`).then(r => r.data)
 
+// ── DEV-ONLY pipeline control (DEBUG_MODE endpoints) ────────────────────────
+export const devPipelineStart = (body) =>
+  api.post('/debug/dev/pipeline/start', body).then(r => r.data)
+
+export const devPipelineStop = (body) =>
+  api.post('/debug/dev/pipeline/stop', body).then(r => r.data)
+
+export const getDevTracking = (cameraId, limit = 50) =>
+  api.get('/debug/dev/tracking', { params: { camera_id: cameraId, limit } }).then(r => r.data)
+
+export const getDevIep3 = (storeId, limit = 50) =>
+  api.get('/debug/dev/iep3', { params: { store_id: storeId, limit } }).then(r => r.data)
+
+export const getDevGpuStatus = () =>
+  api.get('/debug/dev/gpu-status').then(r => r.data)
+
 // ─── Draft lifecycle ──────────────────────────────────────────────────────────
 
 export const getDraft = (slug) =>

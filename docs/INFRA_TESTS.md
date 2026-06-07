@@ -68,7 +68,7 @@ Container names follow the pattern: `retail-edge-{service_name}-1`
 | `iep2_vision` | `retail-edge-iep2_vision-1` |
 | `iep3_reconciliation` | `retail-edge-iep3_reconciliation-1` |
 | `yolo-service` | `retail-edge-yolo-service-1` |
-| `osnet-service` | `retail-edge-osnet-service-1` |
+| `reid-service` | `retail-edge-reid-service-1` |
 | `live_bridge` | `retail-edge-live_bridge-1` |
 | `edge_agent_dev` | `retail-edge-edge_agent_dev-1` (dev profile) |
 | `iep2_dev` | `retail-edge-iep2_dev-1` (dev profile) |
@@ -79,7 +79,7 @@ Volumes follow the pattern: `retail-edge_{volume_key}`
 
 | Volume key | Full name | Contents |
 |---|---|---|
-| `ipc-sockets` | `retail-edge_ipc-sockets` | ZMQ IPC sockets (YOLO/OSNet) — tmpfs |
+| `ipc-sockets` | `retail-edge_ipc-sockets` | ZMQ IPC sockets (YOLO/ReID) — tmpfs |
 | `iep1-sockets` | `retail-edge_iep1-sockets` | IEP1 gRPC control/health unix sockets — tmpfs |
 | `frame-store` | `retail-edge_frame-store` | JPEG frames from IEP1 consumed by IEP2 — tmpfs |
 | `postgres_data` | `retail-edge_postgres_data` | PostgreSQL persistent data |
@@ -130,24 +130,24 @@ and inter-service networking works.
 ```powershell
 cd C:\Users\jawad\Desktop\RetailVision_New\retail-edge
 $COMPOSE = "docker compose -f docker-compose.yml -f docker-compose.dev.yml"
-Invoke-Expression "$COMPOSE up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge yolo-service osnet-service iep1-daemon"
+Invoke-Expression "$COMPOSE up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge yolo-service reid-service iep1-daemon"
 ```
 
 **[LIN]** — Development (CPU)
 ```bash
 cd /path/to/retail-edge
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.dev.yml"
-$COMPOSE up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge yolo-service osnet-service iep1-daemon
+$COMPOSE up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge yolo-service reid-service iep1-daemon
 ```
 
 **[ORIN]** — Production edge (Jetson, no dev override)
 ```bash
 cd /path/to/retail-edge
 COMPOSE="docker compose -f docker-compose.yml"
-$COMPOSE up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge yolo-service osnet-service iep1-daemon
+$COMPOSE up -d postgres pgbouncer redis minio eep iep3_reconciliation live_bridge yolo-service reid-service iep1-daemon
 ```
 
-> **Note (Jetson):** On Jetson Orin, `yolo-service` and `osnet-service` build
+> **Note (Jetson):** On Jetson Orin, `yolo-service` and `reid-service` build
 > from Dockerfiles that use the JetPack ARM64 base image. The first build
 > requires the model weights to be present. Allow 5–10 minutes for TensorRT
 > engine compilation on first start.
@@ -164,7 +164,7 @@ Invoke-Expression "$COMPOSE ps"
 $COMPOSE ps
 ```
 
-Expected: every service listed shows `healthy` or `running`. PgBouncer, PostgreSQL, and Redis must show `healthy`. YOLO and OSNet may show `running` without a healthcheck while the model loads (allow up to 5 minutes on CPU dev, 10 minutes on Jetson first boot).
+Expected: every service listed shows `healthy` or `running`. PgBouncer, PostgreSQL, and Redis must show `healthy`. YOLO and ReID may show `running` without a healthcheck while the model loads (allow up to 5 minutes on CPU dev, 10 minutes on Jetson first boot).
 
 ### 0.2 Container health check
 
@@ -172,7 +172,7 @@ Verify that every required container is running and none is in a restart loop.
 
 **[WIN]**
 ```powershell
-$required = @("postgres-1","pgbouncer-1","redis-1","minio-1","eep-1","iep1-daemon-1","iep3_reconciliation-1","yolo-service-1","osnet-service-1","live_bridge-1")
+$required = @("postgres-1","pgbouncer-1","redis-1","minio-1","eep-1","iep1-daemon-1","iep3_reconciliation-1","yolo-service-1","reid-service-1","live_bridge-1")
 $running = docker ps --format "{{.Names}}" | Select-String "retail-edge"
 foreach ($svc in $required) {
     $match = $running | Where-Object { $_ -match $svc }
@@ -182,7 +182,7 @@ foreach ($svc in $required) {
 
 **[LIN/ORIN]**
 ```bash
-required=("postgres-1" "pgbouncer-1" "redis-1" "minio-1" "eep-1" "iep1-daemon-1" "iep3_reconciliation-1" "yolo-service-1" "osnet-service-1" "live_bridge-1")
+required=("postgres-1" "pgbouncer-1" "redis-1" "minio-1" "eep-1" "iep1-daemon-1" "iep3_reconciliation-1" "yolo-service-1" "reid-service-1" "live_bridge-1")
 running=$(docker ps --format '{{.Names}}')
 for svc in "${required[@]}"; do
     if echo "$running" | grep -q "retail-edge-$svc"; then
@@ -229,7 +229,7 @@ Verify that tmpfs volumes are mounted and accessible inside containers.
 
 **[WIN]**
 ```powershell
-# IPC sockets volume — must be accessible by YOLO, OSNet, and IEP2
+# IPC sockets volume — must be accessible by YOLO, ReID, and IEP2
 docker run --rm -v retail-edge_ipc-sockets:/tmp/sockets alpine stat /tmp/sockets; "Exit=$LASTEXITCODE (expect 0)"
 
 # IEP1 sockets volume
@@ -302,11 +302,11 @@ print('OK: MinIO reachable')
 
 **[ORIN]**
 ```bash
-# Verify CUDA is visible inside YOLO and OSNet containers
+# Verify CUDA is visible inside YOLO and ReID containers
 docker exec retail-edge-yolo-service-1 python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0))"
-docker exec retail-edge-osnet-service-1 python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+docker exec retail-edge-reid-service-1 python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
-# Verify no GPU context in IEP2 (delegates to YOLO/OSNet)
+# Verify no GPU context in IEP2 (delegates to YOLO/ReID)
 docker exec retail-edge-iep2_vision-1 python -c "
 import sys, importlib
 for m in ['torch', 'torchvision', 'tensorrt', 'ultralytics']:
@@ -325,14 +325,14 @@ for m in ['torch', 'torchvision', 'tensorrt', 'ultralytics']:
 # YOLO must NOT load CUDA on CPU dev
 docker exec retail-edge-yolo-service-1 python -c "import torch; cuda=torch.cuda.is_available(); print(f'CUDA: {cuda} (expect False on CPU dev)'); assert not cuda"
 
-# OSNet must NOT load CUDA on CPU dev
-docker exec retail-edge-osnet-service-1 python -c "import torch; cuda=torch.cuda.is_available(); print(f'CUDA: {cuda} (expect False)'); assert not cuda"
+# ReID must NOT load CUDA on CPU dev
+docker exec retail-edge-reid-service-1 python -c "import torch; cuda=torch.cuda.is_available(); print(f'CUDA: {cuda} (expect False)'); assert not cuda"
 ```
 
 **[LIN]** (development, not Jetson)
 ```bash
 docker exec retail-edge-yolo-service-1 python -c "import torch; assert not torch.cuda.is_available(); print('OK: CPU only')"
-docker exec retail-edge-osnet-service-1 python -c "import torch; assert not torch.cuda.is_available(); print('OK: CPU only')"
+docker exec retail-edge-reid-service-1 python -c "import torch; assert not torch.cuda.is_available(); print('OK: CPU only')"
 ```
 
 ---
@@ -814,13 +814,13 @@ $COMPOSE logs yolo-service | grep -iE "TRT|engine|tensorrt|loaded"
 # Expected on Jetson: TensorRT engine loaded message
 ```
 
-### 2.4 OSNet service — gRPC health (no auth)
+### 2.4 ReID service — gRPC health (no auth)
 
 **[WIN]**
 ```powershell
 $deadline = (Get-Date).AddSeconds(300)
 while ((Get-Date) -lt $deadline) {
-    $status = docker compose -f docker-compose.yml -f docker-compose.dev.yml exec osnet-service python -c "
+    $status = docker compose -f docker-compose.yml -f docker-compose.dev.yml exec reid-service python -c "
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 try:
@@ -830,8 +830,8 @@ try:
     print(health_pb2.HealthCheckResponse.ServingStatus.Name(r.status))
 except: print('NOT_READY')
 " 2>&1
-    if ($status -match "SERVING") { "PASS: OSNet SERVING"; break }
-    "Waiting for OSNet... ($status)"; Start-Sleep 10
+    if ($status -match "SERVING") { "PASS: ReID SERVING"; break }
+    "Waiting for ReID... ($status)"; Start-Sleep 10
 }
 ```
 
@@ -839,7 +839,7 @@ except: print('NOT_READY')
 ```bash
 deadline=$((SECONDS + 300))
 while [ $SECONDS -lt $deadline ]; do
-    status=$($COMPOSE exec osnet-service python -c "
+    status=$($COMPOSE exec reid-service python -c "
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 try:
@@ -849,24 +849,24 @@ try:
     print(health_pb2.HealthCheckResponse.ServingStatus.Name(r.status))
 except: print('NOT_READY')
 " 2>/dev/null)
-    [ "$status" = "SERVING" ] && echo "PASS: OSNet SERVING" && break
-    echo "Waiting for OSNet... ($status)"; sleep 10
+    [ "$status" = "SERVING" ] && echo "PASS: ReID SERVING" && break
+    echo "Waiting for ReID... ($status)"; sleep 10
 done
 ```
 
-Verify embedding dimensions match the expected 512-dim L2-normalised format:
+Verify embedding dimensions match the expected 2048-dim L2-normalised format:
 
 **[WIN]**
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.dev.yml exec osnet-service python -c "
-import os; print('EMBEDDING_DIM:', os.environ.get('EMBEDDING_DIM', '512'))
+docker compose -f docker-compose.yml -f docker-compose.dev.yml exec reid-service python -c "
+import os; print('EMBEDDING_DIM:', os.environ.get('EMBEDDING_DIM', '2048'))
 "
-# Expected: EMBEDDING_DIM: 512
+# Expected: EMBEDDING_DIM: 2048
 ```
 
 **[LIN/ORIN]**
 ```bash
-$COMPOSE exec osnet-service python -c "import os; print('EMBEDDING_DIM:', os.environ.get('EMBEDDING_DIM', '512'))"
+$COMPOSE exec reid-service python -c "import os; print('EMBEDDING_DIM:', os.environ.get('EMBEDDING_DIM', '2048'))"
 ```
 
 ### 2.5 IEP1 daemon — gRPC health (unix socket, no auth)
@@ -1030,11 +1030,11 @@ $COMPOSE logs live_bridge --tail 5
 ### 2.9 Startup sequence order — Edge Agent
 
 **[ORIN]** — systemd service; verify the startup dependency chain is enforced:
-YOLO SERVING → OSNet SERVING → IEP1 SERVING → cameras restored → EEP connected.
+YOLO SERVING → ReID SERVING → IEP1 SERVING → cameras restored → EEP connected.
 
 ```bash
 journalctl -u retailvision-edge-agent --since "5 min ago" \
-  | grep -E "yolo is SERVING|osnet is SERVING|iep1 is SERVING|Restored.*cameras|Connecting to EEP" \
+  | grep -E "yolo is SERVING|reid is SERVING|iep1 is SERVING|Restored.*cameras|Connecting to EEP" \
   | head -10
 # All 5 patterns must appear and timestamps must be strictly increasing.
 ```
@@ -1042,12 +1042,12 @@ journalctl -u retailvision-edge-agent --since "5 min ago" \
 **[LIN]** — dev machine; `edge_agent_dev` started via compose `--profile edge`:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml logs edge_agent_dev \
-  | grep -E "yolo is SERVING|osnet is SERVING|iep1 is SERVING|Restored|Connecting to EEP"
+  | grep -E "yolo is SERVING|reid is SERVING|iep1 is SERVING|Restored|Connecting to EEP"
 ```
 
 **[WIN]** — dev machine; `edge_agent_dev` started via compose `--profile edge`:
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.dev.yml logs edge_agent_dev 2>&1 | Select-String "yolo is SERVING|osnet is SERVING|iep1 is SERVING|Restored|Connecting to EEP"
+docker compose -f docker-compose.yml -f docker-compose.dev.yml logs edge_agent_dev 2>&1 | Select-String "yolo is SERVING|reid is SERVING|iep1 is SERVING|Restored|Connecting to EEP"
 ```
 
 > **Expected output (all environments):** The following lines must appear in this
@@ -1056,7 +1056,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml logs edge_agent_d
 > ```
 > WARNING  k8s: no kubeconfig found ...   (dev only — absent on Jetson with k3s)
 > INFO     yolo is SERVING
-> INFO     osnet is SERVING
+> INFO     reid is SERVING
 > INFO     iep1 is SERVING
 > INFO     Restored N / M cameras from k3s
 > INFO     Connecting to EEP  url=...
@@ -1089,7 +1089,7 @@ before proceeding to `TESTING_GUIDE.md` Phase 3 (Business Data Creation).
 | 2.2a | EEP gRPC without token | `UNAUTHENTICATED` |
 | 2.2b | EEP gRPC with `x-agent-token: dev-agent-secret` | `SERVING` |
 | 2.3 | YOLO health on `:50052` | `SERVING` |
-| 2.4 | OSNet health on `:50053` | `SERVING` |
+| 2.4 | ReID health on `:50053` | `SERVING` |
 | 2.5 | IEP1 `GetStatus` on unix socket | returns, `cameras_active=0` |
 | 2.6 | IEP2 daemon logs | `IEP2 daemon SERVING camera=...` |
 | 2.7 | IEP3 logs | No error lines |
@@ -1156,9 +1156,9 @@ $COMPOSE exec eep alembic upgrade head
 | Aspect | Windows Dev (CPU) | Jetson Orin (Production) |
 |---|---|---|
 | Compose override | `-f docker-compose.yml -f docker-compose.dev.yml` | `-f docker-compose.yml` only |
-| YOLO backend | ultralytics YOLOv8n CPU | TensorRT engine (ARM64) |
-| OSNet backend | ResNet-18 torchvision CPU | OSNet TRT engine (ARM64) |
-| Batch sizes | YOLO=4, OSNet=8 | YOLO=32, OSNet=64 |
+| YOLO backend | ultralytics RT-DETR-x CPU/GPU | TensorRT engine (ARM64) |
+| ReID backend | resnet50_msmt17 (boxmot) CPU/GPU | resnet50_msmt17 TRT engine (ARM64) |
+| Batch sizes | YOLO=4, ReID=8 | YOLO=32, ReID=64 |
 | Model load time | 30–60 s | 5–10 min (first boot, TRT compilation) |
 | IEP2 orchestration | Docker Compose (direct) | k3s Deployments via Edge Agent |
 | Edge Agent | `edge_agent_dev` in compose (`--profile edge`) | systemd service on host |
