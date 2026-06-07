@@ -1,11 +1,12 @@
-"""Cloud-side IEP3 StatefulSet manager.
+"""Cloud-side IEP3 lifecycle manager.
 
-EEP runs in cloud k8s and owns the IEP3 lifecycle:
-  apply_iep3(store_id)  — create-or-patch StatefulSet + headless Service
+EEP owns the IEP3 lifecycle:
+  apply_iep3(store_id)  — create-or-patch StatefulSet + headless Service (k8s)
+                          or start a Docker container (production-local fallback)
   delete_iep3(store_id) — idempotent delete
 
 Mirrors services/edge_agent/app/k8s_manager.py (which manages IEP2 on the edge).
-Gracefully degrades when k8s is unavailable (laptop / DEBUG_MODE).
+When k8s is unavailable (production-local / DEBUG_MODE), falls back to Docker.
 """
 from __future__ import annotations
 
@@ -14,9 +15,11 @@ import os
 
 log = logging.getLogger(__name__)
 
-_NAMESPACE  = os.environ.get("K8S_NAMESPACE", "retailvision")
-_IEP3_IMAGE = os.environ.get("IEP3_IMAGE",    "retailvision-iep3:latest")
-_KUBECONFIG = os.environ.get("KUBECONFIG",    "")
+_NAMESPACE     = os.environ.get("K8S_NAMESPACE",   "retailvision")
+_IEP3_IMAGE    = os.environ.get("IEP3_IMAGE",      "retailvision-iep3:latest")
+_KUBECONFIG    = os.environ.get("KUBECONFIG",      "")
+_DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "retail-edge_default")
+_SERVER_REDIS_URL = os.environ.get("SERVER_REDIS_URL", "")
 
 _WINDOW_SECONDS                   = os.environ.get("WINDOW_SECONDS",                   "60")
 _DATABASE_URL_SERVER               = os.environ.get("DATABASE_URL_SERVER",               "")
@@ -30,10 +33,11 @@ _EXPECTED_CAMERAS_REFRESH_BATCHES = os.environ.get("EXPECTED_CAMERAS_REFRESH_BAT
 
 _apps_v1 = None
 _core_v1 = None
+_docker_client = None
 
 
 def init_k8s_clients() -> None:
-    global _apps_v1, _core_v1
+    global _apps_v1, _core_v1, _docker_client
     try:
         from kubernetes import client as k8s, config as k8s_config  # type: ignore[import-untyped]
         try:
@@ -46,13 +50,25 @@ def init_k8s_clients() -> None:
                 log.info("iep3_manager: using kubeconfig %s", kubeconfig or "~/.kube/config")
             except Exception as exc:
                 log.warning(
-                    "iep3_manager: k8s unavailable — IEP3 StatefulSets will not be managed (%s)", exc
+                    "iep3_manager: k8s unavailable (%s) — trying Docker fallback", exc
                 )
+                _init_docker()
                 return
         _apps_v1 = k8s.AppsV1Api()
         _core_v1 = k8s.CoreV1Api()
     except ImportError:
-        log.warning("iep3_manager: 'kubernetes' package not installed — IEP3 StatefulSets will not be managed")
+        log.warning("iep3_manager: 'kubernetes' package not installed — trying Docker fallback")
+        _init_docker()
+
+
+def _init_docker() -> None:
+    global _docker_client
+    try:
+        import docker  # type: ignore[import-untyped]
+        _docker_client = docker.from_env()
+        log.info("iep3_manager: Docker fallback active (production-local mode)")
+    except Exception as exc:
+        log.warning("iep3_manager: Docker also unavailable — IEP3 will not be managed (%s)", exc)
 
 
 def _ss_name(store_id: str) -> str:
@@ -60,10 +76,17 @@ def _ss_name(store_id: str) -> str:
     return "iep3-" + store_id.replace("-", "")[:16]
 
 
+def _container_name(store_id: str) -> str:
+    return "iep3-prod-" + store_id.replace("-", "")[:16]
+
+
 def apply_iep3(store_id: str) -> None:
-    """Create-or-patch IEP3 StatefulSet + headless Service for store_id."""
+    """Create-or-patch IEP3 StatefulSet + headless Service for store_id.
+
+    Falls back to a Docker container when k8s is unavailable (production-local).
+    """
     if _apps_v1 is None:
-        log.debug("iep3_manager.apply_iep3: k8s not available, skipping (store=%s)", store_id)
+        _apply_iep3_docker(store_id)
         return
 
     from kubernetes import client as k8s  # type: ignore[import-untyped]
@@ -156,10 +179,53 @@ def apply_iep3(store_id: str) -> None:
             raise
 
 
+def _apply_iep3_docker(store_id: str) -> None:
+    if _docker_client is None:
+        log.debug("iep3_manager.apply_iep3: no backend available, skipping (store=%s)", store_id)
+        return
+
+    import docker.errors  # type: ignore[import-untyped]
+
+    name = _container_name(store_id)
+    env = {
+        "STORE_ID":                         store_id,
+        "WINDOW_SECONDS":                   _WINDOW_SECONDS,
+        "DATABASE_URL_SERVER":              _DATABASE_URL_SERVER,
+        "SERVER_REDIS_URL":                 _SERVER_REDIS_URL,
+        "REID_THRESHOLD":                   _REID_THRESHOLD,
+        "GRACE_SECONDS":                    _GRACE_SECONDS,
+        "MAX_SPEED_MPS":                    _MAX_SPEED_MPS,
+        "POSITION_WEIGHT_AREA":             _POSITION_WEIGHT_AREA,
+        "POSITION_WEIGHT_CONF":             _POSITION_WEIGHT_CONF,
+        "ORPHAN_SWEEP_INTERVAL_BATCHES":    _ORPHAN_SWEEP_INTERVAL_BATCHES,
+        "EXPECTED_CAMERAS_REFRESH_BATCHES": _EXPECTED_CAMERAS_REFRESH_BATCHES,
+    }
+
+    try:
+        existing = _docker_client.containers.get(name)
+        if existing.status == "running":
+            log.debug("iep3_manager: IEP3 container %s already running (store=%s)", name, store_id)
+            return
+        existing.remove(force=True)
+    except docker.errors.NotFound:
+        pass
+
+    _docker_client.containers.run(
+        image=_IEP3_IMAGE,
+        name=name,
+        environment=env,
+        network=_DOCKER_NETWORK,
+        detach=True,
+        restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
+        labels={"component": "iep3", "store-id": store_id, "managed-by": "eep"},
+    )
+    log.info("iep3_manager: started Docker container %s (store=%s)", name, store_id)
+
+
 def delete_iep3(store_id: str) -> None:
     """Idempotent delete of IEP3 StatefulSet + headless Service for store_id."""
     if _apps_v1 is None:
-        log.debug("iep3_manager.delete_iep3: k8s not available, skipping (store=%s)", store_id)
+        _delete_iep3_docker(store_id)
         return
 
     from kubernetes.client.exceptions import ApiException  # type: ignore[import-untyped]
@@ -175,3 +241,18 @@ def delete_iep3(store_id: str) -> None:
         except ApiException as exc:
             if exc.status != 404:
                 raise
+
+
+def _delete_iep3_docker(store_id: str) -> None:
+    if _docker_client is None:
+        log.debug("iep3_manager.delete_iep3: no backend available, skipping (store=%s)", store_id)
+        return
+
+    import docker.errors  # type: ignore[import-untyped]
+
+    name = _container_name(store_id)
+    try:
+        _docker_client.containers.get(name).remove(force=True)
+        log.info("iep3_manager: removed Docker container %s (store=%s)", name, store_id)
+    except docker.errors.NotFound:
+        pass

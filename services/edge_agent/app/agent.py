@@ -1,17 +1,17 @@
-"""Edge Agent — thin gRPC relay: translates EEP commands into k3s API operations.
+"""Edge Agent — thin gRPC relay: translates EEP commands into k3s/Docker operations.
 
 Startup sequence:
-  1. Init k8s clients (load kubeconfig)
+  1. Init backend: try k3s (kubeconfig); fall back to Docker if k3s unavailable
   2. Wait for YOLO + ReID grpc.health.v1 = SERVING
   3. Wait for IEP1 grpc.health.v1 = SERVING
-  4. Restore active cameras from k3s Deployments
+  4. Restore active cameras from backend (k3s Deployments or Docker containers)
   5. Connect gRPC stream to EEP
 
 Per-camera lifecycle:
   StartCamera: apply ConfigMap + Deployment → wait IEP2 SERVING → AddCamera to IEP1
-  StopCamera:  cancel health watcher → RemoveCamera from IEP1 → delete k3s resources
+  StopCamera:  cancel health watcher → RemoveCamera from IEP1 → delete backend resources
 
-k3s is the source of truth for container state. No _tracked_cameras dict.
+Backend (k3s_manager or docker_manager) is the source of truth for container state.
 """
 import asyncio
 import logging
@@ -24,6 +24,7 @@ import grpc
 import grpc.aio
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
+from services.edge_agent.app import docker_manager as dm
 from services.edge_agent.app import k8s_manager as km
 from services.edge_agent.app.grpc_generated.agent_pb2 import (
     AgentMessage,
@@ -76,8 +77,11 @@ _outgoing:         asyncio.Queue           = asyncio.Queue(maxsize=200)
 # One Watch task per active camera
 _health_watchers:  dict[str, asyncio.Task] = {}
 
-# All K8s API calls run in this executor — never on the asyncio thread
-_k8s_exec = ThreadPoolExecutor(max_workers=4, thread_name_prefix="edge-k8s")
+# Active backend module — set in _startup() to km (k3s) or dm (Docker)
+_mgr = km
+
+# Backend API calls run in this executor — never on the asyncio thread
+_exec = ThreadPoolExecutor(max_workers=4, thread_name_prefix="edge-mgr")
 
 
 # ── Health helpers ─────────────────────────────────────────────────────────────
@@ -109,16 +113,24 @@ async def _wait_for_iep2_health(camera_id: str, timeout: int = 60) -> None:
 # ── Startup ────────────────────────────────────────────────────────────────────
 
 async def _startup() -> None:
+    global _mgr
     loop = asyncio.get_running_loop()
 
-    # Init K8s API clients (reads kubeconfig — blocking file I/O)
-    await loop.run_in_executor(_k8s_exec, km.init_k8s_clients)
+    # Try k3s first; fall back to Docker if kubeconfig unavailable (production-local mode)
+    await loop.run_in_executor(_exec, km.init_k8s_clients)
+    if km.is_available():
+        _mgr = km
+        logger.info("Edge Agent backend: k3s (Kubernetes)")
+    else:
+        await loop.run_in_executor(_exec, dm.init_k8s_clients)
+        _mgr = dm
+        logger.info("Edge Agent backend: Docker (production-local mode)")
 
-    # Wait for inference services (exposed via hostPort from their k3s pods)
+    # Wait for inference services
     await _wait_for_health("yolo",  YOLO_HEALTH_SOCK,  timeout=120)
     await _wait_for_health("reid", REID_HEALTH_SOCK, timeout=120)
 
-    # Wait for IEP1 daemon (unix socket via hostPath /dev/shm/sockets)
+    # Wait for IEP1 daemon (unix socket via hostPath / volume mount)
     await _wait_for_health("iep1", IEP1_HEALTH_SOCK, timeout=60)
 
     # Re-add cameras that survived this Edge Agent restart
@@ -135,7 +147,7 @@ async def _restore_active_cameras() -> None:
     Cameras whose ConfigMap lacks RTSP_URL are skipped with a warning.
     """
     loop = asyncio.get_running_loop()
-    deployments = await loop.run_in_executor(_k8s_exec, km.list_active_iep2_deployments)
+    deployments = await loop.run_in_executor(_exec, _mgr.list_active_iep2_deployments)
 
     restored = 0
     for data in deployments:
@@ -168,7 +180,7 @@ async def _restore_active_cameras() -> None:
             )
         restored += 1
 
-    logger.info("Restored %d / %d cameras from k3s", restored, len(deployments))
+    logger.info("Restored %d / %d cameras from backend", restored, len(deployments))
 
 
 # ── IEP1 health watcher ────────────────────────────────────────────────────────
@@ -312,10 +324,10 @@ async def _handle_start_camera(cmd) -> None:
     try:
         loop = asyncio.get_running_loop()
 
-        # Step 1: write ConfigMap and Deployment to k3s
+        # Step 1: write ConfigMap and Deployment to backend (k3s or Docker)
         cm_data = _build_configmap_data(camera_id, store_id, cmd.rtsp_url, cmd.target_fps)
-        await loop.run_in_executor(_k8s_exec, km.apply_camera_configmap, camera_id, cm_data)
-        await loop.run_in_executor(_k8s_exec, km.apply_iep2_deployment, camera_id)
+        await loop.run_in_executor(_exec, _mgr.apply_camera_configmap, camera_id, cm_data)
+        await loop.run_in_executor(_exec, _mgr.apply_iep2_deployment, camera_id)
 
         # Step 2: wait for IEP2 to report SERVING on its unix health socket
         await _wait_for_iep2_health(camera_id, timeout=60)
@@ -375,8 +387,8 @@ async def _handle_stop_camera(cmd) -> None:
     except Exception as exc:
         logger.warning("RemoveCamera failed  camera=%s: %s", camera_id, exc)
 
-    # Step 2: delete k3s Deployment + ConfigMap
-    await loop.run_in_executor(_k8s_exec, km.delete_iep2, camera_id)
+    # Step 2: delete backend Deployment + ConfigMap (k3s or Docker)
+    await loop.run_in_executor(_exec, _mgr.delete_iep2, camera_id)
 
     await _send_immediate_status(camera_id)
     logger.info("StopCamera complete  camera=%s", camera_id)
@@ -406,9 +418,9 @@ def _enqueue_status(msg: AgentMessage) -> None:
 
 
 async def _send_immediate_status(camera_id: str) -> None:
-    """Query K8s pod status and enqueue a CameraStatusReport immediately."""
+    """Query backend container status and enqueue a CameraStatusReport immediately."""
     loop   = asyncio.get_running_loop()
-    status = await loop.run_in_executor(_k8s_exec, km.get_camera_k8s_status, camera_id)
+    status = await loop.run_in_executor(_exec, _mgr.get_camera_k8s_status, camera_id)
     _enqueue_status(AgentMessage(
         camera_status=CameraStatusReport(
             camera_id=camera_id,
@@ -433,11 +445,11 @@ async def _heartbeat_loop(store_id: str, agent_version: str) -> None:
         except asyncio.QueueFull:
             logger.warning("Outgoing queue full — dropping heartbeat")
 
-        # Query k3s for current camera list (source of truth)
-        active = await loop.run_in_executor(_k8s_exec, km.get_active_camera_ids)
+        # Query backend for current camera list (source of truth)
+        active = await loop.run_in_executor(_exec, _mgr.get_active_camera_ids)
         for camera_id in active:
             status = await loop.run_in_executor(
-                _k8s_exec, km.get_camera_k8s_status, camera_id
+                _exec, _mgr.get_camera_k8s_status, camera_id
             )
             _enqueue_status(AgentMessage(
                 camera_status=CameraStatusReport(

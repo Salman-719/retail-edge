@@ -59,6 +59,10 @@ def init_k8s_clients() -> None:
     _core_v1 = k8s.CoreV1Api()
 
 
+def is_available() -> bool:
+    return _apps_v1 is not None
+
+
 def _require_k8s(operation: str) -> None:
     """Raise RuntimeError with a clear message if k8s clients are not initialised."""
     if _apps_v1 is None or _core_v1 is None:
