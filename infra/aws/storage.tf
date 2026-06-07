@@ -29,6 +29,21 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "objects" {
   }
 }
 
+# CORS so the SPA can load images (floor plans, frames) cross-origin from S3 via
+# presigned URLs (the in-page canvas/fetch path needs this; a direct tab open does
+# not). The app also tries to set this on bucket creation, but Terraform owns the
+# bucket, so we set it here.
+resource "aws_s3_bucket_cors_configuration" "objects" {
+  bucket = aws_s3_bucket.objects.id
+  cors_rule {
+    allowed_headers = ["*"]
+    allowed_methods = ["GET", "HEAD"]
+    allowed_origins = ["*"]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3600
+  }
+}
+
 # Expire old object versions to control cost.
 resource "aws_s3_bucket_lifecycle_configuration" "objects" {
   bucket = aws_s3_bucket.objects.id
