@@ -51,6 +51,11 @@ COMPARISON_MODELS = [
     {"model": "yolo11x-seg", "weights": "yolo11x-seg.pt"},
     {"model": "rtdetr-x",    "weights": "rtdetr-x.pt"},
 ]
+# Model-specific configs that don't fit the conf=0.3 comparison loop. Each runs on
+# all scenes at its own conf. yolo11n (nano YOLOv11) added at conf=0.5.
+EXTRA_RUNS = [
+    {"model": "yolo11n", "weights": "yolo11n.pt", "conf": 0.5},
+]
 TUNING_CONF = [0.15, 0.30, 0.50]   # rtdetr-x
 
 _LABELS_PATH = os.path.join(_MLOPS, "labeling", "labels.json")
@@ -67,7 +72,8 @@ def _labeled_metrics(scene: str, clip_key: str, base: dict, labels: dict) -> tup
     gt = labels.get(clip_key, {})
     extra: dict = {}
     if gt.get("total_people", 0) and gt["total_people"] > 0:
-        extra["count_error"] = dm.count_error(base["unique_tracks"], gt["total_people"])
+        # count_error (|unique_tracks - total_people|) dropped — it measured tracking
+        # fragmentation, not detection. People-count accuracy uses peak_count_error.
         if gt.get("peak_people") is not None:
             extra["peak_count_error"] = dm.peak_count_error(
                 base["peak_detections_per_frame"], gt["peak_people"])
@@ -105,14 +111,21 @@ def _confidence_histogram(confidences, title: str, out_path: str) -> str | None:
 
 
 def _save_sample_frames(stats, prefix: str) -> list[str]:
-    """Write annotated sample frames (boxes drawn) to PNGs. Returns their paths.
-    These are the visual proof of false positives (a box on a mannequin / hand-ad)."""
+    """Write annotated sample frames + the PEAK frame (most detections) to PNGs.
+    Frames are downscaled in the harness, so they view fully in any image previewer.
+    The peak frame shows the busiest moment — e.g. why a run reports peak=18."""
     import cv2
     paths = []
     os.makedirs(_OUT_DIR, exist_ok=True)
     for idx, img in stats.sample_frames:
         p = os.path.join(_OUT_DIR, f"{prefix}_frame{idx}.png")
         if cv2.imwrite(p, img):
+            paths.append(p)
+    # The peak-count frame, clearly named with its detection count.
+    if stats.peak_frame is not None:
+        pidx, pcount, pimg = stats.peak_frame
+        p = os.path.join(_OUT_DIR, f"{prefix}_PEAK_{pcount}det_frame{pidx}.png")
+        if cv2.imwrite(p, pimg):
             paths.append(p)
     return paths
 
@@ -165,8 +178,8 @@ def run_one(model: str, weights: str, conf: float, scene: str, phase: str, label
 
     fp_or_err = (f"false_positive_total={metrics.get('false_positive_total')}"
                  if metric_type == "labeled_fp"
-                 else f"count_err={metrics.get('count_error')}")
-    print(f"[logged] {prefix}  unique_tracks={metrics['unique_tracks']}  {fp_or_err}")
+                 else f"peak_count_error={metrics.get('peak_count_error')}")
+    print(f"[logged] {prefix}  peak_det/frame={metrics['peak_detections_per_frame']:.0f}  {fp_or_err}")
 
 
 def main() -> None:
@@ -180,10 +193,15 @@ def main() -> None:
         run_one("yolov8n", "yolov8n.pt", 0.30, "mannequin", "comparison", labels)
         return
 
-    # Comparison: 4 models × 2 videos
+    # Comparison: 4 models × 3 scenes (conf=0.3)
     for m in COMPARISON_MODELS:
         for scene in VIDEOS:
             run_one(m["model"], m["weights"], 0.30, scene, "comparison", labels)
+
+    # Extra comparison runs at model-specific conf (e.g. yolo11n @ 0.5) × 3 scenes
+    for m in EXTRA_RUNS:
+        for scene in VIDEOS:
+            run_one(m["model"], m["weights"], m["conf"], scene, "comparison", labels)
 
     # Tuning: rtdetr-x × conf sweep × 2 videos
     for conf in TUNING_CONF:

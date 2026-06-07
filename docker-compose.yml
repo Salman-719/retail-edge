@@ -84,6 +84,37 @@ services:
     image: prom/prometheus:v2.51.0
     ports:
       - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+    ports:
+      - "9121:9121"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  postgres_exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      # Connects directly to postgres (not pgbouncer) — reuses the same creds.
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  node_exporter:
+    image: prom/node-exporter:v1.8.1
+    ports:
+      - "9100:9100"
     restart: unless-stopped
 
   grafana:
@@ -96,6 +127,7 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
     restart: unless-stopped
@@ -213,6 +245,8 @@ services:
       - ipc-sockets:/tmp/sockets
     ports:
       - "50052:50052"
+    expose:
+      - "9400"            # Prometheus /metrics (job "yolo")
     restart: on-failure
 
   # ── ReID embedding service (resnet50_msmt17) ─────────────────────────────────
@@ -290,6 +324,8 @@ services:
       DEFAULT_FRAME_HEIGHT: ${DEFAULT_FRAME_HEIGHT:-1080}
       EXPECTED_CAMERAS_REFRESH_BATCHES: ${EXPECTED_CAMERAS_REFRESH_BATCHES:-10}
       ORPHAN_SWEEP_INTERVAL_BATCHES: ${ORPHAN_SWEEP_INTERVAL_BATCHES:-50}
+    expose:
+      - "9300"            # Prometheus /metrics (job "iep3")
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -405,6 +441,7 @@ volumes:
   redis_data:
   minio_data:
   grafana_data:
+  prometheus_data:
   # Shared tmpfs for JPEG frames produced by IEP1 daemon and consumed by IEP2.
   # In production the edge device writes frames locally; in compose they share
   # this volume so IEP2 can read the tmpfs paths IEP1 writes to manifests.

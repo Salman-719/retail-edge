@@ -19,6 +19,26 @@ import cv2
 import numpy as np
 
 PERSON_CLASS_ID = 0
+_VIEW_MAX_W = 1280   # downscale saved frames to this width — full scene, ~200KB, views in any viewer
+
+
+def _annotate(frame: np.ndarray, dets: list) -> np.ndarray:
+    """Draw person boxes on a copy of the frame, then downscale to a viewer-friendly
+    width. Big source frames (e.g. 3072x2048, ~6MB PNG) get clipped by image
+    previewers; downscaling keeps the WHOLE scene + all boxes in a small image.
+    Box thickness/font scale with resolution so they stay visible after downscale."""
+    img = frame.copy()
+    h, w = img.shape[:2]
+    thick = max(2, round(w / 600))
+    fs = max(0.5, w / 1500)
+    for x1, y1, x2, y2, p, _ in dets:
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), thick)
+        cv2.putText(img, f"person {p:.2f}", (int(x1), max(0, int(y1) - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 255), thick)
+    if w > _VIEW_MAX_W:
+        scale = _VIEW_MAX_W / w
+        img = cv2.resize(img, (_VIEW_MAX_W, int(h * scale)), interpolation=cv2.INTER_AREA)
+    return img
 
 
 def _resolve_device() -> str:
@@ -51,7 +71,9 @@ class FrameStats:
     track_ids_seen: set = field(default_factory=set)            # distinct tracker IDs
     id_switches: int = 0
     elapsed_s: float = 0.0
-    sample_frames: list = field(default_factory=list)  # (frame_idx, annotated BGR image)
+    sample_frames: list = field(default_factory=list)   # (frame_idx, annotated BGR image)
+    peak_frame: tuple = None                            # (frame_idx, count, annotated image) — busiest frame
+    _peak_count: int = -1                               # internal tracker for peak_frame
 
 
 def _load_detector(weights: str):
@@ -170,14 +192,15 @@ def run_detection_clip(
 
         stats.per_frame_counts.append(len(dets))
 
-        # Save an annotated sample frame (boxes drawn) for visual FP evidence.
+        # Save an annotated sample frame (boxes drawn, downscaled for viewing).
         if frame_idx in sample_idxs:
-            annotated = frame.copy()
-            for x1, y1, x2, y2, p, _ in dets:
-                cv2.rectangle(annotated, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
-                cv2.putText(annotated, f"person {p:.2f}", (int(x1), max(0, int(y1) - 5)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            stats.sample_frames.append((frame_idx, annotated))
+            stats.sample_frames.append((frame_idx, _annotate(frame, dets)))
+
+        # Track the PEAK frame — the single frame with the most detections — so the
+        # busiest moment (which the evenly-spaced samples may miss) is always saved.
+        if len(dets) > stats._peak_count:
+            stats._peak_count = len(dets)
+            stats.peak_frame = (frame_idx, len(dets), _annotate(frame, dets))
 
         # Tracker for identity-based stats (unique IDs, id switches).
         dets_arr = np.array(dets, dtype=float) if dets else np.empty((0, 6))

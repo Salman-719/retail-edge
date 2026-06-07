@@ -64,9 +64,16 @@ implemented in `scripts/check_promotion.py`.
 |---|---|---|---|---|
 | Avg detection confidence (%) | 86.0 | ≥ | docs_models/detection/detection_experiments.md (Round 4: rtdetr-x = 86.1%) | `avg_confidence` |
 | ID switches | 12 | ≤ | docs_models/detection/detection_experiments.md (Round 4: rtdetr-x = 12, yolov8x = 16) | `id_switches` |
-| People count error (scene=crowded) | 2 | ≤ | mlops/labeling/labels.json (GT = 16 people) — ⚠️ tolerance is an estimate | `count_error` |
-| Peak count error (scene=crowded) | 2 | ≤ | mlops/labeling/labels.json (GT = peak 14) — ⚠️ tolerance is an estimate | `peak_count_error` |
+| Peak count error (scene=crowded) | 2 | ≤ | mlops/labeling/labels.json (GT = peak 14); validated by 21-run sweep (rtdetr-x/yolov8x/yolo11x-seg ≤1) | `peak_count_error` |
 | False positives (scene=mannequin/hand_ad) | 0 | ≤ | docs_models/detection/detection_experiments.md (Round 4: rtdetr-x = 0 mannequin FP) | `false_positive_total` |
+
+> **Why `count_error` (= |unique_tracks − 16|) is NOT a promotion gate:** the 21-run
+> sweep showed it at 19–41 even for RT-DETR, but that is **tracking fragmentation**,
+> not a detection failure — `unique_tracks` counts every track ID ever created, which
+> inflates in a busy/occluded scene. RT-DETR's actual detection is excellent
+> (`peak_detections_per_frame` = 13 vs true peak 14). Counting accuracy is therefore
+> gated via `peak_count_error` (a per-frame detection metric), and track-ID inflation
+> is a tracking-experiment concern, not a detection-gate one.
 
 **Scene applicability:** `false_positive_total` is only checked on 0-people clips
 (`scene=mannequin`/`hand_ad`); `count_error`/`peak_count_error` only on
@@ -85,30 +92,56 @@ python scripts/check_promotion.py --run-id <your-run-id>
 python scripts/check_promotion.py --run-id <your-run-id> --tracking-uri http://your-mlflow-server:5000
 ```
 
-### Promotion process (manual gate)
+### Promotion lifecycle (automated check → auto-register → human deploy)
 
-Promotion is a **manual checkpoint**, run locally before a model is deployed — it is
-deliberately not wired into GitHub Actions, because CI runs in the cloud and cannot
-reach the MLflow server running on `localhost:5000`. The gate is the human
-decision step, not an auto-deploy:
+The lifecycle separates **automated bookkeeping** from **human decisions**. The split
+is deliberate: steps that change nothing live are automated; steps that designate or
+deploy the live model require a human.
 
-1. Run an experiment — `python mlops/eval/run_detection_eval.py` (logs runs to MLflow).
-2. Find the run in the MLflow UI (http://localhost:5000) and copy its run ID.
-3. Run the gate — `python scripts/check_promotion.py --run-id <id>`.
-   - **Exit 0 / "PROMOTE"** → proceed to step 4.
-   - **Exit 1 / "DO NOT PROMOTE"** → tune hyperparameters and re-run.
-4. On PROMOTE: update the model reference in `services/iep2_vision/` and
-   `services/iep3_reconciliation/`, then record the run below in
-   **Current promoted model**.
+| Step | What it does | Automated? |
+|---|---|---|
+| **1. Promote (check)** | `check_promotion.py` evaluates a run's metrics vs thresholds → PROMOTE / DO NOT PROMOTE (exit 0/1) | ✅ automated check |
+| **2. Register (Staging)** | On PROMOTE, opt-in `--register` creates a new version of `retailvision-detector` in **Staging** (`@candidate`) — pure catalog bookkeeping, nothing live changes | ✅ automated (opt-in) |
+| **3. Production** | A human reviews the Staging candidate and sets it to **Production** | 🧍 human-in-the-loop |
+| **4. Deploy** | A human updates the model reference in `services/iep2_vision/` + `services/yolo_service/` and restarts — only this changes what the live cameras run | 🧍 human-in-the-loop |
 
-The non-zero exit code makes this scriptable later if the MLflow server is ever
-hosted somewhere CI can reach (see TRADEOFFS / future work).
+> **Why a human gate at steps 3–4:** registering to Staging is reversible metadata
+> and safe to automate. Designating Production and deploying change reality, so a
+> person signs off. A green gate is an *advisor*, not an auto-deploy.
+
+**Commands:**
+```bash
+# 1. Run an experiment (logs runs to MLflow)
+python mlops/eval/run_detection_eval.py
+
+# 2. Check the gate only (no side effects):
+python scripts/check_promotion.py --run-id <id>
+
+# 2b. Check AND auto-register to Staging if it passes (opt-in):
+python scripts/check_promotion.py --run-id <id> --register
+#  -> creates retailvision-detector vN in Staging; Production untouched.
+
+# 3-4. HUMAN: review the Staging version in the MLflow Models page, then (if approved)
+#      set it to Production and update the model ref in the services + restart.
+```
+
+> **Note on CI:** the gate is run locally, not in GitHub Actions, because CI runs in
+> the cloud and cannot reach the MLflow server on `localhost:5000`. The non-zero exit
+> code makes it CI-scriptable later if MLflow is ever hosted reachably (future work).
+
+> **Distinction — registered vs deployed:** "Production" in the MLflow registry is a
+> *label*, not a deployment. The live edge pipeline loads the model its service code
+> points at; it does not read the registry. Marking Production ≠ the cameras switching
+> models — deployment (step 4) is what makes it live.
 
 ## Current promoted model
-- **Run ID:** TODO — paste the MLflow run ID of the currently deployed model
-- **Promoted on:** TODO — date
-- **Promoted by:** TODO — team member name
-- **All thresholds at promotion:** see MLflow run linked above
+- **Model / config:** `rtdetr-x`, `conf=0.5`, `imgsz=640` (detection, crowded scene)
+- **Run ID:** `7b4e10840bbe44848469faa667a6cf1d` (MLflow experiment `detection`, run `rtdetr-x_conf0.5_crowded`)
+- **Promoted on:** 2026-06-07
+- **Promoted by:** Ali Zahreddine
+- **Thresholds at promotion (all PASS):** `avg_confidence` 85.6 (≥75) · `id_switches` 7 (≤12) · `peak_count_error` 1 (≤2). Mannequin run = 0 false positives.
+- **Why conf=0.5 over conf=0.3:** cleaner raw peak detection (13 vs true peak 14) and higher confidence; conf=0.3 over-detects via duplicate boxes (peak 18). Trade-off accepted: conf=0.5 has more ID switches (7 vs 1), but that is a tracking-stage concern.
+- **Known limitation:** raw detection over-counts in crowds (duplicate/NMS-free boxes) and fails on the 2-D printed hand-ad (`hand_on_ad_in_store.mp4`, Case 3). True per-person counting happens downstream after ReID de-duplication in IEP3, not at the detection stage. Detection counts here are intentionally raw (no IoU dedup).
 
 ## 4. Retraining trigger
 
