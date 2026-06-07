@@ -225,19 +225,38 @@ export STORE=00000000-0000-0000-0000-000000000001     # the UUID from B1
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 cd /opt/retail-edge
 ```
-Re-run Helm (one line; for multiple stores use `{uuid1,uuid2}`):
+Re-run Helm (one line):
 ```bash
 helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set "iep3.stores={$STORE}" -n retailvision
 ```
+
+> ⚠️ **`iep3.stores` is the COMPLETE list, not an "add".** Helm makes the running
+> IEP3 workers match exactly what you pass. To add a second store, pass **both**
+> UUIDs — `--set "iep3.stores={uuid1,uuid2}"`. If you pass only the new one, the
+> previous store's IEP3 worker is **deleted**. (Tip: keep the running set in
+> `values.production.yaml` under `iep3.stores:` so you don't have to remember it.)
+
 Verify:
 ```bash
 k3s kubectl -n retailvision get pods -l app=iep3
 ```
-**Expect:** `iep3-<short>` `1/1 Running`.
+**Expect:** one `iep3-<short>` `1/1 Running` pod **per UUID** in the list.
 
 > Capacity: each store adds one IEP3 pod. For several stores, add nodes
 > (`agent_count` in `terraform.tfvars` → `terraform apply`) or a bigger
 > `server_instance_type`.
+
+### B3. Per new store — what changes (and what doesn't)
+
+| Step | What changes per store | What stays the same |
+|---|---|---|
+| Create store (UI) | new name → new **UUID** + slug | — |
+| Cloud IEP3 (B2) | the **`iep3.stores` list** — pass **all** UUIDs cumulatively | `EIP`, `OWNER`, `REGION`, `BUCKET`, the rest of the command |
+| Edge device (Part C) | **`STORE`** = that store's UUID; runs on **that store's** Jetson | `EIP`, `AGENT_SECRET`, GHCR creds — identical for every store |
+
+So onboarding store N is: (1) create it → get UUID, (2) `helm upgrade` with the
+**full** `iep3.stores` set including the new UUID, (3) on that store's Jetson run
+Part C with only `STORE` changed.
 
 ---
 
