@@ -109,5 +109,6 @@ variable "secret_names" {
     redis_url         = "retailvision/redis-url"
     s3_access_key     = "retailvision/s3-access-key"
     s3_secret_key     = "retailvision/s3-secret-key"
+    openai_api_key    = "retailvision/openai-api-key"
   }
 }

@@ -62,6 +62,23 @@ frontend:
       cpu: "250m"
       memory: "128Mi"
 
+# IEP6 — AI analytics agent (OpenAI). Needs the openai-api-key secret seeded.
+iep6:
+  enabled: true
+  image:
+    tag: "1.1.0"
+  replicas: 1
+  openaiModel: "gpt-4o-mini"
+  enableRawSql: false      # guarded ad-hoc SELECT tool (off by default)
+  enableEepActions: false  # state-changing actions via EEP (off = read-only)
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
 # In-cluster PostgreSQL (cheapest option). For managed RDS instead, set
 # postgres.enabled=false and point pgbouncer POSTGRESQL_HOST at the RDS endpoint.
 postgres:
@@ -124,3 +141,4 @@ secrets:
   redisUrl:         "retailvision/redis-url"
   s3AccessKey:      "retailvision/s3-access-key"
   s3SecretKey:      "retailvision/s3-secret-key"
+  openaiApiKey:     "retailvision/openai-api-key"

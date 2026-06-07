@@ -23,6 +23,16 @@ spec:
     - host: {{ .Values.ingress.appHost | quote }}
       http:
         paths:
+          {{- if .Values.iep6.enabled }}
+          # AI agent API → IEP6 (more specific than /, takes precedence).
+          - path: /api/agent
+            pathType: Prefix
+            backend:
+              service:
+                name: iep6
+                port:
+                  number: 8006
+          {{- end }}
           - path: /
             pathType: Prefix
             backend:

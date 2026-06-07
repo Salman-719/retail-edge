@@ -33,6 +33,10 @@ locals {
     redis_url     = "rediss://redis-server:6380?ssl_cert_reqs=none"
     s3_access_key = aws_iam_access_key.s3.id
     s3_secret_key = aws_iam_access_key.s3.secret
+    # Placeholder — set the real OpenAI key out-of-band (ignore_changes keeps it):
+    #   aws secretsmanager put-secret-value --secret-id retailvision/openai-api-key \
+    #     --secret-string 'sk-...'
+    openai_api_key = "REPLACE_ME"
   }
 }
 

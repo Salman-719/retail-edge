@@ -1,0 +1,90 @@
+{{- if .Values.iep6.enabled }}
+# IEP6 — AI analytics agent (OpenAI). Read-only DB access + calls EEP for actions.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iep6-agent
+  namespace: retailvision
+  labels:
+    app: iep6-agent
+spec:
+  replicas: {{ .Values.iep6.replicas }}
+  selector:
+    matchLabels:
+      app: iep6-agent
+  template:
+    metadata:
+      labels:
+        app: iep6-agent
+    spec:
+      containers:
+        - name: iep6-agent
+          image: "{{ .Values.global.imageRegistry }}/iep6:{{ .Values.iep6.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8006
+              name: http
+          env:
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: postgres-password
+            # Read-only analytics connection (use a read-only role in hardening).
+            - name: DATABASE_URL_AGENT
+              value: "postgresql+asyncpg://{{ .Values.postgres.user }}:$(PG_PASSWORD)@{{ .Values.database.host }}:5432/{{ .Values.postgres.database }}"
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: redis-url
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: openai-api-key
+            - name: OPENAI_MODEL
+              value: {{ .Values.iep6.openaiModel | quote }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: jwt-secret
+            - name: EEP_BASE_URL
+              value: "http://eep-http:{{ .Values.eep.httpPort }}"
+            - name: ENABLE_RAW_SQL
+              value: {{ .Values.iep6.enableRawSql | quote }}
+            - name: ENABLE_EEP_ACTIONS
+              value: {{ .Values.iep6.enableEepActions | quote }}
+            - name: WINDOW_SECONDS
+              value: {{ .Values.windowSeconds | quote }}
+          resources: {{ toYaml .Values.iep6.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8006
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8006
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iep6
+  namespace: retailvision
+  labels:
+    app: iep6-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: iep6-agent
+  ports:
+    - name: http
+      port: 8006
+      targetPort: 8006
+{{- end }}
