@@ -11,9 +11,9 @@ bottom; do not skip.
 
 ### Architecture (what you are building)
 - **Cloud**: AWS-native **k3s on one EC2 instance** (Graviton, no EKS) running
-  EEP (API/gRPC), per-store IEP3, in-cluster Postgres + Redis, and the frontend.
-  One Elastic IP fronts everything via k3s ServiceLB. Object storage = S3.
-  Secrets = AWS Secrets Manager. TLS = cert-manager.
+  EEP (API/gRPC), per-store IEP3, **IEP6 (AI analytics agent, OpenAI)**, in-cluster
+  Postgres + Redis, and the frontend. One Elastic IP fronts everything via k3s
+  ServiceLB. Object storage = S3. Secrets = AWS Secrets Manager. TLS = cert-manager.
 - **Edge**: k3s on a Jetson per store (IEP1 ingest + YOLO/ReID GPU + per-camera
   IEP2), talking to the cloud EEP over TLS gRPC.
 - **No domain needed**: public hostnames are `app.<EIP>.nip.io` and
@@ -117,6 +117,18 @@ terraform output eep_host                # eep.<EIP>.nip.io
 terraform output -raw agent_secret       # save for edge devices (secret)
 ```
 
+### A4b. [LOCAL] Set the OpenAI API key (IEP6 agent)
+
+Terraform created a **placeholder** `retailvision/openai-api-key`. Set the real
+key so the IEP6 agent works (it's read via External Secrets after install):
+```bash
+aws secretsmanager put-secret-value --profile adsal --region eu-west-1 \
+  --secret-id retailvision/openai-api-key --secret-string 'sk-...'
+```
+> Skip only if you set `--set iep6.enabled=false` at install (no agent). The
+> raw-SQL and EEP-action tools are off by default (`iep6.enableRawSql`,
+> `iep6.enableEepActions`).
+
 ### A5. [LOCAL → SERVER] Wait for the server to finish bootstrapping
 
 ```bash
@@ -165,13 +177,15 @@ helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision
 k3s kubectl -n retailvision get pods
 ```
 **Expect** all `Running` / `1/1`: `postgres-0`, `redis-server-0`, `eep-…`,
-`frontend-…`. (No `iep3` yet — that's per-store, Part B.)
+`frontend-…`, `iep6-agent-…`. (No `iep3` yet — that's per-store, Part B.)
 
 ```bash
 k3s kubectl -n retailvision logs deploy/eep --tail=20
+# IEP6 agent — confirm it picked up the OpenAI key and is serving:
+curl -sk -o /dev/null -w "%{http_code}\n" "https://app.<EIP>.nip.io/api/agent/insights?store_id=test"   # 200
 ```
-**Expect:** `alembic … Running upgrade … 0003`, `Application startup complete`,
-`Uvicorn running on http://0.0.0.0:8000`, and `GET /health 200 OK` — **no**
+**Expect:** EEP log shows `alembic … Running upgrade … 0006`, `Application startup
+complete`, `Uvicorn running on http://0.0.0.0:8000`, `GET /health 200 OK` — **no**
 Postgres/Redis errors.
 
 ```bash
@@ -441,8 +455,8 @@ git fetch origin && git merge origin/reconfig-edge      # only if integrating br
 
 **2. [LOCAL] Bump the version (single source of truth) + build images**
 - Set the new tag in **`charts/retailvision/values.yaml`** (`eep.image.tag`,
-  `iep3.image.tag`, `frontend.image.tag`) and in the **`infra/edge/overlays/*`**
-  `newTag` values (iep1/yolo/reid). Commit + push.
+  `iep3.image.tag`, `frontend.image.tag`, `iep6.image.tag`) and in the
+  **`infra/edge/overlays/*`** `newTag` values (iep1/yolo/reid). Commit + push.
 - Trigger the image build:
   ```bash
   git tag v1.1.0 && git push origin v1.1.0     # CI builds all images + -cpu/-cuda variants
@@ -639,15 +653,6 @@ Terraform (`infra/aws/`):
 - cert-manager ClusterIssuers: Let's Encrypt (public ingress) + internal CA
   (edge↔EEP gRPC and Redis).
 
-### IEP6 (AI agent) — one manual prerequisite
-The IEP6 agent deploys with the chart (`iep6.enabled`, default on) and is exposed
-at `/api/agent`. Terraform creates a **placeholder** `retailvision/openai-api-key`
-secret; you must set the real key once (out-of-band), then IEP6 picks it up:
-```bash
-aws secretsmanager put-secret-value --profile adsal --region eu-west-1 \
-  --secret-id retailvision/openai-api-key --secret-string 'sk-...'
-k3s kubectl -n retailvision annotate externalsecret retailvision-secrets force-sync="$(date +%s)" --overwrite
-k3s kubectl -n retailvision rollout restart deploy/iep6-agent
-```
-Raw-SQL and EEP-action tools are **off by default** (`iep6.enableRawSql`,
-`iep6.enableEepActions`). See `docs/services/IEP6_AGENT.md`.
+- **IEP6 (AI agent)** deploys with the chart (`iep6.enabled`, default on) at
+  `/api/agent`; the only manual step is setting the OpenAI key — **Part A, step A4b**.
+  Contract + tools: `docs/services/IEP6_AGENT.md`.
