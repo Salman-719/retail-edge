@@ -425,12 +425,28 @@ cd infra/aws && export AWS_PROFILE=adsal && terraform destroy
 
 ---
 
-## Appendix — what the chart handles automatically
+## Appendix — what's automated (no manual steps on a fresh deploy)
 
-- Seeds Postgres from `schema.sql` (initdb ConfigMap); EEP self-migrates (Alembic).
+A from-scratch `terraform apply` + `helm install` applies all of the following
+automatically. The manual `put-secret-value` / `put-bucket-cors` commands in the
+troubleshooting section are **only** needed to repair a deployment whose resources
+were created *before* these fixes existed.
+
+Helm chart:
+- Seeds Postgres from `schema.sql` (initdb ConfigMap); EEP self-migrates (Alembic)
+  using `ALEMBIC_DATABASE_URL` (direct to Postgres).
 - EEP/IEP3 connect **directly** to Postgres (pgbouncer optional, off in prod).
-- Redis TLS via internal-CA cert; clients use `?ssl_cert_reqs=none`.
-- External Secrets syncs `retailvision/*` from AWS Secrets Manager via the node
-  IAM role (S3 uses a dedicated IAM user's keys).
-- cert-manager issues the public ingress cert (Let's Encrypt) and the edge↔EEP
-  gRPC cert (internal CA). Lean single-node profile fits a 2-vCPU t4g.large.
+- Redis TLS via internal-CA cert (`redis-certificate.yaml`); clients use
+  `?ssl_cert_reqs=none`.
+- S3 endpoint derived from region (`https://s3.<region>.amazonaws.com`) — never an
+  empty endpoint.
+- Lean single-node profile (single replicas, valid k8s quantities) fits a 2-vCPU
+  t4g.large. No chart-managed namespace (so `--create-namespace` is clean).
+
+Terraform (`infra/aws/`):
+- **S3 bucket CORS** (GET/HEAD, any origin) so the SPA renders images in-page.
+- Secrets Manager seeded with generated passwords + `redis-url` already containing
+  `?ssl_cert_reqs=none` + the dedicated S3 IAM user's keys.
+- External Secrets syncs `retailvision/*` via the node IAM role.
+- cert-manager ClusterIssuers: Let's Encrypt (public ingress) + internal CA
+  (edge↔EEP gRPC and Redis).
