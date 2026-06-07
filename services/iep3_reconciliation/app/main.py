@@ -22,6 +22,7 @@ import redis.asyncio as aioredis
 
 from app.coordinator import BatchCoordinator, check_pel_health
 from app.db import close_pool, create_pool, get_pool
+from app.metrics import start_metrics_server
 from app.reconciler import Reconciler
 from app.repository import Iep3Repository
 from app.settings import get_settings
@@ -78,6 +79,12 @@ async def _main() -> None:
         settings.database_url_server.split("@")[-1].split("/")[0],
         settings.server_redis_url,
     )
+
+    # ── Metrics server ────────────────────────────────────────────────────────
+    # Exposes /metrics on :9300 (own background thread). Started early so the
+    # target is UP even while the daemon waits for its first batch.
+    start_metrics_server(9300)
+    logger.info("Prometheus metrics server started on :9300")
 
     # ── Infrastructure ────────────────────────────────────────────────────────
     pool = await create_pool(settings.database_url_server)

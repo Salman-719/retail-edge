@@ -246,7 +246,7 @@ services:
     ports:
       - "50052:50052"
     expose:
-      - "9400"            # Prometheus /metrics (job "yolo")
+      - "9400"            # Prometheus /metrics (job "detector")
     restart: on-failure
 
   # ── ReID embedding service (resnet50_msmt17) ─────────────────────────────────

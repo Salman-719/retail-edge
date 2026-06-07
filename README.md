@@ -914,6 +914,45 @@ systemctl restart retailvision-edge-agent
 
 ## Monitoring & Logs
 
+### Metrics & Dashboards (Prometheus + Grafana)
+
+The stack ships with live monitoring. Prometheus scrapes a `/metrics` endpoint on
+each instrumented service and the redis/postgres/node exporters; Grafana renders
+provisioned dashboards from those metrics. Everything is configured from files under
+[`monitoring/`](monitoring/) — no manual setup or clicking required.
+
+**Viewing the live dashboards:**
+
+1. From `retail-edge/`, start the stack including monitoring (the monitoring
+   containers come up with the normal `up`):
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+   ```
+2. Open **Grafana → http://localhost:3001** (user `admin`, password from `.env`
+   `GRAFANA_PASSWORD`, default `retailvision_dev`).
+3. Left sidebar → **Dashboards → RetailVision** → open any of:
+   - **Stream Health** — Redis stream depth (IEP1→IEP2→IEP3 flow), connected clients,
+     EEP request rate.
+   - **Reconciliation & Identities** — IEP3 batches, cross-camera link rate, reconcile
+     p95, identity transitions.
+   - **Inference Latency** — YOLO inference p50/p95, frames & detections per second,
+     batch size.
+4. Graphs update live while the pipeline runs. Pipeline-specific panels (stream depth,
+   IEP3, YOLO) show data once cameras are streaming; EEP/Redis/host panels show data
+   immediately. Use the time-range picker (top right) to zoom.
+
+**Raw metrics & alerts (Prometheus):** **http://localhost:9090**
+
+- `/targets` — scrape health of every service (all should be **UP**).
+- `/graph` — run raw PromQL (e.g. `redis_connected_clients`, `rate(detector_frames_total[5m])`).
+- `/rules` and `/alerts` — RetailVision alert rules (`NoFramesFlowing`,
+  `RedisStreamBacklog`, `IEP3ReconcileSlow`, `TargetDown`). `NoFramesFlowing` fires
+  when the pipeline isn't producing frames and clears automatically once it is.
+
+Config lives in [`monitoring/prometheus.yml`](monitoring/prometheus.yml),
+[`monitoring/alert_rules.yml`](monitoring/alert_rules.yml), and
+[`monitoring/grafana/provisioning/`](monitoring/grafana/provisioning/).
+
 ### Service logs
 
 ```bash

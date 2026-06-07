@@ -124,6 +124,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RetailVision EEP", lifespan=lifespan)
 
+# Prometheus metrics: exposes GET /metrics with request count, latency histogram,
+# and error rate. Scraped by Prometheus (job "eep") — see monitoring/prometheus.yml.
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
