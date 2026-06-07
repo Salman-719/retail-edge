@@ -638,3 +638,16 @@ Terraform (`infra/aws/`):
 - External Secrets syncs `retailvision/*` via the node IAM role.
 - cert-manager ClusterIssuers: Let's Encrypt (public ingress) + internal CA
   (edge↔EEP gRPC and Redis).
+
+### IEP6 (AI agent) — one manual prerequisite
+The IEP6 agent deploys with the chart (`iep6.enabled`, default on) and is exposed
+at `/api/agent`. Terraform creates a **placeholder** `retailvision/openai-api-key`
+secret; you must set the real key once (out-of-band), then IEP6 picks it up:
+```bash
+aws secretsmanager put-secret-value --profile adsal --region eu-west-1 \
+  --secret-id retailvision/openai-api-key --secret-string 'sk-...'
+k3s kubectl -n retailvision annotate externalsecret retailvision-secrets force-sync="$(date +%s)" --overwrite
+k3s kubectl -n retailvision rollout restart deploy/iep6-agent
+```
+Raw-SQL and EEP-action tools are **off by default** (`iep6.enableRawSql`,
+`iep6.enableEepActions`). See `docs/services/IEP6_AGENT.md`.
