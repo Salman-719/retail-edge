@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import uuid
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
 from app.core.config import settings
+from app.core import iep3_manager
 from app.grpc_generated import agent_pb2
 from app.grpc_server import registry
 from app.models.camera_runtime_session import CameraRuntimeSession
@@ -309,6 +311,9 @@ async def activate_version_now(
                 """),
                 {"id": uuid.UUID(new_version_id), "now": now},
             )
+
+    # Step 3.5 — ensure IEP3 StatefulSet exists for this store (idempotent).
+    await asyncio.get_event_loop().run_in_executor(None, iep3_manager.apply_iep3, store_id)
 
     # Step 4 — restart cameras using the new version's camera configs.
     started_config_ids: list[str] = []

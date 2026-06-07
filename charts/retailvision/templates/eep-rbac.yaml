@@ -1,0 +1,33 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eep
+  namespace: retailvision
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: eep-iep3-manager
+  namespace: retailvision
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: eep-iep3-manager
+  namespace: retailvision
+subjects:
+  - kind: ServiceAccount
+    name: eep
+    namespace: retailvision
+roleRef:
+  kind: Role
+  name: eep-iep3-manager
+  apiGroup: rbac.authorization.k8s.io

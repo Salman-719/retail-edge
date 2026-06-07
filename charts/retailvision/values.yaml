@@ -21,7 +21,11 @@ eep:
 iep3:
   image:
     tag: "1.0.0"
-  stores: []   # populated per environment: ["store-uuid-1", "store-uuid-2"]
+  # staticProvisioning: when false (default), EEP provisions IEP3 StatefulSets
+  # dynamically via iep3_manager.py on store version activation. Set to true
+  # only as an emergency escape hatch (requires iep3.stores to be populated).
+  staticProvisioning: false
+  stores: []
   resources:
     requests:
       cpu: "200m"

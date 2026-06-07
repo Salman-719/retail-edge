@@ -26,3 +26,6 @@ psycopg2-binary==2.9.9
 # per-camera IEP2 containers via the host docker.sock. Not used in production
 # (k3s + Edge Agent manage IEP2 there).
 docker==7.1.0
+# Kubernetes Python client — used by iep3_manager to provision IEP3 StatefulSets
+# in the cloud cluster when a store version is activated. Not used in DEBUG_MODE.
+kubernetes>=29.0.0

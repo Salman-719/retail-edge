@@ -104,6 +104,11 @@ async def lifespan(app: FastAPI):
     # Step 6: start schedule evaluator.
     start_scheduler()
 
+    # Step 7: initialise k8s clients for IEP3 StatefulSet provisioning.
+    # Gracefully no-ops when running on the laptop (no cluster available).
+    from app.core.iep3_manager import init_k8s_clients
+    await asyncio.get_running_loop().run_in_executor(None, init_k8s_clients)
+
     # Non-blocking background tasks — failures here do not block startup.
     try:
         from app.core.s3_client import ensure_bucket
