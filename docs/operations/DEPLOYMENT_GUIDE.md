@@ -447,7 +447,11 @@ git fetch origin && git merge origin/reconfig-edge      # only if integrating br
   ```bash
   git tag v1.1.0 && git push origin v1.1.0     # CI builds all images + -cpu/-cuda variants
   ```
-  Wait for **Actions** green; ensure any new packages are **Public**.
+  > ⚠️ **Wait for ALL matrix jobs to go green before deploying.** Each service is a
+  > separate job; deploying while (say) the `eep` job is still running causes
+  > `ImagePullBackOff` on that image. Verify the tag exists per image in
+  > **Packages**, and set any **newly-created** packages (e.g. `yolo`/`reid`
+  > `-cpu`/`-cuda`) to **Public** — new GHCR packages default to **private**.
 
 **3. [SERVER] Roll out the cloud** (EEP self-applies new Alembic migrations)
 ```bash
@@ -558,6 +562,7 @@ sudo systemctl restart retailvision-edge-agent
 | zsh `command not found: --flag` | multi-line paste mangled | paste **one line** at a time |
 | `helm ... namespaces "retailvision" not found` on first try | namespace race | include `--create-namespace` (step A7) |
 | Pod `ImagePullBackOff` | build not green or package private | A3: build green + set `eep`/`iep3`/`frontend` **Public**; verify `k3s crictl pull` |
+| `ImagePullBackOff` on a **freshly-tagged** image (e.g. `eep:1.1.0`) right after a release | that service's CI job hasn't finished (or failed); other images already pushed | wait for **all** matrix jobs green (check per-image tag in Packages); then `k3s kubectl -n retailvision delete pod -l app=<svc>` to retry. Confirm which tags exist: `curl -s "https://ghcr.io/token?scope=repository:<owner>/retailvision/<svc>:pull&service=ghcr.io"` then query `/v2/.../tags/list` |
 | Pod `Pending` "Insufficient cpu" | node too small | add `agent_count` or bigger `server_instance_type` (D3) |
 | `relation "tracking_history" does not exist` | Postgres volume not freshly seeded | clean reinstall below (needs an **empty** PVC) |
 | `password authentication failed` | stale Postgres volume from an earlier password | clean reinstall below |
