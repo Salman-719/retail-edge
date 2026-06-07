@@ -197,10 +197,24 @@ first user. **Cloud is done.**
 
 Do this once per store.
 
-### B1. [LOCAL] Create the store record
+### B1. Create the store record and get its UUID
 
-In the web UI: create the store, then copy its **UUID**. (Or `POST /api/stores`
-— see the Postman collections in the repo root.)
+**[LOCAL]** In the web UI, create the store (you'll give it a name; the system
+also assigns a URL **slug**, e.g. `ali-salman`). The UI does **not** show the
+UUID, so retrieve it one of these ways:
+
+**Method 1 — query the database (definitive). [SERVER]:**
+```bash
+k3s kubectl -n retailvision exec -it postgres-0 -- psql -U retailvision -d retailvision -c "SELECT id, name, slug, created_at FROM stores ORDER BY created_at DESC;"
+```
+The **`id`** column is the UUID (e.g. `3f2a…-…`). The newest row is at the top.
+
+**Method 2 — browser DevTools. [LOCAL]:** open DevTools → **Network**, reload the
+store page, click the `GET /api/store/<slug>/...` (or `GET /api/stores`) request →
+**Response** → copy the `"id"` field.
+
+> Note: store **URLs use the slug** (`/api/store/ali-salman/...`), but
+> `iep3.stores` in Helm needs the **UUID** from above.
 
 ### B2. [SERVER] Start that store's IEP3 worker
 
