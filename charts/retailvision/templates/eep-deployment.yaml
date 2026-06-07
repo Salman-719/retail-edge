@@ -63,9 +63,11 @@ spec:
                 secretKeyRef:
                   name: retailvision-secrets
                   key: redis-url
-            # ── S3 / object storage (real AWS S3; empty endpoint -> AWS default) ──
+            # ── S3 / object storage ──
+            # boto3 rejects an empty endpoint_url, so when s3.endpointUrl is blank
+            # (real AWS) derive the regional endpoint. Set s3.endpointUrl for MinIO.
             - name: S3_ENDPOINT_URL
-              value: {{ .Values.s3.endpointUrl | quote }}
+              value: {{ .Values.s3.endpointUrl | default (printf "https://s3.%s.amazonaws.com" .Values.s3.region) | quote }}
             - name: S3_PUBLIC_URL
               value: {{ .Values.s3.publicUrl | quote }}
             - name: S3_BUCKET
