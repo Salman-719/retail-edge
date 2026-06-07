@@ -21,8 +21,12 @@ services:
     build:
       args:
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
+        INSTALL_TRT: "false"
     environment:
-      INFERENCE_DEVICE: "gpu"      # warm up + default to GPU; toggle still overrides per run
+      INFERENCE_DEVICE: "gpu"
+      YOLO_MAX_BATCH_SIZE: "16"
+      YOLO_BATCH_TIMEOUT_MS: "200"
+      EXPORT_TRT: "false"          # TRT 11 does not support Pascal (GTX 1060 SM 6.1)
     deploy:
       resources:
         reservations:

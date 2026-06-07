@@ -100,14 +100,16 @@ YOLO_INPUT_SOCK       = os.environ.get("YOLO_INPUT_SOCK",        "ipc:///tmp/soc
 YOLO_HEALTH_UNIX_SOCK = os.environ.get("YOLO_HEALTH_SOCK",       "unix:///tmp/sockets/yolo_health.sock")
 YOLO_HEALTH_TCP_ADDR  = os.environ.get("YOLO_HEALTH_TCP_ADDR",   "[::]:50052")
 
-# Dev detector model. Default YOLO11n (light, fast on CPU). Loader class is
-# chosen by filename (rtdetr-*.pt → RTDETR, else YOLO). Confidence threshold 0.5.
-DETECTOR_MODEL        = os.environ.get("DETECTOR_MODEL",         "rtdetr-x.pt")
+# Dev detector model. Loader class is chosen by filename:
+# yolo11*.pt → YOLO; rtdetr-*.pt → RTDETR; *.engine → TensorRT.
+DETECTOR_MODEL        = os.environ.get("DETECTOR_MODEL",         "yolo11n.pt")
 YOLO_CONF_THRESHOLD   = float(os.environ.get("YOLO_CONF",        "0.5"))
 YOLO_IOU_THRESHOLD    = float(os.environ.get("YOLO_IOU",         "0.45"))
-# Smaller defaults on CPU — ultralytics batching on CPU is slower than TRT.
+# Smaller defaults on CPU — increase via GPU overlay.
 MAX_BATCH_SIZE        = int(os.environ.get("YOLO_MAX_BATCH_SIZE", "4"))
 BATCH_TIMEOUT_MS      = float(os.environ.get("YOLO_BATCH_TIMEOUT_MS", "500"))
+# TRT lazy-compile: set EXPORT_TRT=true to auto-export .pt → .engine on first GPU run.
+EXPORT_TRT            = os.environ.get("EXPORT_TRT", "false").lower() == "true"
 
 # ── Per-camera result sockets ─────────────────────────────────────────────────
 _result_sockets: dict[str, zmq.asyncio.Socket] = {}
@@ -129,14 +131,47 @@ def _get_result_socket(ctx: zmq.asyncio.Context, camera_id: str) -> zmq.asyncio.
 # ── Model loading ──────────────────────────────────────────────────────────────
 
 def _load_model(model_file: str):
-    """Load an ultralytics detector. Picks the loader class by filename:
-    rtdetr-*.pt → RTDETR (NMS-free transformer); everything else → YOLO."""
+    """Load an ultralytics detector. Picks loader by filename.
+
+    TRT lazy-compile: if EXPORT_TRT=true and running on GPU, converts the .pt
+    to a TensorRT .engine on first run (~5 min), then loads the engine on every
+    subsequent start. Requires the image to be built with INSTALL_TRT=true.
+    """
+    device = _state.get("device", "cpu")
+    base   = os.path.basename(model_file).lower()
+
+    # ── TensorRT lazy-compile ─────────────────────────────────────────────────
+    if EXPORT_TRT and device != "cpu" and model_file.endswith(".pt"):
+        engine_file = os.path.splitext(model_file)[0] + ".engine"
+        if os.path.exists(engine_file):
+            log.info("TensorRT engine found — loading %s", engine_file)
+            model_file = engine_file
+            base       = os.path.basename(model_file).lower()
+        else:
+            try:
+                import tensorrt  # type: ignore[import-untyped]  # noqa: F401
+                from ultralytics import RTDETR, YOLO  # type: ignore[import-untyped]  # noqa: F811
+                log.info(
+                    "Exporting %s → TensorRT engine (first-run, ~5 min)…", model_file
+                )
+                _Loader = RTDETR if base.startswith("rtdetr") else YOLO
+                _Loader(model_file).export(format="engine", half=True, imgsz=640, device=0)
+                model_file = engine_file
+                base       = os.path.basename(model_file).lower()
+                log.info("TensorRT engine ready: %s", engine_file)
+            except ImportError:
+                log.warning(
+                    "tensorrt not installed — skipping TRT export. "
+                    "Rebuild with INSTALL_TRT=true in docker-compose.gpu.yml to enable."
+                )
+
     if not os.path.exists(model_file):
         raise FileNotFoundError(
-            f".pt model not found: {model_file}. "
-            "Ensure the weights are baked into the image by Dockerfile.dev."
+            f"Model not found: {model_file}. "
+            "Ensure weights are baked into the image by Dockerfile.dev."
         )
-    if os.path.basename(model_file).lower().startswith("rtdetr"):
+
+    if base.startswith("rtdetr"):
         from ultralytics import RTDETR as _Model
         family = "RT-DETR"
     else:
@@ -171,6 +206,7 @@ def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
         conf=YOLO_CONF_THRESHOLD,
         iou=YOLO_IOU_THRESHOLD,
         device=_state["device"],
+        half=_state["device"] != "cpu",
     )
     responses = []
     for item, result in zip(batch_items, results):

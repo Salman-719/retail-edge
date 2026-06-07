@@ -276,7 +276,7 @@ services:
       dockerfile: Dockerfile
     environment:
       <<: *shared-config
-      STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
+      # STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
       # EXPECTED_CAMERAS removed — IEP3 now reads expected camera count from DB
       COORDINATOR_TIMEOUT_S: ${COORDINATOR_TIMEOUT_S:-120}
       REID_THRESHOLD: ${REID_THRESHOLD:-0.85}

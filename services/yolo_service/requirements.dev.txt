@@ -1,6 +1,6 @@
 # CPU dev requirements — torch pre-installed in Dockerfile.dev with CPU index URL.
 # Do NOT add torch or torchvision here; they are already installed before this file.
-ultralytics==8.3.0   # RT-DETR support (rtdetr-x.pt) — 8.1.x only ships YOLOv8
+ultralytics==8.3.0   # YOLO11 support — 8.1.x only ships YOLOv8
 pyzmq==25.1.2
 msgpack==1.0.8
 numpy==1.26.4

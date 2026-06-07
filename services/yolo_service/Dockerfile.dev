@@ -24,12 +24,20 @@ RUN pip install --no-cache-dir \
 COPY services/yolo_service/requirements.dev.txt requirements.dev.txt
 RUN pip install --no-cache-dir -r requirements.dev.txt
 
+# TensorRT — only installed in GPU builds (INSTALL_TRT=true set by docker-compose.gpu.yml).
+# The engine is generated at container startup on first run, not at build time,
+# because TRT engines are hardware-specific and cannot be pre-compiled portably.
+ARG INSTALL_TRT=false
+RUN if [ "$INSTALL_TRT" = "true" ]; then \
+    pip install --no-cache-dir tensorrt-cu12; \
+fi
+
 # Copy service source — mirrors the module path services.yolo_service.*
 COPY services/yolo_service/ services/yolo_service/
 RUN touch services/__init__.py
 
-# Bake in RT-DETR-x weights so the container needs no internet access at runtime.
-# ultralytics downloads rtdetr-x.pt into the CWD (/workspace) on first reference.
-RUN python -c "from ultralytics import RTDETR; RTDETR('rtdetr-x.pt')"
+# Bake in YOLO11n weights so the container needs no internet access at runtime.
+# ultralytics downloads yolo11n.pt into the CWD (/workspace) on first reference.
+RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
 
 CMD ["python", "-m", "services.yolo_service.service_dev"]

@@ -31,15 +31,14 @@ services:
 
   yolo-service:
     build:
-      # Context is repo root so Dockerfile.dev can bake the RT-DETR weights.
+      # Context is repo root so Dockerfile.dev can bake the YOLO11n weights.
       context: .
       dockerfile: services/yolo_service/Dockerfile.dev
     environment:
       # Dev detector: YOLO11n at confidence 0.5.
-      DETECTOR_MODEL: "rtdetr-x.pt"
+      DETECTOR_MODEL: "yolo11n.pt"
       YOLO_CONF: "0.5"
       # Smaller batches and longer timeout suit single-thread CPU inference.
-      # RT-DETR-x is much heavier than YOLOv8n on CPU — keep batch small.
       YOLO_MAX_BATCH_SIZE: "2"
       YOLO_BATCH_TIMEOUT_MS: "500"
       # Device selection: reads the dev-screen CPU/GPU toggle from this Redis,
