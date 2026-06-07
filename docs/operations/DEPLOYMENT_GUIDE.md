@@ -302,13 +302,20 @@ Save the CA you copied in C1:
 sudo mkdir -p /etc/retailvision/certs
 sudo tee /etc/retailvision/certs/ca.crt >/dev/null   # paste the PEM block, then press Ctrl-D
 ```
-Set variables (your EIP, the store UUID, the agent secret from C1; add GHCR creds
-only if the images are private):
+Set variables:
 ```bash
-export EIP=34.248.161.113
-export STORE=70ed5b0c-6c56-43ac-a9e0-a3a81d0db52f
-export AGENT_SECRET='paste-agent-secret-here'
-# export GHCR_USER=<github-user> GHCR_TOKEN=<PAT-with-read:packages>   # private images only
+export EIP=34.248.161.113                            # server Elastic IP (terraform output server_public_ip)
+export STORE=70ed5b0c-6c56-43ac-a9e0-a3a81d0db52f   # the store UUID from Part B
+
+# AGENT_SECRET = shared token the Edge Agent sends to authenticate to EEP.
+# REQUIRED, same for every edge. Get the value with:  terraform output -raw agent_secret
+export AGENT_SECRET='paste-the-value-from-terraform-output'
+```
+GHCR credentials are **only needed if your image packages are PRIVATE**. If you
+made them Public in Part A (A3), skip this. Otherwise uncomment and fill in:
+```bash
+# export GHCR_USER=salman-719          # your GitHub username
+# export GHCR_TOKEN=ghp_xxxxxxxxxxxx   # GitHub Personal Access Token, scope: read:packages
 ```
 Run the bootstrap (installs k3s + NVIDIA plugin + edge manifests + the Edge Agent
 systemd service):
