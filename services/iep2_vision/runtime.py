@@ -902,12 +902,11 @@ async def run_daemon(settings) -> None:
                     frame_count += 1
 
                 # ── Strict batch-close order: centroids → batch_complete → XACK → cleanup ──
-                fake_settings = type("_S", (), {
-                    "camera_id": settings.camera_id,
-                    "store_id":  settings.store_id,
-                })()
-                rt = _DaemonBatchHelper(fake_settings)
-                await rt._flush_centroids_daemon(manager, persistence, manifest.get("batch_number", 0))
+                await _flush_centroids_daemon(
+                    manager, persistence,
+                    settings.camera_id, settings.store_id,
+                    manifest.get("batch_number", 0),
+                )
 
                 await server_redis.xadd(
                     "stream:iep2:batch_complete",
@@ -953,28 +952,35 @@ async def run_daemon(settings) -> None:
             sync_redis.close()
 
 
-class _DaemonBatchHelper:
-    """Thin adapter so flush_centroids can reuse IEP2Runtime's method."""
-    def __init__(self, settings):
-        self.settings = settings
+async def _flush_centroids_daemon(
+    manager,
+    persistence,
+    camera_id: str,
+    store_id: str,
+    batch_number: int,
+) -> None:
+    """UPSERT active embedding heaps at daemon batch-close (embeddings → batch_complete → XACK order).
 
-    async def _flush_centroids_daemon(self, manager, persistence, batch_number):
-        active = manager.get_active_embeddings_packed()
-        if not active:
-            return
-        records = [
-            {
-                "local_id":         str(uuid.UUID(int=lid)),
-                "camera_id":        self.settings.camera_id,
-                "store_id":         self.settings.store_id,
-                "embeddings":       embeddings_bytes,
-                "embedding_count":  count,
-                "quality_scores":   quality_bytes,
-                "updated_at_batch": batch_number,
-            }
-            for lid, (embeddings_bytes, count, quality_bytes) in active.items()
-        ]
-        await persistence.upsert_local_centroids(records)
+    Module-level form (from employee-detection) carrying the new packed-embedding
+    format (embeddings/embedding_count/quality_scores) — the old single `centroid`
+    column was dropped by migration 0013_embedding_store.
+    """
+    active = manager.get_active_embeddings_packed()
+    if not active:
+        return
+    records = [
+        {
+            "local_id":         str(uuid.UUID(int=lid)),
+            "camera_id":        camera_id,
+            "store_id":         store_id,
+            "embeddings":       embeddings_bytes,
+            "embedding_count":  count,
+            "quality_scores":   quality_bytes,
+            "updated_at_batch": batch_number,
+        }
+        for lid, (embeddings_bytes, count, quality_bytes) in active.items()
+    ]
+    await persistence.upsert_local_centroids(records)
 
 
 # ---------------------------------------------------------------------------

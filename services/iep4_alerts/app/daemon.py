@@ -63,6 +63,7 @@ class AlertDaemon:
                 last_seen_at=int(r["last_seen_at"]),
                 last_batch_number=int(r["last_batch_number"]),
                 is_employee=bool(r["is_employee"]),
+                employee_id=r["employee_id"],
                 entered_zone_batch=int(r["last_batch_number"]),
             )
             for r in rows

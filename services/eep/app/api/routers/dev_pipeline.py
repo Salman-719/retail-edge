@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, AsyncSessionLocal
 from app.core import dev_orchestrator as orch
+from app.schemas.punch import DevPunchRequest
 
 log = logging.getLogger(__name__)
 
@@ -301,6 +302,41 @@ async def shift_close(body: ShiftCloseRequest):
     shift_end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     await shift_closer.close_shift_and_run_iep5(body.store_id, shift_date, shift_end_ms)
     return {"status": "closed", "store_id": body.store_id, "shift_date": shift_date.isoformat()}
+
+
+@router.post("/punch")
+async def dev_punch(body: DevPunchRequest):
+    """DEBUG manual trigger: simulate an employee punching in at the store's punch
+    machine. Inserts a pending punch_events row (source='simulated'); the EEP
+    punch_resolver links it to a global_id. Stands in for real punch hardware."""
+    import uuid as _uuid
+
+    from app.core.punch_ingest import create_punch_event, to_epoch_ms
+
+    punched_at_ms = to_epoch_ms(body.at)
+    async with AsyncSessionLocal() as db:
+        # Validate the employee belongs to the store (dev-grade check).
+        emp = (await db.execute(
+            text("SELECT id FROM employees WHERE id = :eid AND store_id = :sid"),
+            {"eid": _uuid.UUID(str(body.employee_id)), "sid": _uuid.UUID(str(body.store_id))},
+        )).first()
+        if emp is None:
+            raise HTTPException(status_code=404, detail={"error": "Employee not in store", "code": "EMPLOYEE_NOT_FOUND"})
+        ev = await create_punch_event(
+            db,
+            store_id=_uuid.UUID(str(body.store_id)),
+            employee_id=_uuid.UUID(str(body.employee_id)),
+            punched_at_ms=punched_at_ms,
+            source="simulated",
+        )
+    return {
+        "id": str(ev.id),
+        "store_id": str(ev.store_id),
+        "employee_id": str(ev.employee_id),
+        "punched_at_ms": ev.punched_at_ms,
+        "source": ev.source,
+        "status": ev.status,
+    }
 
 
 @router.get("/tracking")

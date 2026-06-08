@@ -65,6 +65,7 @@ def compute_states(
             last_seen_at=last.timestamp_ms,
             last_batch_number=last.batch_number,
             is_employee=last.is_employee,
+            employee_id=last.employee_id,
             entered_zone_batch=entered_batch,
         )
     return states
@@ -85,6 +86,7 @@ class PersonStateManager:
                 s.last_seen_at,
                 s.last_batch_number,
                 s.is_employee,
+                s.employee_id,
             )
             for s in states.values()
         ]

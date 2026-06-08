@@ -809,16 +809,72 @@ CREATE TABLE IF NOT EXISTS global_identities (
                    CHECK (state IN ('active', 'lost', 'exited')),
     lost_since_ts  BIGINT,
     entry_zone_id  UUID             REFERENCES zones(id) ON DELETE SET NULL,
-    exit_zone_id   UUID             REFERENCES zones(id) ON DELETE SET NULL
+    exit_zone_id   UUID             REFERENCES zones(id) ON DELETE SET NULL,
+    -- Employee linking (specs/employee-linking). is_employee is read by IEP4's
+    -- GET_DELTA; employee_id is the specific punch-in link. Both set by the EEP
+    -- punch_resolver. (Migration 0013 mirrors this for existing databases.)
+    is_employee    BOOLEAN          NOT NULL DEFAULT FALSE,
+    employee_id    UUID             REFERENCES employees(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_global_identities_store_state
     ON global_identities(store_id, state);
 
+CREATE INDEX IF NOT EXISTS idx_global_identities_employee
+    ON global_identities(employee_id) WHERE employee_id IS NOT NULL;
+
 -- Partial index: only index lost rows for the lost-timeout sweep query.
 CREATE INDEX IF NOT EXISTS idx_global_identities_lost
     ON global_identities(state, lost_since_ts)
     WHERE state = 'lost';
+
+-- ── Employee linking (specs/employee-linking) ────────────────────────────────
+-- Defined here (after global_identities) because punch_events FK-references it.
+-- Migration 0013 mirrors these for existing databases.
+
+-- punch_in_stations — one per config version: the camera that sees the punch
+-- machine and the machine's floor position (world metres) + match radius.
+CREATE TABLE IF NOT EXISTS punch_in_stations (
+    id               UUID             PRIMARY KEY DEFAULT gen_random_uuid(),
+    version_id       UUID             NOT NULL
+                     REFERENCES store_config_versions(id) ON DELETE CASCADE,
+    store_id         UUID             NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    camera_config_id UUID             NOT NULL
+                     REFERENCES camera_configs(id) ON DELETE CASCADE,
+    world_x          DOUBLE PRECISION NOT NULL,
+    world_y          DOUBLE PRECISION NOT NULL,
+    radius_m         DOUBLE PRECISION NOT NULL DEFAULT 1.5,
+    created_at       TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    CONSTRAINT uq_punch_station_per_version UNIQUE (version_id),
+    CONSTRAINT positive_radius CHECK (radius_m > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_punch_stations_version
+    ON punch_in_stations(version_id);
+
+-- punch_events — ingested punch-in records; resolved by the EEP punch_resolver.
+CREATE TABLE IF NOT EXISTS punch_events (
+    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    employee_id      UUID        NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    punched_at_ms    BIGINT      NOT NULL,
+    source           VARCHAR(20) NOT NULL DEFAULT 'device'
+                     CHECK (source IN ('device', 'simulated')),
+    status           VARCHAR(20) NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending', 'linked', 'unmatched', 'expired')),
+    linked_global_id UUID        REFERENCES global_identities(global_id) ON DELETE SET NULL,
+    match_distance_m DOUBLE PRECISION,
+    attempts         INTEGER     NOT NULL DEFAULT 0,
+    last_attempt_at  TIMESTAMPTZ,
+    resolved_at      TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_punch_events_pending
+    ON punch_events(store_id, punched_at_ms) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_punch_events_employee
+    ON punch_events(employee_id, punched_at_ms DESC);
 
 -- 5. global_local_mapping — maps per-camera LocalIDs to GlobalIDs.
 --    All timestamps are epoch ms. Partial unique index enforces one active

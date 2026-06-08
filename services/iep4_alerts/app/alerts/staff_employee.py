@@ -1,15 +1,12 @@
 """staff_absence_employee evaluator.
 
-Condition met when the targeted employee has not been seen for
-threshold_minutes (or is absent entirely). When only_during_shift is TRUE and
-the employee has no shift_instance with status='active' covering now, the rule
-is SKIPPED (returns None) — never read employees.is_on_shift.
+Condition met when the targeted employee has not been seen for threshold_minutes
+(or is absent entirely). When only_during_shift is TRUE and the employee has no
+shift_instance with status='active' covering now, the rule is SKIPPED.
 
-LIMITATION: the schema has no employee_id <-> global_id link (the Employee
-ReID flow that would populate it is not implemented). So presence is derived
-from the most recently seen *employee* (global_identities.is_employee = TRUE),
-not the specific rule.employee_id. Until the ReID linkage exists this rule
-reflects "any staff member" presence. Documented as a known deviation.
+Presence is looked up via active_person_state.employee_id when rule.employee_id
+is set (specific employee, requires the punch-in link to have fired for that
+person). Falls back to any-staff presence when rule.employee_id is None.
 """
 from __future__ import annotations
 
@@ -24,7 +21,10 @@ async def evaluate(repo, rule: AlertRule, now_ms: int):
             return None  # skip this rule entirely this cycle
 
     threshold_ms = rule.threshold_minutes * 60_000
-    last_seen = await repo.latest_employee_presence()
+    if rule.employee_id is not None:
+        last_seen = await repo.latest_presence_for_employee(rule.employee_id)
+    else:
+        last_seen = await repo.latest_employee_presence()
     condition_met = last_seen is None or (now_ms - last_seen) >= threshold_ms
 
     minutes_absent = None if last_seen is None else round((now_ms - last_seen) / 60_000, 1)
