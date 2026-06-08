@@ -71,7 +71,7 @@ def _make_settings(store_id: str) -> Iep3Settings:
         store_id=store_id,
         expected_cameras=frozenset([CAM_01, CAM_02, CAM_03]),
         coordinator_timeout_s=120.0,
-        reid_threshold=0.85,
+        reid_threshold=0.75,
         max_speed_mps=1.5,
         embedding_dim=2048,
         selection_weight_area=0.7,

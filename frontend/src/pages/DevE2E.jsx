@@ -214,6 +214,14 @@ function CameraPanel({ title, cameraId, cameraName, running, zones, frameUrl }) 
   // Derive inZone flag for TrackMap
   const trackRows = rows.map(r => ({ ...r, inZone: !!r.zone_id }))
 
+  // Table is ordered by frame number descending (newest frame first); sort
+  // defensively here too so it's always frame-ordered.
+  const sortedRows = [...rows].sort(
+    (a, b) =>
+      ((b.frame_number ?? 0) - (a.frame_number ?? 0)) ||
+      ((b.timestamp_ms ?? 0) - (a.timestamp_ms ?? 0))
+  )
+
   const renderItem = useCallback((data) => {
     const dets = Array.isArray(data.detections) ? data.detections : []
     setDetections(dets)
@@ -228,8 +236,10 @@ function CameraPanel({ title, cameraId, cameraName, running, zones, frameUrl }) 
         // bounding box
         ctx.strokeStyle = d.local_id ? '#22c55e' : '#f59e0b'
         ctx.strokeRect(d.x1, d.y1, d.x2 - d.x1, d.y2 - d.y1)
-        // label
-        const label = d.local_id ? `ID ${localNumRef.current(d.local_id)}` : 'pending'
+        // label — append the lost-pool ReID cosine similarity when present
+        // (✓ matched / ✗ minted new) so re-identification can be debugged.
+        let label = d.local_id ? `ID ${localNumRef.current(d.local_id)}` : 'pending'
+        if (d.reid_sim != null) label += ` ${d.reid_sim.toFixed(3)}${d.reid_matched ? '✓' : '✗'}`
         const tw = ctx.measureText(label).width
         const ly = d.y1 > 16 ? d.y1 - 4 : d.y2 + 14
         ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(d.x1 - 1, ly - 12, tw + 8, 15)
@@ -378,6 +388,7 @@ function CameraPanel({ title, cameraId, cameraName, running, zones, frameUrl }) 
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-white border-b border-gray-100">
               <tr>
+                <th className="px-2 py-1.5 text-right font-semibold text-gray-500">Frame</th>
                 <th className="px-2 py-1.5 text-left font-semibold text-gray-500">Local ID</th>
                 <th className="px-2 py-1.5 text-left font-semibold text-gray-500">Time</th>
                 <th className="px-2 py-1.5 text-right font-semibold text-gray-500">floor_x</th>
@@ -387,8 +398,9 @@ function CameraPanel({ title, cameraId, cameraName, running, zones, frameUrl }) 
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
+              {sortedRows.map((r, i) => (
                 <tr key={`${r.local_id}-${r.timestamp_ms}-${i}`} className={i % 2 ? 'bg-gray-50' : 'bg-white'}>
+                  <td className="px-2 py-1 text-right font-mono text-gray-700">{r.frame_number ?? '—'}</td>
                   <td className="px-2 py-1 font-mono text-gray-700">{localNumRef.current(r.local_id) ?? '—'}</td>
                   <td className="px-2 py-1 font-mono text-gray-500">{fmtTs(r.timestamp_ms)}</td>
                   <td className="px-2 py-1 text-right text-gray-700">{fmtNum(r.floor_x)}</td>

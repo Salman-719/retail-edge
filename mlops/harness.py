@@ -338,7 +338,7 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
 def run_reid_clip(
     reid_weights: str,
     video_path: str,
-    reid_threshold: float = 0.85,
+    reid_threshold: float = 0.75,
     det_weights: str = "rtdetr-x.pt",
     conf: float = 0.5,
     imgsz: int = 640,

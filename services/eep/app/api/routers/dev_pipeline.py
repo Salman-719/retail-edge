@@ -314,15 +314,22 @@ async def get_tracking(
 
     With since_ts: returns rows at or after that timestamp in ascending order
     (incremental poll — accumulates the full run log without gaps).
-    Without since_ts: returns the latest :limit rows per local_id in the
-    stable display order (identity-first-seen ASC, within identity newest-first).
+    Without since_ts: returns the latest :limit rows per local_id, ordered by
+    frame number (ascending).
+
+    frame_number is DENSE_RANK over distinct timestamp_ms for this camera — each
+    distinct capture timestamp is one frame, so detections in the same frame
+    share a frame_number. tracking_history is ephemeral (IEP3 deletes each
+    window after reconciliation), so frame numbers are relative to the rows
+    currently present, not absolute across the whole run.
     """
     if since_ts is not None:
         rows = (await db.execute(
             text("""
                 SELECT local_id::text AS local_id, timestamp_ms,
                        floor_x, floor_y, zone_id::text AS zone_id,
-                       bbox_confidence, bbox_area
+                       bbox_confidence, bbox_area,
+                       DENSE_RANK() OVER (ORDER BY timestamp_ms) AS frame_number
                 FROM tracking_history
                 WHERE camera_id = :cam AND timestamp_ms >= :since
                 ORDER BY timestamp_ms ASC
@@ -337,16 +344,16 @@ async def get_tracking(
                     SELECT local_id::text AS local_id, timestamp_ms,
                            floor_x, floor_y, zone_id::text AS zone_id,
                            bbox_confidence, bbox_area,
-                           MIN(timestamp_ms) OVER (PARTITION BY local_id) AS id_first_seen,
+                           DENSE_RANK() OVER (ORDER BY timestamp_ms) AS frame_number,
                            ROW_NUMBER()      OVER (PARTITION BY local_id ORDER BY timestamp_ms DESC) AS rn
                     FROM tracking_history
                     WHERE camera_id = :cam
                 )
                 SELECT local_id, timestamp_ms, floor_x, floor_y, zone_id,
-                       bbox_confidence, bbox_area
+                       bbox_confidence, bbox_area, frame_number
                 FROM ranked
                 WHERE rn <= :lim
-                ORDER BY id_first_seen ASC, timestamp_ms DESC
+                ORDER BY frame_number DESC, local_id ASC
             """),
             {"cam": camera_id, "lim": limit},
         )).mappings().all()

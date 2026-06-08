@@ -9,6 +9,7 @@ Lifecycle:
 """
 import asyncio
 import logging
+import os
 
 import numpy as np
 
@@ -17,14 +18,12 @@ log = logging.getLogger("iep2.identity")
 try:
     from .pools import ActiveTrack, PendingTrack, LostEntry
     from .gallery import EmbeddingGallery
-    from .spatial_gate import SpatialGateConfig, evaluate
 except ImportError:
     import sys as _sys, os as _os
     _here = _os.path.dirname(_os.path.abspath(__file__))
     _sys.path.insert(0, _here)
     from pools import ActiveTrack, PendingTrack, LostEntry
     from gallery import EmbeddingGallery
-    from spatial_gate import SpatialGateConfig, evaluate
 
 # ── Constants (single source of truth) ────────────────────────────────────────
 TTL_FRAMES                 = 150   # 30 s at 5 fps
@@ -32,7 +31,9 @@ INIT_EMBEDDINGS_COUNT      = 5     # embeddings collected before ReID attempt
 SAMPLE_INTERVAL            = 15    # frames between samples in sampled phase (REID_SAMPLE_EVERY_N)
 MIN_BBOX_HEIGHT_PX         = 64    # quality gate: min bbox pixel height for a sampled crop
 MIN_BBOX_CONFIDENCE        = 0.5   # quality gate: min YOLO confidence for a sampled crop
-# ReID similarity threshold lives in SpatialGateConfig.base_threshold (default 0.85)
+# Cosine threshold for lost-pool occlusion recovery (resnet50_msmt17). Tunable
+# via the REID_MATCH_THRESHOLD env var without a code change (default 0.75).
+REID_MATCH_THRESHOLD = float(os.environ.get("REID_MATCH_THRESHOLD", "0.75"))
 
 
 def _quality_score(confidence: float, bbox, frame_height: int) -> float:
@@ -54,7 +55,6 @@ class LocalIdentityManager:
         reid_client,
         camera_id: str = "",
         redis_local=None,
-        fps: float = 5.0,
         embedding_loader=None,
     ):
         """reid_client: ReidClient; camera_id + redis_local enable Redis counter persistence (R5).
@@ -67,10 +67,7 @@ class LocalIdentityManager:
         self._reid_client = reid_client
         self._camera_id = camera_id
         self._redis = redis_local
-        self._fps = fps
         self._embedding_loader = embedding_loader
-        self._lost_ttl_frames = TTL_FRAMES
-        self._gate_cfg = SpatialGateConfig()
         self._active:  dict[int, ActiveTrack]  = {}
         self._pending: dict[int, PendingTrack] = {}
         self._lost:    dict[int, LostEntry]    = {}
@@ -78,6 +75,10 @@ class LocalIdentityManager:
         self._track_to_local: dict[int, int] = {}
         self._next_id: int = self._load_counter()
         self._frame_index: int = 0
+        # Debug only: best lost-pool cosine similarity recorded when each local_id
+        # was resolved {local_id: {"sim": float|None, "matched": bool}}. Surfaced
+        # to the dev screen via the live stream so ReID decisions are inspectable.
+        self._reid_debug: dict[int, dict] = {}
 
     def _load_counter(self) -> int:
         if self._redis is None or not self._camera_id:
@@ -237,7 +238,7 @@ class LocalIdentityManager:
                     pending.init_crops.clear()
 
                 if len(pending.init_embeddings) >= INIT_EMBEDDINGS_COUNT:
-                    local_id, gallery = self._resolve_pending(pending, new_pos=track.get("floor_pos"))
+                    local_id, gallery = self._resolve_pending(pending)
                     self._active[tid] = ActiveTrack(
                         local_id=local_id, track_id=tid, gallery=gallery
                     )
@@ -321,6 +322,15 @@ class LocalIdentityManager:
                 self._frame_index, len(sample_candidates),
             )
 
+        # Debug: annotate each track with the lost-pool similarity recorded when
+        # its local_id was resolved (None for fast-path / BoTSORT-reuse, which do
+        # no appearance comparison). Lets the dev screen show ReID confidence.
+        for t in enriched:
+            dbg = self._reid_debug.get(t.get("local_id"))
+            if dbg is not None:
+                t["reid_sim"] = dbg["sim"]
+                t["reid_matched"] = dbg["matched"]
+
         return enriched, _reid_crops, _reid_batches
 
     def get_active_embeddings_packed(self) -> dict[int, tuple[bytes, int, bytes]]:
@@ -356,8 +366,8 @@ class LocalIdentityManager:
             log.warning("Gallery restore failed for local_id=%d: %s", local_id, exc)
         return gallery
 
-    def _resolve_pending(self, pending: PendingTrack, new_pos=None):
-        """Match pending init embeddings against the lost pool.
+    def _resolve_pending(self, pending: PendingTrack):
+        """Match pending init embeddings against the lost pool (appearance only).
 
         pending.init_embeddings holds (embedding, quality_score) tuples; the
         mean used for lost-pool matching ignores the scores.
@@ -370,24 +380,11 @@ class LocalIdentityManager:
 
         best_sim = -1.0
         best_lid = None
-        best_threshold = self._gate_cfg.base_threshold
 
+        # Pure appearance matching against the lost pool — no spatial/temporal
+        # gate. Every lost candidate is eligible; the best cosine match above
+        # REID_MATCH_THRESHOLD wins.
         for lid, lost_entry in self._lost.items():
-            gate_result = evaluate(
-                new_pos=new_pos,
-                lost_pos=lost_entry.last_floor_pos,
-                elapsed_frames=self._frame_index - lost_entry.lost_at_frame,
-                fps=self._fps,
-                lost_ttl_frames=self._lost_ttl_frames,
-                cfg=self._gate_cfg,
-            )
-            if not gate_result.allowed:
-                log.debug(
-                    "F%04d  SpatioTemporalGate VETO  track_id=%d  candidate_local_id=%d",
-                    self._frame_index, pending.track_id, lid,
-                )
-                continue
-
             centroid = lost_entry.gallery.snapshot_centroid()
             if centroid is None:
                 continue
@@ -395,16 +392,15 @@ class LocalIdentityManager:
             if sim > best_sim:
                 best_sim = sim
                 best_lid = lid
-                best_threshold = gate_result.threshold
 
-        if best_lid is not None and best_sim >= best_threshold:
+        if best_lid is not None and best_sim >= REID_MATCH_THRESHOLD:
             lost_entry = self._lost.pop(best_lid)
             local_id = lost_entry.local_id
             gallery = lost_entry.gallery
             self._track_to_local[pending.track_id] = local_id
             log.info(
                 "F%04d  ReID MATCH  track_id=%d  → local_id=%d  sim=%.3f  (threshold=%.2f)",
-                self._frame_index, pending.track_id, local_id, best_sim, best_threshold,
+                self._frame_index, pending.track_id, local_id, best_sim, REID_MATCH_THRESHOLD,
             )
         else:
             local_id = self._next_id
@@ -415,8 +411,16 @@ class LocalIdentityManager:
             log.info(
                 "F%04d  ReID NO MATCH  track_id=%d  → new local_id=%d  best_sim=%.3f  (threshold=%.2f)",
                 self._frame_index, pending.track_id, local_id,
-                best_sim if best_lid is not None else 0.0, self._gate_cfg.base_threshold,
+                best_sim if best_lid is not None else 0.0, REID_MATCH_THRESHOLD,
             )
+
+        # Record the best lost-pool similarity for this resolution so the dev
+        # screen can show why a candidate matched (or was minted new). sim is None
+        # when there was no comparable lost candidate (empty pool / no centroid).
+        self._reid_debug[local_id] = {
+            "sim": float(best_sim) if best_lid is not None else None,
+            "matched": bool(best_lid is not None and best_sim >= REID_MATCH_THRESHOLD),
+        }
 
         for emb, q in pending.init_embeddings:
             gallery.add(emb, q, is_init=True)

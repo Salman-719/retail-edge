@@ -44,7 +44,7 @@ spec:
                   name: retailvision-secrets
                   key: redis-url
             - name: REID_THRESHOLD
-              value: "0.75"
+              value: "0.5"
             - name: GRACE_SECONDS
               value: "300"
             - name: MAX_SPEED_MPS

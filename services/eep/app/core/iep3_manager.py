@@ -23,7 +23,7 @@ _SERVER_REDIS_URL = os.environ.get("SERVER_REDIS_URL", "")
 
 _WINDOW_SECONDS                   = os.environ.get("WINDOW_SECONDS",                   "60")
 _DATABASE_URL_SERVER               = os.environ.get("DATABASE_URL_SERVER",               "")
-_REID_THRESHOLD                   = os.environ.get("REID_THRESHOLD",                   "0.75")
+_REID_THRESHOLD                   = os.environ.get("REID_THRESHOLD",                   "0.5")
 _GRACE_SECONDS                    = os.environ.get("GRACE_SECONDS",                    "300.0")
 _MAX_SPEED_MPS                    = os.environ.get("MAX_SPEED_MPS",                    "1.5")
 _POSITION_WEIGHT_AREA             = os.environ.get("POSITION_WEIGHT_AREA",             "0.7")
