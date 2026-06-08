@@ -258,6 +258,7 @@ def _build_configmap_data(
     store_id: str,
     rtsp_url: str,
     target_fps: float,
+    camera_config_id: str = "",
 ) -> dict:
     """Build the ConfigMap payload for an IEP2 pod.
 
@@ -273,6 +274,7 @@ def _build_configmap_data(
         "DATABASE_URL_SERVER": DATABASE_URL_SERVER,
         "RTSP_URL":            rtsp_url,
         "TARGET_FPS":          str(target_fps),
+        "CAMERA_CONFIG_ID":    camera_config_id,
     }
 
 
@@ -325,7 +327,10 @@ async def _handle_start_camera(cmd) -> None:
         loop = asyncio.get_running_loop()
 
         # Step 1: write ConfigMap and Deployment to backend (k3s or Docker)
-        cm_data = _build_configmap_data(camera_id, store_id, cmd.rtsp_url, cmd.target_fps)
+        cm_data = _build_configmap_data(
+            camera_id, store_id, cmd.rtsp_url, cmd.target_fps,
+            camera_config_id=cmd.camera_config_id,
+        )
         await loop.run_in_executor(_exec, _mgr.apply_camera_configmap, camera_id, cm_data)
         await loop.run_in_executor(_exec, _mgr.apply_iep2_deployment, camera_id)
 

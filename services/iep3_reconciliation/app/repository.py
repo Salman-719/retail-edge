@@ -95,8 +95,12 @@ class Iep3Repository:
     # =========================================================================
 
     async def get_expected_cameras_count(self, store_id: str) -> int:
-        """Return count of active camera_configs for this store.
-        Used by R1: expected cameras derived from DB, not env var.
+        """Return count of cameras IEP3 should wait for before reconciling.
+
+        Tries three sources in order:
+        1. Active store config version (production path).
+        2. Open camera_runtime_sessions (dev pipeline / no active version).
+        3. Returns 1 as a last resort so reconciliation always fires.
         """
         async with self._pool.acquire() as conn:
             count = await conn.fetchval(
@@ -110,7 +114,24 @@ class Iep3Repository:
                 uuid.UUID(store_id),
                 timeout=_STANDALONE_TIMEOUT,
             )
-        return int(count or 0)
+            if count:
+                return int(count)
+
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(DISTINCT physical_camera_id)
+                FROM camera_runtime_sessions
+                WHERE store_id             = $1
+                  AND stopped_at           IS NULL
+                  AND physical_camera_id   IS NOT NULL
+                """,
+                uuid.UUID(store_id),
+                timeout=_STANDALONE_TIMEOUT,
+            )
+            if count:
+                return int(count)
+
+        return 1
 
     async def get_camera_resolution(
         self,

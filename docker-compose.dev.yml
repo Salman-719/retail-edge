@@ -1,12 +1,18 @@
 # Local development overrides for x86 / Intel machines (no CUDA, no Jetson).
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d \
-#     postgres pgbouncer redis minio eep iep3_reconciliation live_bridge
+#     postgres pgbouncer redis minio eep live_bridge
 #
 # R5 (M1-S2): DEBUG_MODE=true must live only in this file.
 # Never commit this to CI, staging, or production pipelines.
 
 services:
+
+  # Disable the static IEP3 service — EEP spawns per-run IEP3 containers
+  # dynamically via dev_orchestrator.start_iep3() when the dev screen starts.
+  iep3_reconciliation:
+    entrypoint: ["true"]
+    restart: "no"
 
   eep:
     environment:
@@ -20,6 +26,9 @@ services:
       LOCAL_REDIS_URL: "redis://redis:6379/0"
       LIVE_EMBED_FRAME: "true"
       IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
+      # iep3_manager Docker fallback (used by activate_version_now in dev/production-local).
+      IEP3_IMAGE: "retail-edge-iep3_reconciliation:latest"
+      SERVER_REDIS_URL: "redis://redis:6379/0"
     volumes:
       # Dev-only: EEP calls IEP1.AddCamera over this control socket. (docker.sock
       # for spawning IEP2 containers is already mounted in the base compose.)

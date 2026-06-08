@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0b\x61gent.proto\x12\x15retailvision.agent.v1\"\x94\x01\n\x0c\x41gentMessage\x12\x35\n\theartbeat\x18\x01 \x01(\x0b\x32 .retailvision.agent.v1.HeartbeatH\x00\x12\x42\n\rcamera_status\x18\x02 \x01(\x0b\x32).retailvision.agent.v1.CameraStatusReportH\x00\x42\t\n\x07payload\"J\n\tHeartbeat\x12\x10\n\x08store_id\x18\x01 \x01(\t\x12\x15\n\ragent_version\x18\x02 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x03 \x01(\x03\"W\n\x12\x43\x61meraStatusReport\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x18\n\x10\x63ontainer_status\x18\x02 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x03 \x01(\x03\"\x91\x01\n\x0e\x43ontrolMessage\x12:\n\x0cstart_camera\x18\x01 \x01(\x0b\x32\".retailvision.agent.v1.StartCameraH\x00\x12\x38\n\x0bstop_camera\x18\x02 \x01(\x0b\x32!.retailvision.agent.v1.StopCameraH\x00\x42\t\n\x07payload\"\xb7\x01\n\x0bStartCamera\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x10\n\x08store_id\x18\x02 \x01(\t\x12\x10\n\x08rtsp_url\x18\x03 \x01(\t\x12\x12\n\ntarget_fps\x18\x04 \x01(\x02\x12\x16\n\x0ewindow_seconds\x18\x05 \x01(\x02\x12\x32\n\ts3_config\x18\x06 \x01(\x0b\x32\x1f.retailvision.agent.v1.S3Config\x12\x11\n\tredis_url\x18\x07 \x01(\t\"1\n\nStopCamera\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x10\n\x08store_id\x18\x02 \x01(\t\"X\n\x08S3Config\x12\x14\n\x0c\x65ndpoint_url\x18\x01 \x01(\t\x12\x12\n\naccess_key\x18\x02 \x01(\t\x12\x12\n\nsecret_key\x18\x03 \x01(\t\x12\x0e\n\x06\x62ucket\x18\x04 \x01(\t2i\n\x0c\x41gentService\x12Y\n\x07\x43onnect\x12#.retailvision.agent.v1.AgentMessage\x1a%.retailvision.agent.v1.ControlMessage(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0b\x61gent.proto\x12\x15retailvision.agent.v1\"\x94\x01\n\x0c\x41gentMessage\x12\x35\n\theartbeat\x18\x01 \x01(\x0b\x32 .retailvision.agent.v1.HeartbeatH\x00\x12\x42\n\rcamera_status\x18\x02 \x01(\x0b\x32).retailvision.agent.v1.CameraStatusReportH\x00\x42\t\n\x07payload\"J\n\tHeartbeat\x12\x10\n\x08store_id\x18\x01 \x01(\t\x12\x15\n\ragent_version\x18\x02 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x03 \x01(\x03\"W\n\x12\x43\x61meraStatusReport\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x18\n\x10\x63ontainer_status\x18\x02 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x03 \x01(\x03\"\x91\x01\n\x0e\x43ontrolMessage\x12:\n\x0cstart_camera\x18\x01 \x01(\x0b\x32\".retailvision.agent.v1.StartCameraH\x00\x12\x38\n\x0bstop_camera\x18\x02 \x01(\x0b\x32!.retailvision.agent.v1.StopCameraH\x00\x42\t\n\x07payload\"\xd1\x01\n\x0bStartCamera\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x10\n\x08store_id\x18\x02 \x01(\t\x12\x10\n\x08rtsp_url\x18\x03 \x01(\t\x12\x12\n\ntarget_fps\x18\x04 \x01(\x02\x12\x16\n\x0ewindow_seconds\x18\x05 \x01(\x02\x12\x32\n\ts3_config\x18\x06 \x01(\x0b\x32\x1f.retailvision.agent.v1.S3Config\x12\x11\n\tredis_url\x18\x07 \x01(\t\x12\x18\n\x10\x63\x61mera_config_id\x18\x08 \x01(\t\"1\n\nStopCamera\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x10\n\x08store_id\x18\x02 \x01(\t\"X\n\x08S3Config\x12\x14\n\x0c\x65ndpoint_url\x18\x01 \x01(\t\x12\x12\n\naccess_key\x18\x02 \x01(\t\x12\x12\n\nsecret_key\x18\x03 \x01(\t\x12\x0e\n\x06\x62ucket\x18\x04 \x01(\t2i\n\x0c\x41gentService\x12Y\n\x07\x43onnect\x12#.retailvision.agent.v1.AgentMessage\x1a%.retailvision.agent.v1.ControlMessage(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -30,11 +30,11 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CONTROLMESSAGE']._serialized_start=355
   _globals['_CONTROLMESSAGE']._serialized_end=500
   _globals['_STARTCAMERA']._serialized_start=503
-  _globals['_STARTCAMERA']._serialized_end=686
-  _globals['_STOPCAMERA']._serialized_start=688
-  _globals['_STOPCAMERA']._serialized_end=737
-  _globals['_S3CONFIG']._serialized_start=739
-  _globals['_S3CONFIG']._serialized_end=827
-  _globals['_AGENTSERVICE']._serialized_start=829
-  _globals['_AGENTSERVICE']._serialized_end=934
+  _globals['_STARTCAMERA']._serialized_end=712
+  _globals['_STOPCAMERA']._serialized_start=714
+  _globals['_STOPCAMERA']._serialized_end=763
+  _globals['_S3CONFIG']._serialized_start=765
+  _globals['_S3CONFIG']._serialized_end=853
+  _globals['_AGENTSERVICE']._serialized_start=855
+  _globals['_AGENTSERVICE']._serialized_end=960
 # @@protoc_insertion_point(module_scope)

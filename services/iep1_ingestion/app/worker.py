@@ -174,7 +174,7 @@ class CameraWorker:
                 t0 = time.monotonic()
                 if not cap.grab():
                     cap.release()
-                    logger.info("camera=%s video file ended — looping from start",
+                    logger.debug("camera=%s video file ended — looping from start",
                                 self._config.camera_id)
                     cap = self._open_cap()
                     idx = 0

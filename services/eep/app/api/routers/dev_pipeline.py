@@ -269,34 +269,50 @@ async def pipeline_stop(body: PipelineStopRequest):
 @router.get("/tracking")
 async def get_tracking(
     camera_id: str = Query(...),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=2000),
+    since_ts: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """Recent tracking_history rows for one camera.
 
-    Returns up to :lim rows per local_id, ordered so that the identity that
-    appeared first always sorts first (stable display numbering in the UI).
-    Within each identity, rows are newest-first.
+    With since_ts: returns rows at or after that timestamp in ascending order
+    (incremental poll — accumulates the full run log without gaps).
+    Without since_ts: returns the latest :limit rows per local_id in the
+    stable display order (identity-first-seen ASC, within identity newest-first).
     """
-    rows = (await db.execute(
-        text("""
-            WITH ranked AS (
+    if since_ts is not None:
+        rows = (await db.execute(
+            text("""
                 SELECT local_id::text AS local_id, timestamp_ms,
                        floor_x, floor_y, zone_id::text AS zone_id,
-                       bbox_confidence, bbox_area,
-                       MIN(timestamp_ms) OVER (PARTITION BY local_id) AS id_first_seen,
-                       ROW_NUMBER()      OVER (PARTITION BY local_id ORDER BY timestamp_ms DESC) AS rn
+                       bbox_confidence, bbox_area
                 FROM tracking_history
-                WHERE camera_id = :cam
-            )
-            SELECT local_id, timestamp_ms, floor_x, floor_y, zone_id,
-                   bbox_confidence, bbox_area
-            FROM ranked
-            WHERE rn <= :lim
-            ORDER BY id_first_seen ASC, timestamp_ms DESC
-        """),
-        {"cam": camera_id, "lim": limit},
-    )).mappings().all()
+                WHERE camera_id = :cam AND timestamp_ms >= :since
+                ORDER BY timestamp_ms ASC
+                LIMIT :lim
+            """),
+            {"cam": camera_id, "since": since_ts, "lim": limit},
+        )).mappings().all()
+    else:
+        rows = (await db.execute(
+            text("""
+                WITH ranked AS (
+                    SELECT local_id::text AS local_id, timestamp_ms,
+                           floor_x, floor_y, zone_id::text AS zone_id,
+                           bbox_confidence, bbox_area,
+                           MIN(timestamp_ms) OVER (PARTITION BY local_id) AS id_first_seen,
+                           ROW_NUMBER()      OVER (PARTITION BY local_id ORDER BY timestamp_ms DESC) AS rn
+                    FROM tracking_history
+                    WHERE camera_id = :cam
+                )
+                SELECT local_id, timestamp_ms, floor_x, floor_y, zone_id,
+                       bbox_confidence, bbox_area
+                FROM ranked
+                WHERE rn <= :lim
+                ORDER BY id_first_seen ASC, timestamp_ms DESC
+            """),
+            {"cam": camera_id, "lim": limit},
+        )).mappings().all()
     total = (await db.execute(
         text("SELECT COUNT(*) FROM tracking_history WHERE camera_id = :cam"),
         {"cam": camera_id},
