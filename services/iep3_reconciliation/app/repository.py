@@ -68,6 +68,27 @@ class PositionRow:
 
 
 @dataclass
+class GlobalPosition:
+    """One global_tracking_history row to bulk-insert (SPEC-002).
+
+    timestamp_ms is the 5s BUCKET boundary (floor(ts/5000)*5000), not the
+    winning frame's raw timestamp — this is what ON CONFLICT (global_id,
+    timestamp_ms) dedups on. store_id is constant per batch and passed
+    separately to the bulk writer.
+    """
+    global_id:       uuid.UUID
+    version_id:      str | None
+    batch_number:    int
+    timestamp_ms:    int            # bucket boundary
+    floor_x:         float
+    floor_y:         float
+    zone_id:         uuid.UUID | None
+    source_camera:   str
+    source_local_id: uuid.UUID
+    selection_score: float
+
+
+@dataclass
 class ResolutionResult:
     width:            int
     height:           int
@@ -252,6 +273,43 @@ class Iep3Repository:
         else:
             logger.info("Orphan sweep clean", extra=_sweep_extra)
         return deleted_globals, deleted_centroids
+
+    async def delete_tracking_history_window(
+        self,
+        camera_ids: list[str],
+        window_start_ms: int,
+        window_end_ms: int,
+    ) -> int:
+        """Delete processed tracking_history rows for a batch window (SPEC-002).
+
+        IEP3 owns tracking_history deletion. Runs AFTER the batch transaction
+        commits, on its own connection — never inside the global_tracking_history
+        insert transaction. Deletes by camera_id + timestamp window (not by
+        global_id): faster, and covers unmatched local rows too. If this fails
+        the rows simply remain and are re-deleted when the same window is
+        reprocessed — IEP2 inserts are ON CONFLICT DO NOTHING, so leftovers are
+        harmless. Returns the number of rows deleted.
+        """
+        if not camera_ids:
+            return 0
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM tracking_history
+                WHERE camera_id = ANY($1::text[])
+                  AND timestamp_ms >= $2
+                  AND timestamp_ms <  $3
+                """,
+                list(camera_ids),
+                window_start_ms,
+                window_end_ms,
+                timeout=_STANDALONE_TIMEOUT,
+            )
+        # asyncpg returns a status string like "DELETE 240".
+        try:
+            return int(result.split()[-1])
+        except (AttributeError, ValueError):
+            return 0
 
     # =========================================================================
     # TRANSACTION — caller passes asyncpg Connection
@@ -648,42 +706,67 @@ class Iep3Repository:
             for r in rows
         ]
 
-    async def write_global_position(
+    async def write_global_positions_bulk(
         self,
         conn: asyncpg.Connection,
-        global_id: uuid.UUID,
         store_id: str,
-        version_id: str | None,
-        batch_number: int,
-        timestamp_ms: int,
-        floor_x: float,
-        floor_y: float,
-        zone_id: uuid.UUID | None,
-        source_camera: str,
-        source_local_id: uuid.UUID,
-        selection_score: float,
-    ) -> None:
+        rows: list[GlobalPosition],
+    ) -> int:
+        """Bulk-insert all per-bucket positions for a batch in one round trip.
+
+        SPEC-002: one row per (global_id, 5s bucket). unnest avoids per-row
+        round trips (12 buckets × N persons). ON CONFLICT (global_id,
+        timestamp_ms) DO NOTHING makes batch replay idempotent — relies on the
+        idx_gth_unique_bucket unique index from SPEC-001. Runs inside the
+        caller's batch transaction. Returns the number of rows submitted.
+        """
+        if not rows:
+            return 0
+
+        store_uuid = uuid.UUID(store_id)
+
+        def _to_uuid(v):
+            return uuid.UUID(v) if isinstance(v, str) else v
+
+        global_ids       = [r.global_id for r in rows]
+        store_ids        = [store_uuid] * len(rows)
+        version_ids      = [_to_uuid(r.version_id) for r in rows]
+        batch_numbers    = [r.batch_number for r in rows]
+        timestamps       = [r.timestamp_ms for r in rows]
+        floor_xs         = [r.floor_x for r in rows]
+        floor_ys         = [r.floor_y for r in rows]
+        zone_ids         = [r.zone_id for r in rows]
+        source_cameras   = [r.source_camera for r in rows]
+        source_local_ids = [r.source_local_id for r in rows]
+        scores           = [float(r.selection_score) for r in rows]
+
         await conn.execute(
             """
             INSERT INTO global_tracking_history
                 (global_id, store_id, version_id, batch_number,
                  timestamp_ms, floor_x, floor_y, zone_id,
                  source_camera, source_local_id, selection_score)
-            VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11)
+            SELECT * FROM unnest(
+                $1::uuid[], $2::uuid[], $3::uuid[], $4::bigint[],
+                $5::bigint[], $6::float8[], $7::float8[], $8::uuid[],
+                $9::text[], $10::uuid[], $11::float4[]
+            )
+            ON CONFLICT (global_id, timestamp_ms) DO NOTHING
             """,
-            global_id,
-            store_id,
-            version_id,
-            batch_number,
-            timestamp_ms,
-            floor_x,
-            floor_y,
-            zone_id,
-            source_camera,
-            source_local_id,
-            float(selection_score),
+            global_ids,
+            store_ids,
+            version_ids,
+            batch_numbers,
+            timestamps,
+            floor_xs,
+            floor_ys,
+            zone_ids,
+            source_cameras,
+            source_local_ids,
+            scores,
             timeout=_QUERY_TIMEOUT,
         )
+        return len(rows)
 
     async def update_global_last_seen(
         self,
@@ -694,14 +777,20 @@ class Iep3Repository:
         last_seen_ts: int,
         zone_id: uuid.UUID | None,
         set_entry_zone: bool,
+        entry_zone_id: uuid.UUID | None = None,
     ) -> None:
         """Update last known position on global_identities.
 
-        set_entry_zone=True only on first position write (entry_zone_id is NULL).
-        Uses COALESCE to avoid overwriting a previously set entry_zone_id.
-        exit_zone_id always tracks the latest zone.
+        Called once per GlobalID per batch with the LATEST bucket's winner:
+        last_seen_ts / last_floor / exit_zone_id (=zone_id) all track the most
+        recent position. set_entry_zone=True only on first write (entry_zone_id
+        column is NULL); COALESCE avoids overwriting a previously set entry.
+        entry_zone_id (SPEC-002) is the EARLIEST bucket's zone for this batch —
+        the true entry within a 60s batch that may span multiple 5s buckets;
+        defaults to zone_id when not supplied.
         """
         if set_entry_zone:
+            entry_zone = entry_zone_id if entry_zone_id is not None else zone_id
             await conn.execute(
                 """
                 UPDATE global_identities
@@ -709,10 +798,10 @@ class Iep3Repository:
                     last_floor_x  = $2,
                     last_floor_y  = $3,
                     entry_zone_id = COALESCE(entry_zone_id, $4),
-                    exit_zone_id  = $4
-                WHERE global_id = $5
+                    exit_zone_id  = $5
+                WHERE global_id = $6
                 """,
-                last_seen_ts, floor_x, floor_y, zone_id, global_id,
+                last_seen_ts, floor_x, floor_y, entry_zone, zone_id, global_id,
                 timeout=_QUERY_TIMEOUT,
             )
         else:

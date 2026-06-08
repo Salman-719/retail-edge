@@ -40,7 +40,7 @@ export default function Sidebar() {
   const { state, dispatch } = useAuth()
   const navigate = useNavigate()
   const [alertCount, setAlertCount] = useState(0)
-  const [hasUnmappedSection, setHasUnmappedSection] = useState(false)
+  const [hasUnmappedFloorPlan, setHasUnmappedFloorPlan] = useState(false)
 
   useEffect(() => {
     if (!slug) return
@@ -48,9 +48,7 @@ export default function Sidebar() {
       .then(data => setAlertCount(Array.isArray(data) ? data.length : (data?.count ?? 0)))
       .catch(() => {})
     getActiveVersion(slug)
-      .then(v => setHasUnmappedSection(
-        (v?.sections || []).some(s => !s.floor_plan?.image_uploaded)
-      ))
+      .then(v => setHasUnmappedFloorPlan(!v?.floor_plan?.image_uploaded))
       .catch(() => {})
   }, [slug])
 
@@ -105,7 +103,7 @@ export default function Sidebar() {
                       {alertCount}
                     </span>
                   )}
-                  {path === 'config' && hasUnmappedSection && (
+                  {path === 'config' && hasUnmappedFloorPlan && (
                     <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
                   )}
                 </NavLink>

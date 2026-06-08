@@ -55,7 +55,6 @@ SELECT fp.boundary_polygon,
 FROM camera_configs cc
 JOIN store_config_versions scv ON scv.id = cc.version_id
 JOIN floor_plans fp             ON fp.version_id = scv.id
-                               AND fp.section_id = cc.section_id
 WHERE cc.id = $1
   AND scv.status = 'active'
 LIMIT 1

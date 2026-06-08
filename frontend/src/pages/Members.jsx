@@ -7,7 +7,7 @@ import { TableSkeleton } from '../components/Skeletons'
 import {
   listMembers, inviteMember, listInvitations,
   cancelInvitation, patchMember, removeMember,
-  requestDraftDiscard, getDraft, listSections,
+  requestDraftDiscard, getDraft,
 } from '../api'
 
 const ROLE_COLORS = {
@@ -18,25 +18,13 @@ const ROLE_COLORS = {
 }
 
 function InviteModal({ slug, onClose, onDone }) {
-  const [form, setForm] = useState({ email: '', role: 'manager', access_scope: 'full_store' })
+  const [form, setForm] = useState({ email: '', role: 'manager' })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [token, setToken] = useState(null)
-  const [sections, setSections] = useState([])
-  const [selectedSections, setSelectedSections] = useState([])
-
-  useEffect(() => {
-    listSections(slug).then(setSections).catch(() => {})
-  }, [slug])
 
   function onChange(e) {
     setForm(f => ({ ...f, [e.target.name]: e.target.value }))
-  }
-
-  function toggleSection(id) {
-    setSelectedSections(prev =>
-      prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
-    )
   }
 
   async function handleSubmit(e) {
@@ -47,8 +35,6 @@ function InviteModal({ slug, onClose, onDone }) {
       const res = await inviteMember(slug, {
         email: form.email.trim(),
         role: form.role,
-        access_scope: form.access_scope,
-        section_ids: form.access_scope === 'section_scoped' ? selectedSections : [],
         permissions: {},
       })
       setToken(res.token || null)
@@ -120,40 +106,6 @@ function InviteModal({ slug, onClose, onDone }) {
             </select>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Access Scope</label>
-            <select
-              name="access_scope"
-              value={form.access_scope}
-              onChange={onChange}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="full_store">All Sections</option>
-              <option value="section_scoped">Specific Sections</option>
-            </select>
-          </div>
-
-          {form.access_scope === 'section_scoped' && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Sections</label>
-              <div className="border border-gray-300 rounded-lg px-3 py-2 max-h-40 overflow-y-auto space-y-1.5">
-                {sections.length === 0 ? (
-                  <p className="text-xs text-gray-400">No sections available</p>
-                ) : sections.map(s => (
-                  <label key={s.id} className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={selectedSections.includes(s.id)}
-                      onChange={() => toggleSection(s.id)}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-sm text-gray-700">{s.name}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-
           <div className="flex gap-2 pt-2">
             <button
               type="button"
@@ -177,7 +129,7 @@ function InviteModal({ slug, onClose, onDone }) {
 }
 
 function EditMemberModal({ slug, member, onClose, onDone }) {
-  const [form, setForm] = useState({ role: member.role, access_scope: member.access_scope || 'full_store' })
+  const [form, setForm] = useState({ role: member.role })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -220,18 +172,6 @@ function EditMemberModal({ slug, member, onClose, onDone }) {
             >
               <option value="manager">Manager</option>
               <option value="viewer">Viewer</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Access Scope</label>
-            <select
-              value={form.access_scope}
-              onChange={e => setForm(f => ({ ...f, access_scope: e.target.value }))}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="full_store">All Sections</option>
-              <option value="section_scoped">Specific Sections</option>
             </select>
           </div>
 

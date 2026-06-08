@@ -58,16 +58,17 @@ def orthogonal_vec(dim: int = 2048) -> np.ndarray:
 @pytest.fixture
 def settings() -> Iep3Settings:
     return Iep3Settings(
-        database_url="postgresql://test:test@localhost/test",
-        redis_url="redis://localhost:6379/0",
         store_id=STORE_ID,
-        expected_cameras=frozenset([CAM_01, CAM_02]),
+        window_seconds=60.0,
+        database_url_server="postgresql://test:test@localhost/test",
+        server_redis_url="redis://localhost:6379/0",
+        expected_cameras=2,
         coordinator_timeout_s=120.0,
         reid_threshold=0.85,
         max_speed_mps=1.5,
         embedding_dim=2048,
-        selection_weight_area=0.7,
-        selection_weight_confidence=0.3,
+        position_weight_area=0.7,
+        position_weight_conf=0.3,
         grace_seconds=300.0,
         default_frame_width=1920,
         default_frame_height=1080,

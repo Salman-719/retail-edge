@@ -301,19 +301,49 @@ services:
         condition: service_healthy
     restart: on-failure
 
+  # IEP4 — alert evaluation daemon. One process per store (same pattern as
+  # IEP3). No HTTP port. STORE_ID must be set to the store this instance serves;
+  # like IEP3, real per-store instances are intended to be spawned by an EEP
+  # manager — set STORE_ID in the environment to run a single instance in dev.
   iep4_alerts:
     build:
       context: ./services/iep4_alerts
       dockerfile: Dockerfile
-    ports:
-      - "8004:8004"
+    environment:
+      <<: *shared-config
+      STORE_ID: ${STORE_ID:-}
+      EVALUATION_BATCHES: ${EVALUATION_BATCHES:-5}
+      MAX_LOOKBACK_BATCHES: ${MAX_LOOKBACK_BATCHES:-60}
+      CATCHUP_BATCH_SIZE: ${CATCHUP_BATCH_SIZE:-1}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+    restart: on-failure
 
+  # IEP5 — end-of-shift analytics job. Runs once per (store, shift_date) and
+  # exits; launched by EEP (k8s Job in prod / `docker compose run` in dev), not
+  # by `up`. The `jobs` profile keeps `up` from starting it. Run manually with:
+  #   docker compose ... run --rm -e STORE_ID=<uuid> -e SHIFT_DATE=<YYYY-MM-DD> iep5_analytics
   iep5_analytics:
+    profiles: ["jobs"]
     build:
       context: ./services/iep5_analytics
       dockerfile: Dockerfile
-    ports:
-      - "8005:8005"
+    environment:
+      <<: *shared-config
+      STORE_ID: ${STORE_ID:-}
+      SHIFT_DATE: ${SHIFT_DATE:-}
+      HEATMAP_CELL_SIZE_M: ${HEATMAP_CELL_SIZE_M:-0.5}
+      PASSTHROUGH_DWELL_MS: ${PASSTHROUGH_DWELL_MS:-30000}
+      DEAD_PERIOD_THRESHOLD: ${DEAD_PERIOD_THRESHOLD:-3}
+      DEAD_PERIOD_DURATION_MS: ${DEAD_PERIOD_DURATION_MS:-1800000}
+    restart: "no"
 
   iep6_agent:
     build:

@@ -724,7 +724,8 @@ CREATE TABLE IF NOT EXISTS camera_runtime_sessions (
     started_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     stopped_at          TIMESTAMPTZ,
     stop_reason         TEXT        CHECK (stop_reason IN (
-                            'schedule', 'manual', 'version_activation', 'crash', 'unknown'
+                            'schedule', 'manual', 'version_activation',
+                            'eep_restart', 'crash', 'unknown'
                         ))
 );
 

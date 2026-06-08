@@ -448,15 +448,13 @@ export default function DevE2E() {
         setStoreId(store.id)
 
         const urls = {}, activePcIds = new Set()
-        for (const sec of (version?.sections || [])) {
-          for (const cc of (sec.camera_configs || [])) {
-            const pid = String(cc.physical_camera_id)
-            activePcIds.add(pid)
-            if (cc.frame_url) urls[pid] = cc.frame_url
-          }
+        for (const cc of (version?.camera_configs || [])) {
+          const pid = String(cc.physical_camera_id)
+          activePcIds.add(pid)
+          if (cc.frame_url) urls[pid] = cc.frame_url
         }
         setFrameUrls(urls)
-        setZones((version?.sections || []).flatMap(s => s.zones || []))
+        setZones(version?.zones || [])
 
         // Only cameras that appear in the active version (or is_active fallback)
         const activeCams = (cams || []).filter(c =>

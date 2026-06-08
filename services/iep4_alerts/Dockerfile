@@ -6,5 +6,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 
-EXPOSE 8004
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8004"]
+# IEP4 alert-evaluation daemon — one process per store. No HTTP port, no gRPC.
+CMD ["python", "-m", "app.main"]

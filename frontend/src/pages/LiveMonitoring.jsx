@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { usePageTitle } from '../components/PageMeta'
 import { StatsSkeleton } from '../components/Skeletons'
-import SectionTabs from '../components/SectionTabs'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
 import { getActiveVersion } from '../api'
 
@@ -225,23 +224,15 @@ export default function LiveMonitoring() {
   // MOCK: replace with API call to GET /store/{slug}/live/positions
   const [people] = useState(MOCK_PEOPLE)
 
-  const [sections, setSections] = useState([])
-  const [selectedSectionId, setSelectedSectionId] = useState(null)
+  const [config, setConfig] = useState(null)
   const [loadingConfig, setLoadingConfig] = useState(true)
 
   useEffect(() => {
     getActiveVersion(slug)
-      .then(v => {
-        const secs = v?.sections || []
-        setSections(secs)
-        const defaultSec = secs.find(s => s.is_default) || secs[0] || null
-        setSelectedSectionId(defaultSec?.id || null)
-      })
-      .catch(() => setSections([]))
+      .then(v => setConfig(v))
+      .catch(() => setConfig(null))
       .finally(() => setLoadingConfig(false))
   }, [slug])
-
-  const selectedSection = sections.find(s => s.id === selectedSectionId) || sections[0] || null
 
   function dismissAlert(id) {
     setAlerts(prev => prev.filter(a => a.id !== id))
@@ -290,7 +281,7 @@ export default function LiveMonitoring() {
             {/* Title row */}
             <div className="flex items-center justify-between shrink-0">
               <h2 className="text-sm font-semibold text-gray-700">
-                {selectedSection?.name || 'Floor Plan'}
+                Floor Plan
               </h2>
               <div className="flex items-center gap-4 text-xs text-gray-500">
                 <span className="flex items-center gap-1.5">
@@ -305,24 +296,15 @@ export default function LiveMonitoring() {
               </div>
             </div>
 
-            {/* Section tab bar — only when multiple sections */}
-            <div className="mt-2.5 mb-1 shrink-0">
-              <SectionTabs
-                sections={sections}
-                selectedId={selectedSectionId}
-                onChange={setSelectedSectionId}
-              />
-            </div>
-
-            <div className={`flex-1 min-h-0 ${sections.length > 1 ? '' : 'mt-3'}`}>
+            <div className="flex-1 min-h-0 mt-3">
               {loadingConfig ? (
                 <div className="flex items-center justify-center h-full text-gray-400 text-sm">Loading floor plan…</div>
               ) : (
                 <FloorPlanCanvas
-                  floorPlan={selectedSection?.floor_plan}
-                  zones={selectedSection?.zones || []}
-                  obstacles={selectedSection?.obstacles || []}
-                  cameraConfigs={selectedSection?.camera_configs || []}
+                  floorPlan={config?.floor_plan}
+                  zones={config?.zones || []}
+                  obstacles={config?.obstacles || []}
+                  cameraConfigs={config?.camera_configs || []}
                   people={people}
                 />
               )}
@@ -356,11 +338,11 @@ export default function LiveMonitoring() {
         </div>
 
         {/* ── Camera Health Strip ──────────────────────────────────────────── */}
-        {/* Uses selectedSection.camera_configs when available, falls back to MOCK_CAMERAS */}
+        {/* Uses config.camera_configs when available, falls back to MOCK_CAMERAS */}
         <div className="bg-white border border-gray-200 rounded-xl px-5 py-3 flex items-center gap-2 flex-wrap shrink-0">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-2">Camera Status</span>
-          {(selectedSection?.camera_configs?.length > 0
-            ? selectedSection.camera_configs.map(cc => ({
+          {(config?.camera_configs?.length > 0
+            ? config.camera_configs.map(cc => ({
                 id: cc.id,
                 name: cc.physical_camera_name,
                 online: cc.status === 'verified',

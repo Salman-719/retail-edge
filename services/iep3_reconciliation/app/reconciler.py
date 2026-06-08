@@ -113,6 +113,32 @@ class Reconciler:
                     window_end_ms=window_end_ms,
                 )
 
+        # ── tracking_history cleanup (SPEC-002) ──────────────────────────────
+        # IEP3 owns tracking_history deletion, and only AFTER its batch
+        # transaction has committed — on a separate connection, never inside the
+        # global_tracking_history insert transaction. This closes the prior race
+        # where reads/deletes of tracking_history could overlap. Non-fatal:
+        # leftover rows are re-deleted when the window is next processed (IEP2
+        # inserts use ON CONFLICT DO NOTHING). reporting_cameras are the physical
+        # camera UUID strings that sent batch_complete for this window.
+        if reporting_cameras:
+            try:
+                deleted = await self._repo.delete_tracking_history_window(
+                    camera_ids=list(reporting_cameras),
+                    window_start_ms=window_start_ms,
+                    window_end_ms=window_end_ms,
+                )
+                logger.debug(
+                    "Deleted %d tracking_history rows for batch=%d window=[%d, %d]",
+                    deleted, batch_number, window_start_ms, window_end_ms,
+                )
+            except Exception:
+                logger.exception(
+                    "tracking_history cleanup failed for batch=%d — rows remain, "
+                    "will retry on next processing of this window",
+                    batch_number,
+                )
+
         # Transaction committed. Build and log stats.
         reconcile_elapsed = time.monotonic() - t0
         self._batches_processed += 1

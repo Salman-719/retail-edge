@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
 import {
   activateDraft, computeHomography, computeTps, createCamera, createDraft, createObstacle, createZone,
   deleteCameraConfig, deleteCamera, deleteDraft, deleteObstacle, deleteZone,
   getActiveVersion, getDraft, getDraftCameraConfigs, getDraftFloorPlan, getDraftObstacles,
-  getDraftZones, getCalibrations, listSections, patchCamera, placeCameraConfig,
+  getDraftZones, getCalibrations, patchCamera, placeCameraConfig,
   setFloorPlanScale, updateCameraConfig, uploadCameraFrame, uploadFloorPlan, verifyCalibration,
   projectPoint,
 } from '../api'
@@ -433,7 +433,6 @@ function FrameStage({ frameUrl, width = 360, height = 260, points = [], pendingC
 export default function StoreConfigEdit() {
   const { slug } = useParams()
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
 
   const [step, setStep] = useState(1)
   const [mode, setMode] = useState(null) // 'onboarding' | 'editing'
@@ -443,8 +442,6 @@ export default function StoreConfigEdit() {
 
   // Core data
   const [draft, setDraft] = useState(null)
-  const [sections, setSections] = useState([])
-  const [selectedSection, setSelectedSection] = useState(null)
   const [floorPlan, setFloorPlan] = useState(null)
   const [cameraConfigs, setCameraConfigs] = useState([])
   const [zones, setZones] = useState([])
@@ -542,16 +539,7 @@ export default function StoreConfigEdit() {
   async function bootstrap() {
     setLoading(true)
     try {
-      const [sects, activeVersion] = await Promise.all([
-        listSections(slug).catch(() => []),
-        getActiveVersion(slug).catch(() => null),
-      ])
-      setSections(sects)
-      const targetSectionId = searchParams.get('section')
-      const defaultSection = (targetSectionId && sects.find(s => s.id === targetSectionId))
-        || sects.find(s => s.is_default)
-        || sects[0]
-      setSelectedSection(defaultSection)
+      const activeVersion = await getActiveVersion(slug).catch(() => null)
 
       const isEditing = !!activeVersion
       setMode(isEditing ? 'editing' : 'onboarding')
@@ -577,9 +565,7 @@ export default function StoreConfigEdit() {
       }
       setDraft(d)
 
-      if (defaultSection) {
-        await loadSectionData(defaultSection.id, slug)
-      }
+      await loadDraftData(slug)
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
     } finally {
@@ -587,13 +573,13 @@ export default function StoreConfigEdit() {
     }
   }
 
-  async function loadSectionData(sectionId, storeSlug) {
+  async function loadDraftData(storeSlug) {
     const s = storeSlug || slug
     const [fp, zs, obs, ccs] = await Promise.all([
-      getDraftFloorPlan(s, sectionId).catch(() => null),
-      getDraftZones(s, sectionId).catch(() => []),
-      getDraftObstacles(s, sectionId).catch(() => []),
-      getDraftCameraConfigs(s, sectionId).catch(() => []),
+      getDraftFloorPlan(s).catch(() => null),
+      getDraftZones(s).catch(() => []),
+      getDraftObstacles(s).catch(() => []),
+      getDraftCameraConfigs(s).catch(() => []),
     ])
 
     setFloorPlan(fp)
@@ -648,36 +634,14 @@ export default function StoreConfigEdit() {
     setPendingCameraPlacement(null)
   }
 
-  async function switchSection(section) {
-    setSelectedSection(section)
-    setFloorPlan(null)
-    setZones([])
-    setObstacles([])
-    setCameraConfigs([])
-    setSelectedConfigId(null)
-    setScalePoints([])
-    setRealDistance('')
-    setWorldBoundsPoints([])
-    setDrawingWorldBounds(false)
-    setSettingScale(false)
-    setNewCameraStreamUrl('')
-    setCorrespondencesMap({})
-    setCalibResultsMap({})
-    setInProgressPoints([])
-    setPendingPolygon(null)
-    setPendingCameraPlacement(null)
-    setVerifyPreviewMap({})   // array-per-camera cleared
-    if (draft) await loadSectionData(section.id, slug)
-  }
-
   // ─── Step 1: Floor plan upload ────────────────────────────────────────────
 
   async function handleFloorPlanUpload(e) {
     const file = e.target.files?.[0]
-    if (!file || !selectedSection) return
+    if (!file || !draft) return
     setSaving(true)
     try {
-      const fp = await uploadFloorPlan(slug, selectedSection.id, file)
+      const fp = await uploadFloorPlan(slug, file)
       setFloorPlan(fp)
       // Backend cascade-wipes zones/obstacles/configs on re-upload; mirror in state
       setZones([])
@@ -710,11 +674,11 @@ export default function StoreConfigEdit() {
   }
 
   async function handleSetScale(boundsOverride) {
-    if (scalePoints.length < 3 || !realDistance || !selectedSection) return
+    if (scalePoints.length < 3 || !realDistance || !draft) return
     setSaving(true)
     const bounds = boundsOverride !== undefined ? boundsOverride : worldBoundsPoints
     try {
-      const updated = await setFloorPlanScale(slug, selectedSection.id, {
+      const updated = await setFloorPlanScale(slug, {
         origin_x: scalePoints[0][0],
         origin_y: scalePoints[0][1],
         ref_point_1: scalePoints[1],
@@ -736,7 +700,7 @@ export default function StoreConfigEdit() {
   }
 
   async function handleCloseWorldBounds() {
-    if (worldBoundsPoints.length < 3 || !selectedSection) return
+    if (worldBoundsPoints.length < 3 || !draft) return
     setDrawingWorldBounds(false)
     // Save immediately if scale is already defined
     if (floorPlan?.scale_defined && scalePoints.length >= 3 && realDistance) {
@@ -763,7 +727,7 @@ export default function StoreConfigEdit() {
 
   async function handlePlaceCameraSubmit(e) {
     e.preventDefault()
-    if (!newCameraName.trim() || !selectedSection) return
+    if (!newCameraName.trim() || !draft) return
     setSaving(true)
     try {
       const cam = await createCamera(slug, {
@@ -775,7 +739,7 @@ export default function StoreConfigEdit() {
         ...(newCameraStreamWidth !== '' ? { stream_width: parseInt(newCameraStreamWidth, 10) } : {}),
         ...(newCameraStreamHeight !== '' ? { stream_height: parseInt(newCameraStreamHeight, 10) } : {}),
       })
-      const cc = await placeCameraConfig(slug, selectedSection.id, {
+      const cc = await placeCameraConfig(slug, {
         physical_camera_id: cam.id,
         position_x: pendingCameraPlacement.x,
         position_y: pendingCameraPlacement.y,
@@ -946,7 +910,7 @@ export default function StoreConfigEdit() {
 
   async function handlePendingPolygonSubmit(e) {
     e.preventDefault()
-    if (!pendingPolygon || !selectedSection) return
+    if (!pendingPolygon || !draft) return
     if (pendingPolygon.mode === 'zone' && !pendingName.trim()) {
       setError('Zone name is required')
       return
@@ -954,14 +918,14 @@ export default function StoreConfigEdit() {
     setSaving(true)
     try {
       if (pendingPolygon.mode === 'zone') {
-        const z = await createZone(slug, selectedSection.id, {
+        const z = await createZone(slug, {
           name: pendingName.trim(),
           type: pendingZoneType,
           points: pendingPolygon.points,
         })
         setZones(prev => [...prev, z])
       } else {
-        const obs = await createObstacle(slug, selectedSection.id, {
+        const obs = await createObstacle(slug, {
           name: pendingName.trim() || `Obstacle ${obstacles.length + 1}`,
           points: pendingPolygon.points,
         })
@@ -984,7 +948,7 @@ export default function StoreConfigEdit() {
 
   async function handleDeleteZone(zoneId) {
     try {
-      await deleteZone(slug, selectedSection.id, zoneId)
+      await deleteZone(slug, zoneId)
       setZones(prev => prev.filter(z => z.id !== zoneId))
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
@@ -993,7 +957,7 @@ export default function StoreConfigEdit() {
 
   async function handleDeleteObstacle(obsId) {
     try {
-      await deleteObstacle(slug, selectedSection.id, obsId)
+      await deleteObstacle(slug, obsId)
       setObstacles(prev => prev.filter(o => o.id !== obsId))
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
@@ -1083,22 +1047,6 @@ export default function StoreConfigEdit() {
           })}
         </nav>
 
-        {sections.length > 1 && (
-          <div className="mt-6">
-            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">Section</label>
-            <select
-              value={selectedSection?.id || ''}
-              onChange={e => {
-                const sec = sections.find(s => s.id === e.target.value)
-                if (sec) switchSection(sec)
-              }}
-              className="w-full text-sm border border-gray-200 rounded px-2 py-1.5 bg-white"
-            >
-              {sections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </div>
-        )}
-
         <div className="mt-auto pt-6 space-y-2">
           {mode === 'editing' && (
             <button
@@ -1135,7 +1083,7 @@ export default function StoreConfigEdit() {
           <div className="space-y-6 max-w-2xl">
             <div>
               <h2 className="text-xl font-semibold mb-1">Upload Floor Plan</h2>
-              <p className="text-sm text-gray-500">Upload a top-down image of {selectedSection?.name || 'this section'}.</p>
+              <p className="text-sm text-gray-500">Upload a top-down image of your store floor.</p>
             </div>
             <label className="flex flex-col items-center justify-center w-full h-48 border-2 border-dashed border-gray-300 rounded-xl cursor-pointer bg-gray-50 hover:bg-gray-100 transition-colors">
               <svg className="w-10 h-10 text-gray-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1994,10 +1942,6 @@ export default function StoreConfigEdit() {
             </div>
 
             <div className="bg-gray-50 rounded-lg border border-gray-200 p-4 space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-600">Sections</span>
-                <span className="font-medium">{sections.length}</span>
-              </div>
               <div className="flex justify-between">
                 <span className="text-gray-600">Zones</span>
                 <span className="font-medium">{zones.length}</span>

@@ -130,20 +130,6 @@ export const patchMember = (slug, memberId, body) =>
 export const removeMember = (slug, memberId) =>
   api.delete(`/store/${slug}/members/${memberId}`).then(r => r.data)
 
-// ─── Sections ────────────────────────────────────────────────────────────────
-
-export const listSections = (slug) =>
-  api.get(`/store/${slug}/sections`).then(r => r.data)
-
-export const createSection = (slug, body) =>
-  api.post(`/store/${slug}/sections`, body).then(r => r.data)
-
-export const patchSection = (slug, sectionId, body) =>
-  api.patch(`/store/${slug}/sections/${sectionId}`, body).then(r => r.data)
-
-export const deleteSection = (slug, sectionId) =>
-  api.delete(`/store/${slug}/sections/${sectionId}`).then(r => r.data)
-
 // ─── Config Versions (read-only) ─────────────────────────────────────────────
 
 export const getActiveVersion = (slug) =>
@@ -197,56 +183,56 @@ export const deleteDraft = (slug) =>
 
 // ─── Floor Plan ───────────────────────────────────────────────────────────────
 
-export const uploadFloorPlan = (slug, sectionId, file) => {
+export const uploadFloorPlan = (slug, file) => {
   const fd = new FormData()
   fd.append('file', file)
-  return api.post(`/store/${slug}/draft/sections/${sectionId}/floor-plan/upload`, fd).then(r => r.data)
+  return api.post(`/store/${slug}/draft/floor-plan/upload`, fd).then(r => r.data)
 }
 
-export const getDraftFloorPlan = (slug, sectionId) =>
-  api.get(`/store/${slug}/draft/sections/${sectionId}/floor-plan`).then(r => r.data)
+export const getDraftFloorPlan = (slug) =>
+  api.get(`/store/${slug}/draft/floor-plan`).then(r => r.data)
 
-export const setFloorPlanScale = (slug, sectionId, body) =>
-  api.put(`/store/${slug}/draft/sections/${sectionId}/floor-plan/scale`, body).then(r => r.data)
+export const setFloorPlanScale = (slug, body) =>
+  api.put(`/store/${slug}/draft/floor-plan/scale`, body).then(r => r.data)
 
-export const setFloorPlanWorldBounds = (slug, sectionId, body) =>
-  api.put(`/store/${slug}/draft/sections/${sectionId}/floor-plan/world-bounds`, body).then(r => r.data)
+export const setFloorPlanWorldBounds = (slug, body) =>
+  api.put(`/store/${slug}/draft/floor-plan/world-bounds`, body).then(r => r.data)
 
 // ─── Zones ────────────────────────────────────────────────────────────────────
 
-export const getDraftZones = (slug, sectionId) =>
-  api.get(`/store/${slug}/draft/sections/${sectionId}/zones`).then(r => r.data)
+export const getDraftZones = (slug) =>
+  api.get(`/store/${slug}/draft/zones`).then(r => r.data)
 
-export const createZone = (slug, sectionId, body) =>
-  api.post(`/store/${slug}/draft/sections/${sectionId}/zones`, body).then(r => r.data)
+export const createZone = (slug, body) =>
+  api.post(`/store/${slug}/draft/zones`, body).then(r => r.data)
 
-export const updateZone = (slug, sectionId, zoneId, body) =>
-  api.put(`/store/${slug}/draft/sections/${sectionId}/zones/${zoneId}`, body).then(r => r.data)
+export const updateZone = (slug, zoneId, body) =>
+  api.put(`/store/${slug}/draft/zones/${zoneId}`, body).then(r => r.data)
 
-export const deleteZone = (slug, sectionId, zoneId) =>
-  api.delete(`/store/${slug}/draft/sections/${sectionId}/zones/${zoneId}`).then(r => r.data)
+export const deleteZone = (slug, zoneId) =>
+  api.delete(`/store/${slug}/draft/zones/${zoneId}`).then(r => r.data)
 
 // ─── Obstacles ────────────────────────────────────────────────────────────────
 
-export const getDraftObstacles = (slug, sectionId) =>
-  api.get(`/store/${slug}/draft/sections/${sectionId}/obstacles`).then(r => r.data)
+export const getDraftObstacles = (slug) =>
+  api.get(`/store/${slug}/draft/obstacles`).then(r => r.data)
 
-export const createObstacle = (slug, sectionId, body) =>
-  api.post(`/store/${slug}/draft/sections/${sectionId}/obstacles`, body).then(r => r.data)
+export const createObstacle = (slug, body) =>
+  api.post(`/store/${slug}/draft/obstacles`, body).then(r => r.data)
 
-export const updateObstacle = (slug, sectionId, obstacleId, body) =>
-  api.put(`/store/${slug}/draft/sections/${sectionId}/obstacles/${obstacleId}`, body).then(r => r.data)
+export const updateObstacle = (slug, obstacleId, body) =>
+  api.put(`/store/${slug}/draft/obstacles/${obstacleId}`, body).then(r => r.data)
 
-export const deleteObstacle = (slug, sectionId, obstacleId) =>
-  api.delete(`/store/${slug}/draft/sections/${sectionId}/obstacles/${obstacleId}`).then(r => r.data)
+export const deleteObstacle = (slug, obstacleId) =>
+  api.delete(`/store/${slug}/draft/obstacles/${obstacleId}`).then(r => r.data)
 
 // ─── Camera Configs ───────────────────────────────────────────────────────────
 
-export const getDraftCameraConfigs = (slug, sectionId) =>
-  api.get(`/store/${slug}/draft/sections/${sectionId}/camera-configs`).then(r => r.data)
+export const getDraftCameraConfigs = (slug) =>
+  api.get(`/store/${slug}/draft/camera-configs`).then(r => r.data)
 
-export const placeCameraConfig = (slug, sectionId, body) =>
-  api.post(`/store/${slug}/draft/sections/${sectionId}/camera-configs`, body).then(r => r.data)
+export const placeCameraConfig = (slug, body) =>
+  api.post(`/store/${slug}/draft/camera-configs`, body).then(r => r.data)
 
 export const updateCameraConfig = (slug, configId, body) =>
   api.put(`/store/${slug}/draft/camera-configs/${configId}`, body).then(r => r.data)
@@ -342,15 +328,6 @@ export const patchEmployee = (slug, employeeId, body) =>
 
 export const deleteEmployee = (slug, employeeId) =>
   api.delete(`/store/${slug}/employees/${employeeId}`).then(r => r.data)
-
-export const listEmployeeSections = (slug, employeeId) =>
-  api.get(`/store/${slug}/employees/${employeeId}/sections`).then(r => r.data)
-
-export const assignEmployeeSection = (slug, employeeId, body) =>
-  api.post(`/store/${slug}/employees/${employeeId}/sections`, body).then(r => r.data)
-
-export const removeEmployeeSection = (slug, employeeId, sectionId) =>
-  api.delete(`/store/${slug}/employees/${employeeId}/sections/${sectionId}`).then(r => r.data)
 
 // ─── Shift Patterns (Phase 4+) ───────────────────────────────────────────────
 
