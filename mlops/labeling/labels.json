@@ -1,0 +1,24 @@
+{
+  "_comment": "Ground truth for the eval clips. See docs/MLFLOW_GUIDE.md §11. 0-people clips (mannequin, hand_ad) -> every detection is a false positive; fp_object_count is how many distinct FP objects exist (8 mannequins / 1 printed hand-ad). clip_cashier has 16 distinct people, peak 14. Phase 2 (optional): per_frame map {frame_index: people_count}.",
+  "clip_mannequin.mp4": {
+    "scene": "mannequin",
+    "duration_s": 33,
+    "total_people": 0,
+    "fp_object_count": 8,
+    "fp_objects_onscreen_full_clip": true,
+    "peak_people": 0
+  },
+  "hand_on_ad_in_store.mp4": {
+    "scene": "hand_ad",
+    "total_people": 0,
+    "fp_object_count": 1,
+    "fp_object_note": "single printed image of a human hand on an in-store advertisement; no real people. Tests the FP mode RT-DETR does NOT solve (detection_experiments Case 3).",
+    "peak_people": 0
+  },
+  "clip_cashier.mp4": {
+    "scene": "crowded",
+    "total_people": 16,
+    "peak_people": 14,
+    "per_frame": {}
+  }
+}

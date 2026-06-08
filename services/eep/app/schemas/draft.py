@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from app.utils.intrinsics import ALLOWED_LENS_FOCAL_LENGTHS_MM
+
 
 # ─── Draft Version ────────────────────────────────────────────────────────────
 
@@ -29,7 +31,7 @@ class DraftVersionResponse(BaseModel):
 class FloorPlanUploadResponse(BaseModel):
     id: uuid.UUID
     version_id: uuid.UUID
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     onboarding_method: str
     display_url: str | None = None
     width_px: int | None = None
@@ -121,13 +123,15 @@ class ZoneUpdate(BaseModel):
 class ZoneResponse(BaseModel):
     id: uuid.UUID
     version_id: uuid.UUID
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     name: str
     type: str
     points: list[list[float]]
     queue_threshold_people: int | None = None
     queue_threshold_minutes: int | None = None
     staff_absence_minutes: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -161,7 +165,7 @@ class ObstacleUpdate(BaseModel):
 class ObstacleResponse(BaseModel):
     id: uuid.UUID
     version_id: uuid.UUID
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     name: str | None = None
     points: list[list[float]]
 
@@ -169,6 +173,14 @@ class ObstacleResponse(BaseModel):
 
 
 # ─── Physical Cameras ─────────────────────────────────────────────────────────
+
+def _validate_lens(v: float | None) -> float | None:
+    if v is not None and v not in ALLOWED_LENS_FOCAL_LENGTHS_MM:
+        raise ValueError(
+            f"lens_focal_length_mm must be one of {list(ALLOWED_LENS_FOCAL_LENGTHS_MM)}"
+        )
+    return v
+
 
 class CreateCameraRequest(BaseModel):
     name: str
@@ -178,6 +190,13 @@ class CreateCameraRequest(BaseModel):
     cloud_stream_url: str | None = None
     stream_username: str | None = None
     stream_password: str | None = None
+    lens_focal_length_mm: float | None = None
+    h_fov_deg: float | None = None
+    v_fov_deg: float | None = None
+    stream_width: int | None = None
+    stream_height: int | None = None
+
+    _check_lens = field_validator("lens_focal_length_mm")(_validate_lens)
 
 
 class PatchCameraRequest(BaseModel):
@@ -187,6 +206,13 @@ class PatchCameraRequest(BaseModel):
     mounting: str | None = None
     cloud_stream_url: str | None = None
     is_active: bool | None = None
+    lens_focal_length_mm: float | None = None
+    h_fov_deg: float | None = None
+    v_fov_deg: float | None = None
+    stream_width: int | None = None
+    stream_height: int | None = None
+
+    _check_lens = field_validator("lens_focal_length_mm")(_validate_lens)
 
 
 class PhysicalCameraResponse(BaseModel):
@@ -199,8 +225,27 @@ class PhysicalCameraResponse(BaseModel):
     health_status: str
     is_active: bool
     last_seen_at: datetime | None = None
+    lens_focal_length_mm: float | None = None
+    h_fov_deg: float | None = None
+    v_fov_deg: float | None = None
+    stream_width: int | None = None
+    stream_height: int | None = None
+    fx: float | None = None
+    fy: float | None = None
+    cx: float | None = None
+    cy: float | None = None
+    dist_coeffs: list[float] | None = None
+    intrinsics_source: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class CameraIntrinsicsResponse(BaseModel):
+    """OpenCV-format intrinsics for consumption by IEP2 (M7-S2)."""
+    camera_matrix: list[list[float]]
+    dist_coeffs: list[float]
+    source: str | None = None
+    resolution: list[int | None]
 
 
 # ─── Camera Configs ───────────────────────────────────────────────────────────
@@ -225,7 +270,7 @@ class CameraConfigResponse(BaseModel):
     version_id: uuid.UUID
     physical_camera_id: uuid.UUID
     physical_camera_name: str
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     position_x: float
     position_y: float
     height_meters: float | None = None
@@ -270,6 +315,78 @@ class HomographyRequest(BaseModel):
         return v
 
 
+class PnpCorrespondence(BaseModel):
+    frame_px: float
+    frame_py: float
+    world_x: float
+    world_y: float
+    world_z: float = 0.0  # defaults to floor plane if not supplied
+
+
+class PnpRequest(BaseModel):
+    method: Literal["pnp"] = "pnp"
+    correspondences: list[PnpCorrespondence]
+
+    @field_validator("correspondences")
+    @classmethod
+    def min_six_points(cls, v: list[PnpCorrespondence]) -> list[PnpCorrespondence]:
+        if len(v) < 6:
+            raise ValueError("at least 6 correspondence points required")
+        return v
+
+
+class CameraPositionWorld(BaseModel):
+    x: float
+    y: float
+    z: float
+
+
+class PnpCalibrationResponse(BaseModel):
+    calibration_id: uuid.UUID
+    method: str
+    status: str
+    rms_reprojection_error: float
+    max_reprojection_error: float
+    point_count: int
+    quality: str
+    camera_position_world: CameraPositionWorld
+
+
+class ProjectPointRequest(BaseModel):
+    frame_px: float
+    frame_py: float
+
+
+class ProjectPointResponse(BaseModel):
+    method: str | None = None
+    world_x: float | None = None    # world metres
+    world_y: float | None = None    # world metres
+    map_px:  float | None = None    # canvas pixels (TPS: converted from world; others: passthrough)
+    map_py:  float | None = None    # canvas pixels
+
+
+# ─── TPS Calibration ──────────────────────────────────────────────────────────
+
+class TpsCorrespondence(BaseModel):
+    frame_px: float
+    frame_py: float
+    map_px:   float
+    map_py:   float
+
+
+class TpsRequest(BaseModel):
+    correspondences: list[TpsCorrespondence]
+
+
+class TpsCalibrationResponse(BaseModel):
+    calibration_id: uuid.UUID
+    method: str
+    status: str
+    coverage_score: float
+    point_count: int
+    quality: str    # "excellent" | "good"
+
+
 class CalibrationResponse(BaseModel):
     id: uuid.UUID
     camera_config_id: uuid.UUID
@@ -286,32 +403,6 @@ class CalibrationResponse(BaseModel):
     intrinsic_matrix: list | None = None
     computed_at: datetime | None = None
     verified_at: datetime | None = None
-
-    model_config = {"from_attributes": True}
-
-
-# ─── Sections (draft CRUD) ────────────────────────────────────────────────────
-
-class CreateSectionRequest(BaseModel):
-    name: str
-    type: str = "floor"
-    display_order: int = 0
-
-
-class PatchSectionRequest(BaseModel):
-    name: str | None = None
-    type: str | None = None
-    display_order: int | None = None
-
-
-class SectionResponse(BaseModel):
-    id: uuid.UUID
-    store_id: uuid.UUID
-    name: str
-    type: str
-    display_order: int
-    is_default: bool
-    status: str
 
     model_config = {"from_attributes": True}
 

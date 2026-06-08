@@ -21,8 +21,12 @@ services:
     build:
       args:
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
+        INSTALL_TRT: "false"
     environment:
-      INFERENCE_DEVICE: "gpu"      # warm up + default to GPU; toggle still overrides per run
+      INFERENCE_DEVICE: "gpu"
+      YOLO_MAX_BATCH_SIZE: "16"
+      YOLO_BATCH_TIMEOUT_MS: "200"
+      EXPORT_TRT: "false"          # TRT 11 does not support Pascal (GTX 1060 SM 6.1)
     deploy:
       resources:
         reservations:
@@ -32,6 +36,26 @@ services:
               capabilities: [gpu]
 
   reid-service:
+    build:
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
+    environment:
+      INFERENCE_DEVICE: "gpu"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # MLflow eval runner on GPU. Builds CUDA torch into the image and reserves the
+  # GPU for the run. Usage (note: include this file for BOTH build and run):
+  #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+  #     --profile mlops build mlops
+  #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+  #     --profile mlops run --rm mlops python mlops/eval/run_detection_eval.py
+  mlops:
     build:
       args:
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121

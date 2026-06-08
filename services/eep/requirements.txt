@@ -9,12 +9,15 @@ passlib[bcrypt]==1.7.4
 bcrypt==3.2.2
 python-multipart==0.0.9
 pydantic-settings==2.2.1
+prometheus-client==0.20.0
+prometheus-fastapi-instrumentator==7.0.0
 email-validator==2.1.1
 httpx==0.27.0
 aiosmtplib==3.0.1
 shapely==2.0.4
 opencv-python-headless==4.9.0.80
 numpy==1.26.4
+scipy==1.13.0
 apscheduler==3.10.4
 grpcio==1.64.0
 grpcio-reflection==1.64.0
@@ -26,3 +29,6 @@ psycopg2-binary==2.9.9
 # per-camera IEP2 containers via the host docker.sock. Not used in production
 # (k3s + Edge Agent manage IEP2 there).
 docker==7.1.0
+# Kubernetes Python client — used by iep3_manager to provision IEP3 StatefulSets
+# in the cloud cluster when a store version is activated. Not used in DEBUG_MODE.
+kubernetes>=29.0.0

@@ -192,7 +192,7 @@ def _infer_and_pack(model, batch_items: list[dict]) -> list[dict]:
 
     embeddings = model.forward(batch)
     if hasattr(embeddings, "cpu"):
-        embeddings = embeddings.cpu().numpy()
+        embeddings = embeddings.detach().cpu().numpy()
     embeddings = np.asarray(embeddings).reshape(len(batch_items), -1)  # [B, 2048]
 
     responses = []

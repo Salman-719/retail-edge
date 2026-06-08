@@ -13,8 +13,9 @@ _INSERT_SQL = """
 INSERT INTO tracking_history
     (store_id, camera_id, local_id, timestamp_ms,
      floor_x, floor_y, zone_id,
-     bbox_confidence, bbox_area)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     bbox_confidence, bbox_area,
+     bbox_x1, bbox_y1, bbox_x2, bbox_y2)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (camera_id, local_id, timestamp_ms) DO NOTHING
 """
 
@@ -131,6 +132,10 @@ class PostgresPersistence:
         floor_x: float | None,
         floor_y: float | None,
         zone_id: uuid.UUID | None,
+        bbox_x1: int | None = None,
+        bbox_y1: int | None = None,
+        bbox_x2: int | None = None,
+        bbox_y2: int | None = None,
     ) -> None:
         await self._pool.execute(
             _INSERT_SQL,
@@ -143,6 +148,10 @@ class PostgresPersistence:
             zone_id,
             bbox_confidence,
             bbox_area,
+            bbox_x1,
+            bbox_y1,
+            bbox_x2,
+            bbox_y2,
         )
         log.debug(
             "DB write  local_id=%s  ts=%d  conf=%.2f  area=%d",

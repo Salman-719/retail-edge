@@ -12,7 +12,11 @@ services:
   # ─── Infrastructure ───────────────────────────────────────────────────────────
 
   postgres:
-    image: postgres:16-alpine
+    # TimescaleDB drop-in replacement for postgres:16-alpine (SPEC-000).
+    # Same PG16 engine; bundles the timescaledb shared library and sets
+    # shared_preload_libraries on first init. Pinned — never use :latest or
+    # the -ha (HA clustering) variant. Requires a fresh data volume.
+    image: timescale/timescaledb:2.14.2-pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-retailvision}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-retailvision_dev}
@@ -84,6 +88,37 @@ services:
     image: prom/prometheus:v2.51.0
     ports:
       - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+    ports:
+      - "9121:9121"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  postgres_exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      # Connects directly to postgres (not pgbouncer) — reuses the same creds.
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  node_exporter:
+    image: prom/node-exporter:v1.8.1
+    ports:
+      - "9100:9100"
     restart: unless-stopped
 
   grafana:
@@ -96,6 +131,7 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
     restart: unless-stopped
@@ -213,6 +249,8 @@ services:
       - ipc-sockets:/tmp/sockets
     ports:
       - "50052:50052"
+    expose:
+      - "9400"            # Prometheus /metrics (job "detector")
     restart: on-failure
 
   # ── ReID embedding service (resnet50_msmt17) ─────────────────────────────────
@@ -276,7 +314,7 @@ services:
       dockerfile: Dockerfile
     environment:
       <<: *shared-config
-      STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
+      # STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
       # EXPECTED_CAMERAS removed — IEP3 now reads expected camera count from DB
       COORDINATOR_TIMEOUT_S: ${COORDINATOR_TIMEOUT_S:-120}
       REID_THRESHOLD: ${REID_THRESHOLD:-0.85}
@@ -290,6 +328,8 @@ services:
       DEFAULT_FRAME_HEIGHT: ${DEFAULT_FRAME_HEIGHT:-1080}
       EXPECTED_CAMERAS_REFRESH_BATCHES: ${EXPECTED_CAMERAS_REFRESH_BATCHES:-10}
       ORPHAN_SWEEP_INTERVAL_BATCHES: ${ORPHAN_SWEEP_INTERVAL_BATCHES:-50}
+    expose:
+      - "9300"            # Prometheus /metrics (job "iep3")
     depends_on:
       pgbouncer:
         condition: service_healthy
@@ -297,19 +337,49 @@ services:
         condition: service_healthy
     restart: on-failure
 
+  # IEP4 — alert evaluation daemon. One process per store (same pattern as
+  # IEP3). No HTTP port. STORE_ID must be set to the store this instance serves;
+  # like IEP3, real per-store instances are intended to be spawned by an EEP
+  # manager — set STORE_ID in the environment to run a single instance in dev.
   iep4_alerts:
     build:
       context: ./services/iep4_alerts
       dockerfile: Dockerfile
-    ports:
-      - "8004:8004"
+    environment:
+      <<: *shared-config
+      STORE_ID: ${STORE_ID:-}
+      EVALUATION_BATCHES: ${EVALUATION_BATCHES:-5}
+      MAX_LOOKBACK_BATCHES: ${MAX_LOOKBACK_BATCHES:-60}
+      CATCHUP_BATCH_SIZE: ${CATCHUP_BATCH_SIZE:-1}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+    restart: on-failure
 
+  # IEP5 — end-of-shift analytics job. Runs once per (store, shift_date) and
+  # exits; launched by EEP (k8s Job in prod / `docker compose run` in dev), not
+  # by `up`. The `jobs` profile keeps `up` from starting it. Run manually with:
+  #   docker compose ... run --rm -e STORE_ID=<uuid> -e SHIFT_DATE=<YYYY-MM-DD> iep5_analytics
   iep5_analytics:
+    profiles: ["jobs"]
     build:
       context: ./services/iep5_analytics
       dockerfile: Dockerfile
-    ports:
-      - "8005:8005"
+    environment:
+      <<: *shared-config
+      STORE_ID: ${STORE_ID:-}
+      SHIFT_DATE: ${SHIFT_DATE:-}
+      HEATMAP_CELL_SIZE_M: ${HEATMAP_CELL_SIZE_M:-0.5}
+      PASSTHROUGH_DWELL_MS: ${PASSTHROUGH_DWELL_MS:-30000}
+      DEAD_PERIOD_THRESHOLD: ${DEAD_PERIOD_THRESHOLD:-3}
+      DEAD_PERIOD_DURATION_MS: ${DEAD_PERIOD_DURATION_MS:-1800000}
+    restart: "no"
 
   iep6_agent:
     build:
@@ -405,6 +475,7 @@ volumes:
   redis_data:
   minio_data:
   grafana_data:
+  prometheus_data:
   # Shared tmpfs for JPEG frames produced by IEP1 daemon and consumed by IEP2.
   # In production the edge device writes frames locally; in compose they share
   # this volume so IEP2 can read the tmpfs paths IEP1 writes to manifests.
@@ -429,3 +500,11 @@ volumes:
     driver_opts:
       type: tmpfs
       device: tmpfs
+
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      # Lower MTU avoids SSL EOF errors on Windows Docker Desktop + WSL2 where
+      # the host network may have a smaller MTU than Docker's default of 1500.
+      com.docker.network.driver.mtu: "1450"

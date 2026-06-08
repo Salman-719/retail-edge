@@ -7,7 +7,6 @@ import {
 import { Stage, Layer, Image as KonvaImage, Rect } from 'react-konva'
 import { getActiveVersion } from '../api'
 import { usePageTitle } from '../components/PageMeta'
-import SectionTabs from '../components/SectionTabs'
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
 
@@ -227,31 +226,15 @@ export default function Analytics() {
   // MOCK: replace with GET /store/{slug}/analytics/heatmap
   const [heatGrid]       = useState(buildHeatmapMock)
 
-  const [sections, setSections] = useState([])
-  const [selectedSectionId, setSelectedSectionId] = useState(null)
   const [floorPlan, setFloorPlan] = useState(null)
   const [loadingFp, setLoadingFp] = useState(true)
 
   useEffect(() => {
     getActiveVersion(slug)
-      .then(v => {
-        const secs = v?.sections || []
-        setSections(secs)
-        const defaultSec = secs.find(s => s.is_default) || secs[0] || null
-        setSelectedSectionId(defaultSec?.id || null)
-        setFloorPlan(defaultSec?.floor_plan || null)
-      })
-      .catch(() => { setSections([]); setFloorPlan(null) })
+      .then(v => setFloorPlan(v?.floor_plan || null))
+      .catch(() => setFloorPlan(null))
       .finally(() => setLoadingFp(false))
   }, [slug])
-
-  // When the selected section changes, sync the floor plan
-  useEffect(() => {
-    const sec = sections.find(s => s.id === selectedSectionId)
-    if (sec) setFloorPlan(sec.floor_plan || null)
-  }, [selectedSectionId, sections])
-
-  const selectedSection = sections.find(s => s.id === selectedSectionId) || sections[0] || null
 
   return (
     <div className="page-enter flex flex-col h-full overflow-hidden">
@@ -316,16 +299,9 @@ export default function Analytics() {
           </div>
         </div>
 
-        {/* ── Section selector ─────────────────────────────────────────────── */}
-        <SectionTabs
-          sections={sections}
-          selectedId={selectedSectionId}
-          onChange={setSelectedSectionId}
-        />
-
         {/* ── Zone Traffic line chart ──────────────────────────────────────── */}
         {/* MOCK: replace zoneTraffic with GET /store/{slug}/analytics/zone-traffic */}
-        <Section title={`Zone Traffic — ${selectedSection?.name || 'Hourly Foot Traffic'}`}>
+        <Section title="Zone Traffic — Hourly Foot Traffic">
           <ResponsiveContainer width="100%" height={280}>
             <LineChart data={zoneTraffic} margin={{ top: 4, right: 24, left: 0, bottom: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
@@ -426,7 +402,7 @@ export default function Analytics() {
 
         {/* ── Heatmap ──────────────────────────────────────────────────────── */}
         {/* MOCK: replace heatGrid with GET /store/{slug}/analytics/heatmap */}
-        <Section title={`Dwell-Time Heatmap — ${selectedSection?.name || ''}`}>
+        <Section title="Dwell-Time Heatmap">
           {loadingFp ? (
             <div className="skeleton h-48 w-full rounded-lg" />
           ) : (

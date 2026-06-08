@@ -76,17 +76,23 @@ IEP2  Vision         per camera: RT-DETR detect → BoTSORT → resnet50_msmt17 
 IEP3  Reconciliation cross-camera: cosine ReID match → global identities
    │                 → canonical per-person floor trajectory
    ▼
-IEP4/5/6  (planned)  alerts · analytics aggregation · AI agent (NL queries)
+IEP4/5/6             alerts (IEP4) · end-of-shift analytics (IEP5) · AI agent (IEP6, NL queries)
 ```
+
+> **Observability + MLOps:** Prometheus + Grafana + exporters scrape the cloud
+> services; MLflow provides experiment tracking + a model registry (artifacts in
+> S3). PostgreSQL is **TimescaleDB** (hypertables power the IEP5 analytics rollups).
+> See `docs/PROMETHEUS_GRAFANA_GUIDE.md`, `docs/MLFLOW_GUIDE.md`,
+> `docs/MLOPS_PIPELINE.md`.
 
 | Stage | Where it runs | Cardinality | Responsibility |
 |---|---|---|---|
 | **IEP1 — Ingestion** | Edge | 1 daemon per device (all cameras) | Pull RTSP/video, sample at `target_fps`, write JPEG frames to tmpfs, emit a 60 s **window manifest** to edge-local Redis. |
 | **IEP2 — Vision** | Edge | 1 deployment **per camera** | Read the manifest, run **RT-DETR** person detection → **BoTSORT** in-frame tracking (ReID off) → **resnet50_msmt17** ReID embeddings → **homography** projection to floor coordinates. Writes `tracking_history`, publishes `batch_complete`. |
 | **IEP3 — Reconciliation** | Cloud | 1 per store | The brain. Consumes every camera's `batch_complete`, waits for all cameras in a window, then **cosine-matches embeddings across cameras** to merge local tracks into **global identities** and picks one canonical floor position per person per timestamp. Manages identity state (ACTIVE → LOST → EXITED). |
-| **IEP4 — Alerts** | Cloud | planned | Rule/threshold alerts (e.g. occupancy over limit). |
-| **IEP5 — Analytics** | Cloud | planned | Aggregation of global trajectories into dashboards (dwell, flow, heatmaps). |
-| **IEP6 — Agent** | Cloud | planned | Natural-language analytics agent over the data. |
+| **IEP4 — Alerts** | Cloud | 1 per store (provisioned by EEP) | Rule/threshold alerts (queue buildup, staff zone/employee) with cooldown + SMTP delivery. See `docs/services/IEP4_ALERTS.md`. |
+| **IEP5 — Analytics** | Cloud | 1 Job per (store, shift) | End-of-shift aggregation of global trajectories (visits, dwell, occupancy, heatmaps) into TimescaleDB rollups. See `docs/services/IEP5_ANALYTICS.md`. |
+| **IEP6 — Agent** | Cloud | 1 | Natural-language analytics agent (OpenAI) over the data. See `docs/services/IEP6_AGENT.md`. |
 | **EEP** | Cloud | 1 | REST API + gRPC control plane + scheduler. The management brain. |
 | **Edge Agent** | Edge | 1 per device | Thin gRPC relay: turns EEP's StartCamera/StopCamera into k3s deployments. |
 | **Live Bridge** | Cloud | 1 | WebSocket relay of live frames + detections to the browser. |

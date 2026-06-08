@@ -1,13 +1,75 @@
 import logging
+import uuid as _uuid
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import make_msgid, formatdate
 
 import aiosmtplib
+from sqlalchemy import text
 
 from app.core.config import settings
+from app.core.database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
+
+
+# Owner (stores.created_by) + members with the receive_notifications permission.
+_SHIFT_ALERT_RECIPIENTS = text("""
+    SELECT u.email FROM users u
+    JOIN store_members sm ON sm.user_id = u.id
+    JOIN store_member_permissions smp ON smp.store_member_id = sm.id
+    WHERE sm.store_id = :sid
+      AND smp.permission = 'receive_notifications'
+      AND smp.granted = TRUE
+    UNION
+    SELECT u.email FROM users u
+    JOIN stores s ON s.created_by = u.id
+    WHERE s.id = :sid
+""")
+
+
+async def send_shift_failure_alert(store_id, shift_date, failed_step: str, error_msg: str) -> None:
+    """Notify the store owner + managers that the end-of-shift closing sequence
+    failed and the analytics job was not started. Plain text. SMTP-optional:
+    when SMTP is not configured (dev), the alert is logged and skipped."""
+    sid = _uuid.UUID(store_id) if isinstance(store_id, str) else store_id
+    async with AsyncSessionLocal() as db:
+        store_name = (await db.execute(
+            text("SELECT name FROM stores WHERE id = :sid"), {"sid": sid})).scalar() or str(store_id)
+        rows = (await db.execute(_SHIFT_ALERT_RECIPIENTS, {"sid": sid})).fetchall()
+    recipients = [r[0] for r in rows if r[0]]
+
+    body = (
+        "The end-of-shift closing sequence failed and the analytics job was NOT started.\n\n"
+        f"Store: {store_name}\n"
+        f"Shift date: {shift_date}\n"
+        f"Failed step: {failed_step}\n"
+        f"Error: {error_msg}\n"
+    )
+    if not recipients or not settings.SMTP_HOST or not settings.SMTP_USER:
+        logger.warning(
+            "Shift failure alert (email skipped — recipients=%d, smtp_configured=%s) "
+            "store=%s step=%s: %s",
+            len(recipients), bool(settings.SMTP_HOST and settings.SMTP_USER),
+            store_id, failed_step, error_msg,
+        )
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"[RetailVision] End-of-shift analytics FAILED — {store_name}"
+    msg["From"] = settings.SMTP_FROM
+    msg["To"] = ", ".join(recipients)
+    msg["Message-ID"] = make_msgid(domain="retailvision.ai")
+    msg["Date"] = formatdate(localtime=False)
+    msg.attach(MIMEText(body, "plain"))
+    try:
+        await aiosmtplib.send(
+            msg, hostname=settings.SMTP_HOST, port=settings.SMTP_PORT,
+            username=settings.SMTP_USER, password=settings.SMTP_PASSWORD, start_tls=True,
+        )
+        logger.info("Shift failure alert sent to %d recipient(s) store=%s", len(recipients), store_id)
+    except Exception as exc:
+        logger.error("Failed to send shift failure alert store=%s: %s", store_id, exc)
 
 
 async def send_invitation_email(to_email: str, store_name: str, slug: str, token: str) -> None:

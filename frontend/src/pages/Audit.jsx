@@ -113,11 +113,11 @@ const ACTION_GROUPS = {
   Store: ['store_created', 'store_updated'],
   Members: ['member_invited', 'member_removed', 'member_role_changed', 'permission_changed'],
   Config: ['draft_created', 'draft_discarded', 'draft_expired', 'config_edited', 'version_activated', 'version_rolled_back'],
-  Employees: ['employee_created', 'employee_updated', 'employee_deleted', 'employee_section_assigned', 'employee_section_removed'],
+  Employees: ['employee_created', 'employee_updated', 'employee_deleted'],
   Shifts: ['shift_pattern_created', 'shift_pattern_updated', 'shift_pattern_deleted', 'shift_created', 'shift_updated', 'shift_deleted', 'shift_employee_assigned', 'shift_attendance_updated', 'break_created'],
 }
 
-const ENTITY_TYPES = ['store', 'store_config_version', 'member', 'employee', 'employee_section', 'shift_pattern', 'shift_instance', 'shift_assignment', 'break_record']
+const ENTITY_TYPES = ['store', 'store_config_version', 'member', 'employee', 'shift_pattern', 'shift_instance', 'shift_assignment', 'break_record']
 
 const PAGE_SIZE = 50
 

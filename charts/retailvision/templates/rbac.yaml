@@ -1,12 +1,68 @@
 ---
+# EEP runs as this ServiceAccount and dynamically provisions the per-store
+# pipeline workers via the k8s API (see services/eep/app/core/iep{3,4,5}_manager.py):
+#   IEP3 — StatefulSet + headless Service (reconciliation)
+#   IEP4 — StatefulSet (alert daemon)
+#   IEP5 — batch/v1 Job (end-of-shift analytics)
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: eep
   namespace: retailvision
 ---
+# Worker ServiceAccounts. The worker pods do NOT call the k8s API; these SAs only
+# need to exist so the pods EEP creates (which reference them) can be admitted.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: iep3
   namespace: retailvision
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: iep4
+  namespace: retailvision
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: iep5
+  namespace: retailvision
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: eep-pipeline-manager
+  namespace: retailvision
+rules:
+  # IEP3/IEP4 StatefulSets
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # IEP3 headless Services
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # IEP5 end-of-shift Jobs
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "delete"]
+  # Pod status inspection (provisioning health checks / debugging)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: eep-pipeline-manager
+  namespace: retailvision
+subjects:
+  - kind: ServiceAccount
+    name: eep
+    namespace: retailvision
+roleRef:
+  kind: Role
+  name: eep-pipeline-manager
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 15s          # how often to pull every target
+
+rule_files:
+  - alert_rules.yml             # RetailVision alerting rules
+
+scrape_configs:
+  - job_name: prometheus        # Prometheus scraping itself (sanity)
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: eep               # EEP FastAPI app (/metrics via instrumentator)
+    static_configs:
+      - targets: ["eep:8000"]
+
+  - job_name: iep3              # IEP3 reconciliation daemon (the "brain")
+    static_configs:
+      - targets: ["iep3_reconciliation:9300"]
+
+  - job_name: detector         # Detector service (RT-DETR-x prod / YOLO11n dev), Tier 2
+    static_configs:
+      - targets: ["yolo-service:9400"]
+
+  - job_name: redis            # Redis via redis_exporter (zero-code stream metrics)
+    static_configs:
+      - targets: ["redis_exporter:9121"]
+
+  - job_name: postgres         # Postgres via postgres_exporter
+    static_configs:
+      - targets: ["postgres_exporter:9187"]
+
+  - job_name: node             # Host CPU/RAM via node_exporter
+    static_configs:
+      - targets: ["node_exporter:9100"]

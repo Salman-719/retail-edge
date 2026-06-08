@@ -1,0 +1,125 @@
+{{- if .Values.mlflow.enabled }}
+# ── MLflow tracking server + model registry ──────────────────────────────────
+# Reuses the mlops image (mlflow + boto3). SQLite backend on a PVC; S3 artifact
+# store served through the tracking server (--serve-artifacts), so eval clients
+# only need MLFLOW_TRACKING_URI=http://mlflow:5000 (no S3 creds client-side).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-data
+  namespace: retailvision
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.global.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.mlflow.storage | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: retailvision
+  labels:
+    app: mlflow
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      containers:
+        - name: mlflow
+          image: "{{ .Values.global.imageRegistry }}/mlflow:{{ .Values.mlflow.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["mlflow", "server"]
+          args:
+            - "--host=0.0.0.0"
+            - "--port=5000"
+            - "--backend-store-uri=sqlite:////mlflow/mlflow.db"
+            - "--artifacts-destination=s3://{{ .Values.s3.bucket }}/{{ .Values.mlflow.artifactPrefix }}"
+            - "--serve-artifacts"
+          env:
+            - name: AWS_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: {{ .Values.s3.endpointUrl | default (printf "https://s3.%s.amazonaws.com" .Values.s3.region) | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: s3-access-key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: s3-secret-key
+          ports:
+            - containerPort: 5000
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /mlflow
+          resources: {{ toYaml .Values.mlflow.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mlflow-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: retailvision
+  labels:
+    app: mlflow
+spec:
+  type: ClusterIP
+  selector:
+    app: mlflow
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+{{- if .Values.mlflow.host }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mlflow
+  namespace: retailvision
+  annotations:
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | quote }}
+spec:
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  tls:
+    - hosts:
+        - {{ .Values.mlflow.host | quote }}
+      secretName: mlflow-tls
+  rules:
+    - host: {{ .Values.mlflow.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mlflow
+                port:
+                  number: 5000
+{{- end }}
+{{- end }}

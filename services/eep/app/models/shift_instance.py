@@ -14,9 +14,6 @@ class ShiftInstance(Base):
     employee_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False
     )
-    section_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("sections.id", ondelete="CASCADE"), nullable=False
-    )
     shift_pattern_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("shift_patterns.id", ondelete="SET NULL"), nullable=True
     )

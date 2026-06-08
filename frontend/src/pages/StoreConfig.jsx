@@ -1,14 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
-import { Plus, Pencil, Trash2, Check, X, Warehouse } from 'lucide-react'
+import { Warehouse } from 'lucide-react'
 import {
-  getDraft, getActiveVersion, listSections, listVersions, reactivateVersion,
-  createSection, patchSection, deleteSection,
+  getDraft, getActiveVersion, listVersions, reactivateVersion,
   patchCamera, updateCameraConfig,
 } from '../api'
 import { usePageTitle } from '../components/PageMeta'
-import SectionTabs from '../components/SectionTabs'
 
 const ZONE_COLORS = {
   entrance: '#3b82f6',
@@ -48,7 +46,7 @@ function FloorPlanCanvas({ floorPlan, zones, obstacles, cameraConfigs }) {
     return (
       <div className="flex flex-col items-center justify-center h-64 bg-gray-50 rounded-lg text-gray-400 text-sm gap-2 border border-dashed border-gray-200">
         <span className="text-3xl">🗺️</span>
-        <span>No floor plan uploaded for this section</span>
+        <span>No floor plan uploaded yet</span>
       </div>
     )
   }
@@ -111,17 +109,17 @@ function FloorPlanCanvas({ floorPlan, zones, obstacles, cameraConfigs }) {
   )
 }
 
-// ─── Section step progress ────────────────────────────────────────────────────
+// ─── Setup step progress ──────────────────────────────────────────────────────
 
 const STEPS = [
-  { label: 'Floor Plan', done: s => !!s?.floor_plan?.image_uploaded },
-  { label: 'Zones',      done: s => (s?.zones?.length ?? 0) > 0 },
-  { label: 'Cameras',    done: s => (s?.camera_configs?.length ?? 0) > 0 },
-  { label: 'Obstacles',  done: s => (s?.obstacles?.length ?? 0) > 0 },
+  { label: 'Floor Plan', done: v => !!v?.floor_plan?.image_uploaded },
+  { label: 'Zones',      done: v => (v?.zones?.length ?? 0) > 0 },
+  { label: 'Cameras',    done: v => (v?.camera_configs?.length ?? 0) > 0 },
+  { label: 'Obstacles',  done: v => (v?.obstacles?.length ?? 0) > 0 },
 ]
 
-function SectionStepProgress({ section }) {
-  const completions = STEPS.map(step => step.done(section))
+function SetupProgress({ version }) {
+  const completions = STEPS.map(step => step.done(version))
   const currentIdx = completions.findIndex(c => !c)
 
   return (
@@ -153,191 +151,6 @@ function SectionStepProgress({ section }) {
   )
 }
 
-// ─── Sections panel ───────────────────────────────────────────────────────────
-
-function SectionsPanel({ slug, sections, selectedSectionId, onSelect, onSectionsChanged, versionSections = [], onRequestAdd }) {
-  // Build a lookup map from version data (has camera_configs, zones, floor_plan)
-  const versionMap = Object.fromEntries(versionSections.map(s => [s.id, s]))
-  const [adding, setAdding] = useState(false)
-  const [newName, setNewName] = useState('')
-  const [editingId, setEditingId] = useState(null)
-  const [editName, setEditName] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState('')
-  const addInputRef = useRef(null)
-  const editInputRef = useRef(null)
-
-  useEffect(() => { if (adding) addInputRef.current?.focus() }, [adding])
-  useEffect(() => { if (editingId) editInputRef.current?.focus() }, [editingId])
-  useEffect(() => {
-    if (onRequestAdd) { onRequestAdd(() => { setAdding(true); setEditingId(null) }) }
-  }, [])
-
-  async function handleCreate(e) {
-    e.preventDefault()
-    const name = newName.trim()
-    if (!name) return
-    setBusy(true); setErr('')
-    try {
-      const created = await createSection(slug, { name, type: 'floor', display_order: sections.length })
-      setNewName(''); setAdding(false)
-      onSectionsChanged(created)
-    } catch (e) {
-      setErr(e.response?.data?.detail?.error || 'Failed to create section')
-    } finally { setBusy(false) }
-  }
-
-  async function handleRename(section) {
-    const name = editName.trim()
-    if (!name || name === section.name) { setEditingId(null); return }
-    setBusy(true); setErr('')
-    try {
-      const updated = await patchSection(slug, section.id, { name })
-      setEditingId(null)
-      onSectionsChanged(updated)
-    } catch (e) {
-      setErr(e.response?.data?.detail?.error || 'Failed to rename section')
-    } finally { setBusy(false) }
-  }
-
-  async function handleDelete(section) {
-    if (!window.confirm(`Delete section "${section.name}"? This cannot be undone.`)) return
-    setBusy(true); setErr('')
-    try {
-      await deleteSection(slug, section.id)
-      onSectionsChanged(null, section.id)
-    } catch (e) {
-      setErr(e.response?.data?.detail?.error || 'Failed to delete section')
-    } finally { setBusy(false) }
-  }
-
-  function startEdit(section) {
-    setEditingId(section.id)
-    setEditName(section.name)
-    setAdding(false)
-  }
-
-  function cancelEdit() { setEditingId(null); setErr('') }
-  function cancelAdd() { setAdding(false); setNewName(''); setErr('') }
-
-  return (
-    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-      <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-gray-700">Sections</h3>
-        <button
-          onClick={() => { setAdding(true); setEditingId(null) }}
-          disabled={busy || adding}
-          className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium disabled:opacity-40"
-        >
-          <Plus size={13} /> Add
-        </button>
-      </div>
-
-      <div className="divide-y divide-gray-50">
-        {sections.map(s => (
-          <div
-            key={s.id}
-            className={`flex items-center gap-2 px-3 py-2.5 group transition-colors ${
-              s.id === selectedSectionId ? 'bg-blue-50' : 'hover:bg-gray-50'
-            }`}
-          >
-            {editingId === s.id ? (
-              <form onSubmit={e => { e.preventDefault(); handleRename(s) }} className="flex-1 flex items-center gap-1.5">
-                <input
-                  ref={editInputRef}
-                  value={editName}
-                  onChange={e => setEditName(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Escape') cancelEdit() }}
-                  className="flex-1 text-sm border border-blue-400 rounded px-2 py-0.5 focus:outline-none focus:ring-2 focus:ring-blue-200 min-w-0"
-                  disabled={busy}
-                />
-                <button type="submit" disabled={busy} className="text-green-600 hover:text-green-800 p-0.5">
-                  <Check size={14} />
-                </button>
-                <button type="button" onClick={cancelEdit} className="text-gray-400 hover:text-gray-600 p-0.5">
-                  <X size={14} />
-                </button>
-              </form>
-            ) : (
-              <>
-                <button
-                  onClick={() => onSelect(s.id)}
-                  className="flex-1 text-left min-w-0"
-                >
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className={`text-sm truncate ${s.id === selectedSectionId ? 'text-blue-700 font-semibold' : 'text-gray-700'}`}>
-                      {s.name}
-                    </span>
-                    {versionMap[s.id] && !versionMap[s.id].floor_plan?.image_uploaded && (
-                      <span className="text-[10px] text-amber-600 bg-amber-50 rounded px-1.5 shrink-0 whitespace-nowrap">
-                        No floor plan
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                    {s.is_default && (
-                      <span className="text-[10px] text-gray-400 uppercase tracking-wide">Default</span>
-                    )}
-                    {versionMap[s.id] && (
-                      <span className="text-xs text-gray-400">
-                        {versionMap[s.id].camera_configs?.length ?? 0} cameras · {versionMap[s.id].zones?.length ?? 0} zones
-                      </span>
-                    )}
-                  </div>
-                </button>
-                <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                  <button
-                    onClick={() => startEdit(s)}
-                    disabled={busy}
-                    className="p-1 rounded text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
-                    title="Rename"
-                  >
-                    <Pencil size={12} />
-                  </button>
-                  {!s.is_default && (
-                    <button
-                      onClick={() => handleDelete(s)}
-                      disabled={busy}
-                      className="p-1 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-                      title="Delete"
-                    >
-                      <Trash2 size={12} />
-                    </button>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        ))}
-
-        {adding && (
-          <form onSubmit={handleCreate} className="px-3 py-2.5 flex items-center gap-1.5 bg-blue-50/50">
-            <input
-              ref={addInputRef}
-              value={newName}
-              onChange={e => setNewName(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Escape') cancelAdd() }}
-              placeholder="Section name…"
-              className="flex-1 text-sm border border-blue-400 rounded px-2 py-0.5 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-white min-w-0"
-              disabled={busy}
-            />
-            <button type="submit" disabled={busy || !newName.trim()} className="text-green-600 hover:text-green-800 p-0.5 disabled:opacity-40">
-              <Check size={14} />
-            </button>
-            <button type="button" onClick={cancelAdd} className="text-gray-400 hover:text-gray-600 p-0.5">
-              <X size={14} />
-            </button>
-          </form>
-        )}
-      </div>
-
-      {err && (
-        <div className="px-3 py-2 text-xs text-red-600 bg-red-50 border-t border-red-100">{err}</div>
-      )}
-    </div>
-  )
-}
-
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function StoreConfig() {
@@ -349,11 +162,8 @@ export default function StoreConfig() {
   const [error, setError] = useState(null)
   const [version, setVersion] = useState(null)
   const [versions, setVersions] = useState([])
-  const [sections, setSections] = useState([])
-  const [selectedSectionId, setSelectedSectionId] = useState(null)
   const [draft, setDraft] = useState(null)
   const [restoring, setRestoring] = useState(null)
-  const startAddingSectionRef = useRef(null)
   const [editingCameraId, setEditingCameraId] = useState(null)
   const [editCameraForm, setEditCameraForm] = useState({ height_meters: '', stream_url: '' })
   const [savingCamera, setSavingCamera] = useState(false)
@@ -364,18 +174,11 @@ export default function StoreConfig() {
     Promise.all([
       getActiveVersion(slug).catch(() => null),
       listVersions(slug).catch(() => []),
-      listSections(slug).catch(() => []),
       getDraft(slug).catch(() => null),
-    ]).then(([v, vs, sects, d]) => {
+    ]).then(([v, vs, d]) => {
       setVersion(v)
       setVersions(vs)
-      setSections(sects)
       setDraft(d)
-      setSelectedSectionId(prev => {
-        // keep selection if still valid, else default to first
-        if (prev && sects.some(s => s.id === prev)) return prev
-        return v?.sections?.[0]?.id || sects[0]?.id || null
-      })
       setLoading(false)
     }).catch(err => {
       setError(err.message)
@@ -384,31 +187,6 @@ export default function StoreConfig() {
   }
 
   useEffect(() => { reload() }, [slug])
-
-
-  // Called by SectionsPanel after create/rename/delete
-  function handleSectionsChanged(updated, deletedId) {
-    if (deletedId) {
-      setSections(prev => {
-        const next = prev.filter(s => s.id !== deletedId)
-        // If we deleted the selected one, fall back to first remaining
-        if (selectedSectionId === deletedId) {
-          setSelectedSectionId(next[0]?.id || null)
-        }
-        return next
-      })
-    } else if (updated) {
-      setSections(prev => {
-        const exists = prev.some(s => s.id === updated.id)
-        const next = exists
-          ? prev.map(s => s.id === updated.id ? updated : s)
-          : [...prev, updated]
-        // Auto-select newly created section
-        if (!exists) setSelectedSectionId(updated.id)
-        return next
-      })
-    }
-  }
 
   async function handleRestore(versionId) {
     if (!window.confirm('Restore this version as active? The current active version will be archived.')) return
@@ -460,72 +238,43 @@ export default function StoreConfig() {
           </button>
         </header>
 
-        <div className="flex-1 p-6 grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Sections panel — available even with no active config */}
-          <div className="lg:col-span-1 space-y-4">
-            <SectionsPanel
-              slug={slug}
-              sections={sections}
-              selectedSectionId={selectedSectionId}
-              onSelect={setSelectedSectionId}
-              onSectionsChanged={handleSectionsChanged}
-              onRequestAdd={fn => { startAddingSectionRef.current = fn }}
-            />
-          </div>
-
-          <div className="lg:col-span-3 space-y-4">
-            {draft && (
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-center justify-between">
-                <div>
-                  <p className="text-blue-800 font-semibold text-sm">Setup in progress</p>
-                  <p className="text-blue-600 text-xs mt-0.5">You have an unfinished configuration draft.</p>
-                </div>
-                <button
-                  onClick={() => navigate(`/store/${slug}/config/edit`)}
-                  className="btn-primary text-xs py-1.5"
-                >
-                  Continue
-                </button>
+        <div className="flex-1 p-6">
+          {draft && (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-center justify-between mb-4 max-w-2xl">
+              <div>
+                <p className="text-blue-800 font-semibold text-sm">Setup in progress</p>
+                <p className="text-blue-600 text-xs mt-0.5">You have an unfinished configuration draft.</p>
               </div>
-            )}
-            {sections.length === 0 ? (
-              <div className="bg-white border border-gray-200 rounded-xl p-8 flex flex-col items-center justify-center text-center gap-4">
-                <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center">
-                  <Warehouse size={28} className="text-blue-500" />
-                </div>
-                <div>
-                  <h2 className="text-base font-semibold text-gray-800 mb-1">Set up your first section</h2>
-                  <p className="text-sm text-gray-500 max-w-sm">
-                    Sections represent distinct physical areas of your store, each covered by a dedicated camera group.
-                    Add a section to start mapping your floor plan, zones, and cameras.
-                  </p>
-                </div>
-                <button
-                  onClick={() => startAddingSectionRef.current?.()}
-                  className="btn-primary"
-                >
-                  Add Section
-                </button>
-              </div>
-            ) : (
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center">
-                <p className="text-amber-800 font-semibold mb-1">No active configuration</p>
-                <p className="text-amber-700 text-sm">
-                  Complete the onboarding wizard to configure floor plans, cameras and zones for each section.
-                </p>
-              </div>
-            )}
+              <button
+                onClick={() => navigate(`/store/${slug}/config/edit`)}
+                className="btn-primary text-xs py-1.5"
+              >
+                Continue
+              </button>
+            </div>
+          )}
+          <div className="bg-white border border-gray-200 rounded-xl p-8 flex flex-col items-center justify-center text-center gap-4 max-w-2xl">
+            <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center">
+              <Warehouse size={28} className="text-blue-500" />
+            </div>
+            <div>
+              <h2 className="text-base font-semibold text-gray-800 mb-1">Set up your store</h2>
+              <p className="text-sm text-gray-500 max-w-sm">
+                Run the onboarding wizard to map your floor plan, draw zones, and place
+                and calibrate cameras.
+              </p>
+            </div>
+            <button onClick={() => navigate(`/store/${slug}/config/edit`)} className="btn-primary">
+              {draft ? 'Continue Setup' : 'Start Onboarding'}
+            </button>
           </div>
         </div>
       </div>
     )
   }
 
-  // Merge version sections with raw sections list so the panel always reflects latest state
-  const mergedSections = sections.length > 0 ? sections : (version.sections || [])
-  const selectedSection = version.sections?.find(s => s.id === selectedSectionId)
-    || (selectedSectionId ? null : version.sections?.[0])
-    || null
+  const zones = version.zones || []
+  const cameraConfigs = version.camera_configs || []
 
   return (
     <div className="page-enter flex flex-col h-full overflow-auto">
@@ -545,7 +294,7 @@ export default function StoreConfig() {
             </span>
           )}
           <button
-            onClick={() => navigate(`/store/${slug}/config/edit${selectedSectionId ? `?section=${selectedSectionId}` : ''}`)}
+            onClick={() => navigate(`/store/${slug}/config/edit`)}
             className="btn-primary"
           >
             {draft ? 'Continue Draft' : 'Edit Configuration'}
@@ -559,24 +308,14 @@ export default function StoreConfig() {
           {/* Left panel */}
           <div className="lg:col-span-1 space-y-4">
 
-            {/* Sections — full management panel */}
-            <SectionsPanel
-              slug={slug}
-              sections={mergedSections}
-              selectedSectionId={selectedSectionId}
-              onSelect={setSelectedSectionId}
-              onSectionsChanged={handleSectionsChanged}
-              versionSections={version?.sections || []}
-            />
-
-            {/* Zone legend for selected section */}
-            {selectedSection?.zones?.length > 0 && (
+            {/* Zone legend */}
+            {zones.length > 0 && (
               <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
                 <h3 className="text-sm font-semibold text-gray-700 mb-3">
-                  Zones <span className="text-gray-400 font-normal">({selectedSection.zones.length})</span>
+                  Zones <span className="text-gray-400 font-normal">({zones.length})</span>
                 </h3>
                 <div className="space-y-2">
-                  {selectedSection.zones.map(z => (
+                  {zones.map(z => (
                     <div key={z.id} className="flex items-center gap-2 text-sm">
                       <span className="w-3 h-3 rounded-sm flex-shrink-0" style={{ background: ZONE_COLORS[z.type] }} />
                       <span className="text-gray-700 truncate">{z.name}</span>
@@ -587,14 +326,14 @@ export default function StoreConfig() {
               </div>
             )}
 
-            {/* Camera list for selected section */}
-            {selectedSection?.camera_configs?.length > 0 && (
+            {/* Camera list */}
+            {cameraConfigs.length > 0 && (
               <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
                 <h3 className="text-sm font-semibold text-gray-700 mb-3">
-                  Cameras <span className="text-gray-400 font-normal">({selectedSection.camera_configs.length})</span>
+                  Cameras <span className="text-gray-400 font-normal">({cameraConfigs.length})</span>
                 </h3>
                 <div className="space-y-1">
-                  {selectedSection.camera_configs.map(cc => (
+                  {cameraConfigs.map(cc => (
                     <div key={cc.id} className="rounded border border-gray-100 text-sm">
                       <div className="flex items-center gap-2 px-3 py-2">
                         <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
@@ -638,9 +377,7 @@ export default function StoreConfig() {
                               const patchCc = c => c.id === cc.id
                                 ? { ...c, height_meters: editCameraForm.height_meters ? parseFloat(editCameraForm.height_meters) : c.height_meters, stream_url: editCameraForm.stream_url.trim() || null }
                                 : c
-                              const patchSections = ss => ss?.map(s => ({ ...s, camera_configs: s.camera_configs?.map(patchCc) }))
-                              setVersion(v => ({ ...v, sections: patchSections(v?.sections) }))
-                              setSections(prev => patchSections(prev))
+                              setVersion(v => ({ ...v, camera_configs: v?.camera_configs?.map(patchCc) }))
                               setEditingCameraId(null)
                             } catch (err) {
                               setError(err?.response?.data?.detail?.error || err?.response?.data?.error || err.message)
@@ -687,14 +424,14 @@ export default function StoreConfig() {
               </div>
             )}
 
-            {/* Empty state for section with no config data */}
-            {selectedSection && !selectedSection.zones?.length && !selectedSection.camera_configs?.length && (
+            {/* Empty state when no zones or cameras configured */}
+            {!zones.length && !cameraConfigs.length && (
               <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm text-center">
                 <p className="text-xs text-gray-400">
-                  No zones or cameras configured for this section yet.
+                  No zones or cameras configured yet.
                 </p>
                 <button
-                  onClick={() => navigate(`/store/${slug}/config/edit?section=${selectedSectionId}`)}
+                  onClick={() => navigate(`/store/${slug}/config/edit`)}
                   className="mt-2 text-xs text-blue-600 hover:text-blue-800 font-medium"
                 >
                   Configure →
@@ -705,37 +442,21 @@ export default function StoreConfig() {
 
           {/* Floor plan canvas */}
           <div className="lg:col-span-3 bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
-            {selectedSection && <SectionStepProgress section={selectedSection} />}
+            <SetupProgress version={version} />
             <div className="flex items-center justify-between mb-3 gap-3">
-              <div className="flex items-center gap-3 min-w-0 flex-1">
-                <h3 className="text-sm font-semibold text-gray-700 shrink-0">
-                  {selectedSection?.name || 'Floor Plan'}
-                </h3>
-                <SectionTabs
-                  sections={mergedSections}
-                  selectedId={selectedSectionId}
-                  onChange={setSelectedSectionId}
-                  onAdd={() => startAddingSectionRef.current?.()}
-                />
-              </div>
-              {selectedSection?.floor_plan?.scale_defined && (
+              <h3 className="text-sm font-semibold text-gray-700 shrink-0">Floor Plan</h3>
+              {version.floor_plan?.scale_defined && (
                 <span className="text-xs text-gray-400 bg-gray-50 px-2 py-0.5 rounded border border-gray-200 shrink-0">
-                  {selectedSection.floor_plan.pixels_per_meter?.toFixed(1)} px/m
+                  {version.floor_plan.pixels_per_meter?.toFixed(1)} px/m
                 </span>
               )}
             </div>
-            {selectedSection ? (
-              <FloorPlanCanvas
-                floorPlan={selectedSection.floor_plan}
-                zones={selectedSection.zones || []}
-                obstacles={selectedSection.obstacles || []}
-                cameraConfigs={selectedSection.camera_configs || []}
-              />
-            ) : (
-              <div className="flex items-center justify-center h-64 text-gray-400 text-sm">
-                Select a section to view its floor plan
-              </div>
-            )}
+            <FloorPlanCanvas
+              floorPlan={version.floor_plan}
+              zones={zones}
+              obstacles={version.obstacles || []}
+              cameraConfigs={cameraConfigs}
+            />
           </div>
         </div>
 

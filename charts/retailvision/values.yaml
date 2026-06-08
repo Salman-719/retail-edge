@@ -17,7 +17,7 @@ database:
 
 eep:
   image:
-    tag: "1.1.3"
+    tag: "1.2.0"
   replicas: 2
   grpcPort: 50051
   httpPort: 8000
@@ -36,11 +36,23 @@ eep:
     minReplicas: 2
     maxReplicas: 6
     targetCPUUtilizationPercentage: 70
+  # SMTP for IEP4 alert emails + EEP notifications. Blank host = email disabled.
+  # If passwordSecretKey is set, it must be a key in retailvision-secrets.
+  smtp:
+    host: ""
+    port: 587
+    user: ""
+    from: ""
+    passwordSecretKey: ""   # e.g. "smtp-password" (add to external-secrets first)
 
 iep3:
   image:
-    tag: "1.1.3"
-  stores: []   # populated per environment: ["store-uuid-1", "store-uuid-2"]
+    tag: "1.2.0"
+  # staticProvisioning: when false (default), EEP provisions IEP3 StatefulSets
+  # dynamically via iep3_manager.py on store version activation (RBAC in rbac.yaml).
+  # Set true only as an emergency escape hatch (requires iep3.stores populated).
+  staticProvisioning: false
+  stores: []   # only used when staticProvisioning=true: ["store-uuid-1", ...]
   resources:
     requests:
       cpu: "200m"
@@ -49,10 +61,21 @@ iep3:
       cpu: "1000m"
       memory: "1Gi"
 
+# IEP4 (alert daemon) and IEP5 (end-of-shift analytics job) are NOT always-on
+# Deployments — EEP provisions them per-store on demand (iep4_manager StatefulSet,
+# iep5_manager batch Job). Only the image tags live here; the pod specs are built
+# by the managers. Tags feed EEP's IEP4_IMAGE/IEP5_IMAGE env (see eep-deployment).
+iep4:
+  image:
+    tag: "1.2.0"
+iep5:
+  image:
+    tag: "1.2.0"
+
 frontend:
   enabled: true
   image:
-    tag: "1.1.3"
+    tag: "1.2.0"
   replicas: 2
   resources:
     requests:
@@ -66,7 +89,7 @@ frontend:
 iep6:
   enabled: true
   image:
-    tag: "1.1.3"
+    tag: "1.2.0"
   replicas: 1
   openaiModel: "gpt-4o-mini"
   enableRawSql: false      # guarded ad-hoc SELECT tool (off by default)
@@ -81,10 +104,15 @@ iep6:
 
 # In-cluster PostgreSQL (cheapest option). For managed RDS instead, set
 # postgres.enabled=false and point pgbouncer POSTGRESQL_HOST at the RDS endpoint.
+# SPEC-000: TimescaleDB is a hard dependency of the analytics pipeline (IEP5 +
+# alembic 0010 hypertables). The image is a drop-in for postgres:16 that bundles
+# the timescaledb library. Pinned — never :latest, never the -ha variant.
+# A fresh data volume is required when switching engines (see DEPLOYMENT_GUIDE).
 postgres:
   enabled: true
   image:
-    tag: "16-alpine"
+    repository: timescale/timescaledb
+    tag: "2.14.2-pg16"
   user: retailvision
   database: retailvision
   storage: 20Gi
@@ -111,6 +139,46 @@ redis:
   tls: true
   maxmemory: "512mb"      # redis units (feeds redis.conf)
   memoryLimit: "768Mi"    # k8s container memory limit (headroom over maxmemory)
+
+# ── Observability: Prometheus + Grafana + exporters ─────────────────────────
+# Scrapes IEP3 (:9300), YOLO (:9400), and redis/postgres/node exporters. Sized
+# for a single small node; bump resources / move to a dedicated node as you grow.
+monitoring:
+  enabled: false   # production overlay enables it
+  prometheus:
+    image: "prom/prometheus:v2.51.0"
+    retention: "15d"
+    storage: 10Gi
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits:   { cpu: "500m", memory: "1Gi" }
+  grafana:
+    image: "grafana/grafana:10.4.1"
+    host: ""        # e.g. grafana.<EIP>.nip.io ; blank = no ingress (port-forward)
+    adminUser: "admin"
+    storage: 2Gi
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits:   { cpu: "300m", memory: "512Mi" }
+  exporters:
+    redis:    { enabled: true, image: "oliver006/redis_exporter:v1.62.0" }
+    postgres: { enabled: true, image: "quay.io/prometheuscommunity/postgres-exporter:v0.15.0" }
+    node:     { enabled: true, image: "prom/node-exporter:v1.8.1" }
+
+# ── MLflow tracking + model registry (MLOps) ─────────────────────────────────
+# Server image is built from mlops/ (bundles mlflow + boto3). Backend = SQLite on
+# a PVC; artifacts = S3 (proxied via --serve-artifacts, so eval clients need no S3
+# creds). Image ref = {global.imageRegistry}/mlflow:{tag}.
+mlflow:
+  enabled: false   # production overlay enables it
+  image:
+    tag: "1.2.0"
+  host: ""          # e.g. mlflow.<EIP>.nip.io ; blank = no ingress (port-forward)
+  artifactPrefix: "mlflow"   # S3 key prefix inside s3.bucket
+  storage: 5Gi      # PVC for the SQLite backend store
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "500m", memory: "1Gi" }
 
 # Public HTTPS ingress for the SPA + API (via the frontend pod's /api proxy).
 # Requires ingress-nginx + cert-manager (installed by bootstrap-cloud-k3s.sh).
@@ -142,3 +210,4 @@ secrets:
   s3AccessKey:      "retailvision/s3-access-key"
   s3SecretKey:      "retailvision/s3-secret-key"
   openaiApiKey:     "retailvision/openai-api-key"
+  grafanaAdminPassword: "retailvision/grafana-admin-password"

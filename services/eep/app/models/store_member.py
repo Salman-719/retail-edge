@@ -14,24 +14,11 @@ class StoreMember(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"))
     store_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("stores.id", ondelete="CASCADE"))
     role: Mapped[str] = mapped_column(String(20))
-    access_scope: Mapped[str] = mapped_column(String(20), default="full_store")
     invited_by: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-
-
-class StoreMemberSection(Base):
-    __tablename__ = "store_member_sections"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    store_member_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("store_members.id", ondelete="CASCADE")
-    )
-    section_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("sections.id", ondelete="CASCADE")
     )
 
 

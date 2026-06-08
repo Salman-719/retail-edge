@@ -1,0 +1,55 @@
+# Production-local overlay: laptop simulates the Jetson Orin edge device.
+#
+# EEP uses the Docker socket for IEP3 (k8s absent); Edge Agent uses Docker for IEP2.
+# iep3_reconciliation is disabled — EEP provisions IEP3 containers dynamically
+# when a store version is activated via the API.
+#
+# Usage:
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.gpu.yml \
+#     -f docker-compose.production-local.yml \
+#     up -d postgres pgbouncer redis minio eep iep1-daemon \
+#            yolo-service reid-service live_bridge edge_agent_dev
+#
+# Then activate a store version via the EEP API — EEP will start an iep3 container.
+#
+# GPU not available?  Drop docker-compose.gpu.yml from the -f chain and add
+# docker-compose.dev.yml for CPU-based yolo/reid services instead.
+
+services:
+
+  eep:
+    environment:
+      DEBUG_MODE: "false"
+      # Image that iep3_manager spawns as IEP3 containers.
+      # Must match the image built by the iep3_reconciliation service in this compose project.
+      IEP3_IMAGE: "retail-edge-iep3_reconciliation:latest"
+      DOCKER_NETWORK: "retail-edge_default"
+      # Passed through to IEP3 containers spawned by iep3_manager.
+      SERVER_REDIS_URL: "redis://redis:6379/0"
+
+  # Disable the static iep3_reconciliation service.
+  # EEP's iep3_manager.py starts per-store IEP3 containers dynamically instead.
+  iep3_reconciliation:
+    entrypoint: ["true"]
+    restart: "no"
+
+  edge_agent_dev:
+    # Remove the 'edge' profile gate so it starts with the rest of the stack.
+    profiles: []
+    environment:
+      # IEP2 image that docker_manager spawns for each camera.
+      IEP2_IMAGE: "retail-edge-iep2_vision:latest"
+      DOCKER_NETWORK: "retail-edge_default"
+      # Named volume that docker_manager mounts into spawned IEP2 containers.
+      IPC_SOCKETS_VOLUME: "retail-edge_ipc-sockets"
+      FRAME_STORE_VOLUME: "retail-edge_frame-store"
+      # Path where ipc-sockets volume is mounted inside THIS container.
+      # agent.py reads IEP2 health sockets at unix://{IPC_SOCKETS_HOST_PATH}/iep2_health_*.sock
+      IPC_SOCKETS_HOST_PATH: "/tmp/ipc-sockets"
+    volumes:
+      # Docker socket: docker_manager needs it to spawn IEP2 containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # ipc-sockets volume: agent.py reads IEP2 health sockets from here.
+      - ipc-sockets:/tmp/ipc-sockets

@@ -41,34 +41,8 @@ def evaluate(
       allowed=False  — hard veto; caller must skip this candidate.
       allowed=True   — candidate is reachable; use threshold for the similarity check.
     """
-    # Step 1 — fallback: no floor data, gate inactive
-    if new_pos is None or lost_pos is None:
-        return GateResult(allowed=True, threshold=cfg.base_threshold)
-
-    # Step 2 — max allowed distance given elapsed time
-    elapsed_seconds = elapsed_frames / max(fps, 1e-6)
-    max_dist = cfg.max_walking_speed_mps * elapsed_seconds
-    if max_dist < 1e-6:
-        # elapsed_frames == 0: same frame, distance check meaningless
-        return GateResult(allowed=True, threshold=cfg.base_threshold)
-
-    # Step 3 — actual Euclidean distance in floor metres
-    actual_dist = math.sqrt(
-        (new_pos[0] - lost_pos[0]) ** 2 + (new_pos[1] - lost_pos[1]) ** 2
-    )
-
-    # Step 4 — hard veto: physically impossible to have walked this far
-    if actual_dist > max_dist:
-        return GateResult(allowed=False, threshold=cfg.base_threshold)
-
-    # Step 5 — dynamic threshold
-    # d_ratio: 0 = very close, 1 = at the physical limit → raises threshold
-    # t_ratio: 0 = just lost,  1 = about to expire      → lowers threshold
-    d_ratio = actual_dist / max_dist
-    t_ratio = elapsed_frames / max(lost_ttl_frames, 1)
-    adjusted = cfg.base_threshold + (d_ratio * cfg.w_dist) - (t_ratio * cfg.w_time)
-    adjusted = max(cfg.min_threshold, min(1.0, adjusted))
-    return GateResult(allowed=True, threshold=adjusted)
+    # Gate disabled — always pass with base threshold.
+    return GateResult(allowed=True, threshold=cfg.base_threshold)
 
 
 # ---------------------------------------------------------------------------

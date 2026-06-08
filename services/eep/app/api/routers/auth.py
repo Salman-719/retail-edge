@@ -22,7 +22,7 @@ from app.models.invitation import Invitation
 from app.models.password_reset_token import PasswordResetToken
 from app.models.refresh_token import RefreshToken
 from app.models.store import Store
-from app.models.store_member import StoreMember, StoreMemberPermission, StoreMemberSection
+from app.models.store_member import StoreMember, StoreMemberPermission
 from app.models.user import User
 from app.schemas.auth import (
     AcceptInviteRequest,
@@ -321,16 +321,10 @@ async def accept_invite(slug: str, body: AcceptInviteRequest, db: AsyncSession =
         user_id=user.id,
         store_id=store.id,
         role=invitation.role,
-        access_scope=invitation.access_scope,
         invited_by=invitation.invited_by,
     )
     db.add(member)
     await db.flush()
-
-    # Section assignments
-    if invitation.access_scope == "section_scoped" and invitation.section_ids:
-        for sid in invitation.section_ids:
-            db.add(StoreMemberSection(store_member_id=member.id, section_id=uuid.UUID(sid)))
 
     # Permissions
     for perm_name, granted in invitation.permissions.items():

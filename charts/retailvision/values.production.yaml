@@ -42,3 +42,16 @@ ingress:
 s3:
   bucket: retailvision-prod
   region: eu-west-1
+
+# Observability + MLOps on the cloud node. Hosts use nip.io against the EIP;
+# override at deploy time, e.g.:
+#   --set monitoring.grafana.host=grafana.<EIP>.nip.io
+#   --set mlflow.host=mlflow.<EIP>.nip.io
+monitoring:
+  enabled: true
+  grafana:
+    host: ""   # set to grafana.<EIP>.nip.io to expose via ingress
+
+mlflow:
+  enabled: true
+  host: ""     # set to mlflow.<EIP>.nip.io to expose via ingress

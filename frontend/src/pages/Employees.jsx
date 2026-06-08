@@ -6,9 +6,7 @@ import { usePageTitle } from '../components/PageMeta'
 import { TableSkeleton } from '../components/Skeletons'
 import {
   listEmployees, createEmployee, patchEmployee, deleteEmployee,
-  listEmployeeSections, assignEmployeeSection, removeEmployeeSection,
   listShiftPatterns, createShiftPattern, patchShiftPattern, deleteShiftPattern,
-  listSections,
 } from '../api'
 
 const ROLES = ['cashier', 'shelf_stocker', 'supervisor', 'security', 'cleaner', 'manager', 'delivery', 'customer_service']
@@ -50,7 +48,7 @@ function IconBtn({ icon: Icon, label, onClick, colorClass = 'text-gray-500 hover
   )
 }
 
-// ─── Section/Shift count badge ────────────────────────────────────────────────
+// ─── Shift count badge ────────────────────────────────────────────────────────
 
 function CountBadge({ count, label, onClick, loading }) {
   return (
@@ -172,142 +170,13 @@ function EmployeeModal({ slug, employee, onClose, onDone }) {
   )
 }
 
-// ─── Sections panel ───────────────────────────────────────────────────────────
-
-function SectionsPanel({ slug, employee, sections, onClose }) {
-  const [assignments, setAssignments] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [adding, setAdding] = useState(false)
-  const [selectedSection, setSelectedSection] = useState('')
-  const [isPrimary, setIsPrimary] = useState(false)
-  const [error, setError] = useState('')
-
-  const fetchAssignments = useCallback(async () => {
-    setLoading(true)
-    try {
-      const data = await listEmployeeSections(slug, employee.id)
-      setAssignments(data)
-    } catch {}
-    setLoading(false)
-  }, [slug, employee.id])
-
-  useEffect(() => { fetchAssignments() }, [fetchAssignments])
-
-  const assignedIds = new Set(assignments.map(a => a.section_id))
-  const availableSections = sections.filter(s => !assignedIds.has(s.id))
-
-  async function handleAssign() {
-    if (!selectedSection) return
-    setError('')
-    try {
-      await assignEmployeeSection(slug, employee.id, {
-        section_id: selectedSection,
-        is_primary: isPrimary,
-      })
-      setAdding(false)
-      setSelectedSection('')
-      setIsPrimary(false)
-      fetchAssignments()
-    } catch (err) {
-      const detail = err.response?.data?.detail
-      setError(typeof detail === 'object' ? detail.error : (detail || 'Failed'))
-    }
-  }
-
-  async function handleRemove(sectionId) {
-    try {
-      await removeEmployeeSection(slug, employee.id, sectionId)
-      setAssignments(prev => prev.filter(a => a.section_id !== sectionId))
-    } catch (err) {
-      alert(err.response?.data?.detail?.error || 'Failed to remove section')
-    }
-  }
-
-  function getSectionName(sectionId) {
-    return sections.find(s => s.id === sectionId)?.name || sectionId.slice(0, 8)
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
-        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-          <div>
-            <h3 className="font-semibold text-gray-900">Section Assignments</h3>
-            <p className="text-xs text-gray-400 mt-0.5">{employee.name}</p>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
-        </div>
-
-        <div className="px-6 py-4 space-y-3">
-          {loading ? (
-            <p className="text-sm text-gray-400 text-center py-4">Loading…</p>
-          ) : assignments.length === 0 ? (
-            <p className="text-sm text-gray-400">No sections assigned yet.</p>
-          ) : (
-            <div className="space-y-1">
-              {assignments.map(a => (
-                <div key={a.id} className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-gray-900">{getSectionName(a.section_id)}</span>
-                    {a.is_primary && (
-                      <span className="text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium">Primary</span>
-                    )}
-                  </div>
-                  <button onClick={() => handleRemove(a.section_id)}
-                    className="text-xs text-red-500 hover:text-red-700 px-2 py-1 rounded hover:bg-red-50">
-                    Remove
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {error && <div className="bg-red-50 text-red-700 text-sm px-3 py-2 rounded-lg border border-red-200">{error}</div>}
-
-          {adding ? (
-            <div className="border border-gray-200 rounded-lg p-3 space-y-2">
-              <select value={selectedSection} onChange={e => setSelectedSection(e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <option value="">Select section…</option>
-                {availableSections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-                <input type="checkbox" checked={isPrimary} onChange={e => setIsPrimary(e.target.checked)}
-                  className="rounded" />
-                Set as primary section
-              </label>
-              <div className="flex gap-2">
-                <button onClick={() => { setAdding(false); setError('') }}
-                  className="flex-1 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50">
-                  Cancel
-                </button>
-                <button onClick={handleAssign} disabled={!selectedSection}
-                  className="btn-primary flex-1 py-1.5">
-                  Assign
-                </button>
-              </div>
-            </div>
-          ) : (
-            availableSections.length > 0 && (
-              <button onClick={() => setAdding(true)}
-                className="w-full py-2 text-sm border-2 border-dashed border-gray-300 rounded-lg text-gray-500 hover:border-gray-400 hover:text-gray-700 transition-colors">
-                + Assign Section
-              </button>
-            )
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // ─── Shift patterns panel ─────────────────────────────────────────────────────
 
-function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
+function ShiftPatternsPanel({ slug, employee, onClose }) {
   const [patterns, setPatterns] = useState([])
   const [loading, setLoading] = useState(true)
   const [adding, setAdding] = useState(false)
-  const [form, setForm] = useState({ section_id: '', selected_days: [0], start_time: '09:00', end_time: '17:00', break_duration_min: 0 })
+  const [form, setForm] = useState({ selected_days: [0], start_time: '09:00', end_time: '17:00', break_duration_min: 0 })
   const [error, setError] = useState('')
 
   const fetchPatterns = useCallback(async () => {
@@ -329,7 +198,6 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
   }
 
   async function handleCreate() {
-    if (!form.section_id) { setError('Select a section'); return }
     if (form.selected_days.length === 0) { setError('Select at least one day'); return }
     setError('')
     const start_time = form.start_time.length === 5 ? form.start_time + ':00' : form.start_time
@@ -339,7 +207,6 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
       try {
         await createShiftPattern(slug, {
           employee_id: employee.id,
-          section_id: form.section_id,
           day_of_week: day,
           start_time,
           end_time,
@@ -356,7 +223,6 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
           if (ok) {
             try {
               await patchShiftPattern(slug, detail.conflicting_id, {
-                section_id: form.section_id,
                 start_time,
                 end_time,
                 break_duration_min: Number(form.break_duration_min),
@@ -375,7 +241,7 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
     }
 
     setAdding(false)
-    setForm({ section_id: '', selected_days: [0], start_time: '09:00', end_time: '17:00', break_duration_min: 0 })
+    setForm({ selected_days: [0], start_time: '09:00', end_time: '17:00', break_duration_min: 0 })
     fetchPatterns()
   }
 
@@ -392,10 +258,6 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
       await deleteShiftPattern(slug, patternId)
       setPatterns(prev => prev.filter(p => p.id !== patternId))
     } catch {}
-  }
-
-  function getSectionName(sectionId) {
-    return sections.find(s => s.id === sectionId)?.name || sectionId.slice(0, 8)
   }
 
   return (
@@ -422,8 +284,7 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
                     <span className="text-xs font-semibold text-gray-700 bg-gray-200 rounded px-1.5 py-0.5">{DAYS[p.day_of_week]}</span>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-gray-900">{getSectionName(p.section_id)}</p>
-                    <p className="text-xs text-gray-400">
+                    <p className="text-sm text-gray-900">
                       {p.start_time.slice(0, 5)} – {p.end_time.slice(0, 5)}
                       {p.break_duration_min > 0 && ` · ${p.break_duration_min}min break`}
                     </p>
@@ -447,14 +308,6 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
 
           {adding ? (
             <div className="border border-gray-200 rounded-lg p-3 space-y-2">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Section</label>
-                <select value={form.section_id} onChange={e => setForm(f => ({ ...f, section_id: e.target.value }))}
-                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                  <option value="">Select…</option>
-                  {sections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Days</label>
                 <div className="flex gap-1 flex-wrap">
@@ -514,25 +367,6 @@ function ShiftPatternsPanel({ slug, employee, sections, onClose }) {
 // ─── Badge cell with lazy count fetch ────────────────────────────────────────
 // Fetches count once on mount, shows pill, opens modal on click.
 
-function SectionsBadge({ slug, employee, onClick, refreshKey }) {
-  const [count, setCount] = useState(null)
-
-  useEffect(() => {
-    listEmployeeSections(slug, employee.id)
-      .then(data => setCount(data.length))
-      .catch(() => setCount(0))
-  }, [slug, employee.id, refreshKey])
-
-  return (
-    <CountBadge
-      count={count ?? '…'}
-      label={count === 1 ? 'Section' : 'Sections'}
-      loading={count === null}
-      onClick={onClick}
-    />
-  )
-}
-
 function ShiftsBadge({ slug, employee, onClick, refreshKey }) {
   const [count, setCount] = useState(null)
 
@@ -561,24 +395,18 @@ export default function Employees() {
   usePageTitle('Employees')
 
   const [employees, setEmployees] = useState([])
-  const [sections, setSections] = useState([])
   const [loading, setLoading] = useState(true)
   const [showAll, setShowAll] = useState(false)
   const [modal, setModal] = useState(null)
   const [shiftRefreshKey, setShiftRefreshKey] = useState(0)
-  const [sectionRefreshKey, setSectionRefreshKey] = useState(0)
   const [search, setSearch] = useState('')
   const [roleFilter, setRoleFilter] = useState('')
 
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const [emps, secs] = await Promise.all([
-        listEmployees(slug, { active_only: showAll ? false : true }),
-        listSections(slug),
-      ])
+      const emps = await listEmployees(slug, { active_only: showAll ? false : true })
       setEmployees(emps)
-      setSections(secs)
     } catch {}
     setLoading(false)
   }, [slug, showAll])
@@ -637,7 +465,7 @@ export default function Employees() {
       <header className="px-6 py-4 border-b border-gray-200 bg-white flex items-center justify-between shrink-0">
         <div>
           <h1 className="page-title">Employees</h1>
-          <p className="page-subtitle">Manage staff, sections and schedules</p>
+          <p className="page-subtitle">Manage staff and schedules</p>
         </div>
         <button
           onClick={() => setModal('create')}
@@ -736,12 +564,6 @@ export default function Employees() {
                     {/* Clickable badge counts */}
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <SectionsBadge
-                          slug={slug}
-                          employee={emp}
-                          onClick={() => setModal({ type: 'sections', employee: emp })}
-                          refreshKey={sectionRefreshKey}
-                        />
                         <ShiftsBadge
                           slug={slug}
                           employee={emp}
@@ -797,11 +619,8 @@ export default function Employees() {
       {modal?.type === 'edit' && (
         <EmployeeModal slug={slug} employee={modal.employee} onClose={() => setModal(null)} onDone={fetchData} />
       )}
-      {modal?.type === 'sections' && (
-        <SectionsPanel slug={slug} employee={modal.employee} sections={sections} onClose={() => { setSectionRefreshKey(k => k + 1); setModal(null) }} />
-      )}
       {modal?.type === 'patterns' && (
-        <ShiftPatternsPanel slug={slug} employee={modal.employee} sections={sections} onClose={() => { setShiftRefreshKey(k => k + 1); setModal(null) }} />
+        <ShiftPatternsPanel slug={slug} employee={modal.employee} onClose={() => { setShiftRefreshKey(k => k + 1); setModal(null) }} />
       )}
     </div>
   )

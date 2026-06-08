@@ -46,13 +46,14 @@ message ControlMessage {
 }
 
 message StartCamera {
-  string   camera_id      = 1;
-  string   store_id       = 2;
-  string   rtsp_url       = 3;
-  float    target_fps     = 4;
-  float    window_seconds = 5;
-  S3Config s3_config      = 6;
-  string   redis_url      = 7;
+  string   camera_id        = 1;
+  string   store_id         = 2;
+  string   rtsp_url         = 3;
+  float    target_fps       = 4;
+  float    window_seconds   = 5;
+  S3Config s3_config        = 6;
+  string   redis_url        = 7;
+  string   camera_config_id = 8;
 }
 
 message StopCamera {

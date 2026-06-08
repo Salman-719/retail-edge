@@ -8,7 +8,7 @@ import {
   listShifts, createShift, patchShift, deleteShift, generateShifts,
   listShiftAssignments, createShiftAssignment, patchShiftAssignment, deleteShiftAssignment,
   listBreaks, createBreak, patchBreak, deleteBreak,
-  listEmployees, listSections,
+  listEmployees,
 } from '../api'
 
 const SHIFT_STATUS = ['scheduled', 'active', 'completed', 'absent', 'cancelled']
@@ -230,7 +230,7 @@ function dateForWeekday(startDateStr, targetDay) {
   return d.toISOString().slice(0, 10)
 }
 
-function ShiftModal({ slug, shift, employees, sections, onClose, onDone }) {
+function ShiftModal({ slug, shift, employees, onClose, onDone }) {
   const editing = !!shift
   const now = new Date()
   const inOneHour = new Date(now.getTime() + 3600000)
@@ -238,7 +238,6 @@ function ShiftModal({ slug, shift, employees, sections, onClose, onDone }) {
 
   const [form, setForm] = useState({
     employee_id: shift?.employee_id || '',
-    section_id: shift?.section_id || '',
     // edit-only fields
     scheduled_start: shift ? toLocalInput(shift.scheduled_start) : toLocalInput(now.toISOString()),
     scheduled_end: shift ? toLocalInput(shift.scheduled_end) : toLocalInput(inOneHour.toISOString()),
@@ -275,7 +274,6 @@ function ShiftModal({ slug, shift, employees, sections, onClose, onDone }) {
       if (editing) {
         await patchShift(slug, shift.id, {
           employee_id: form.employee_id,
-          section_id: form.section_id,
           scheduled_start: new Date(form.scheduled_start).toISOString(),
           scheduled_end: new Date(form.scheduled_end).toISOString(),
           break_duration_min,
@@ -292,7 +290,6 @@ function ShiftModal({ slug, shift, employees, sections, onClose, onDone }) {
           const scheduled_end = new Date(endDateStr + 'T' + et).toISOString()
           return createShift(slug, {
             employee_id: form.employee_id,
-            section_id: form.section_id,
             scheduled_start,
             scheduled_end,
             break_duration_min,
@@ -326,15 +323,6 @@ function ShiftModal({ slug, shift, employees, sections, onClose, onDone }) {
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
               <option value="">Select employee…</option>
               {employees.map(emp => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Section <span className="text-red-500">*</span></label>
-            <select required value={form.section_id} onChange={e => setForm(f => ({ ...f, section_id: e.target.value }))}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">Select section…</option>
-              {sections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </div>
 
@@ -793,7 +781,6 @@ export default function Shifts() {
   const [view, setView] = useState('list')
   const [shifts, setShifts] = useState([])
   const [employees, setEmployees] = useState([])
-  const [sections, setSections] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -812,14 +799,12 @@ export default function Shifts() {
         params.from_date = filterDate
         params.to_date = filterDate
       }
-      const [sh, emps, secs] = await Promise.all([
+      const [sh, emps] = await Promise.all([
         listShifts(slug, params),
         listEmployees(slug, { active_only: true }),
-        listSections ? listSections(slug) : Promise.resolve([]),
       ])
       setShifts(sh)
       setEmployees(emps)
-      setSections(secs)
     } catch (err) {
       setError(err.response?.data?.detail?.error || err.message || 'Failed to load shifts')
     }
@@ -839,10 +824,6 @@ export default function Shifts() {
 
   function getEmployeeName(id) {
     return employees.find(e => e.id === id)?.name || id?.slice(0, 8) || '—'
-  }
-
-  function getSectionName(id) {
-    return sections.find(s => s.id === id)?.name || id?.slice(0, 8) || '—'
   }
 
   async function handleDelete(shift) {
@@ -949,7 +930,6 @@ export default function Shifts() {
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Employee</th>
-                      <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider hidden sm:table-cell">Section</th>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Scheduled</th>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider hidden md:table-cell">Actual</th>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
@@ -974,7 +954,6 @@ export default function Shifts() {
                                 {getEmployeeName(eid)}
                               </td>
                             )}
-                            <td className="px-4 py-3 text-gray-500 hidden sm:table-cell">{getSectionName(shift.section_id)}</td>
                             <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
                               {fmt(shift.scheduled_start)}<br />
                               <span className="text-gray-400">→ {fmtTime(shift.scheduled_end)}</span>
@@ -1022,13 +1001,13 @@ export default function Shifts() {
 
       {/* Modals */}
       {modal === 'create' && (
-        <ShiftModal slug={slug} employees={employees} sections={sections} onClose={() => setModal(null)} onDone={fetchData} />
+        <ShiftModal slug={slug} employees={employees} onClose={() => setModal(null)} onDone={fetchData} />
       )}
       {modal === 'generate' && (
         <GenerateModal slug={slug} onClose={() => setModal(null)} onDone={fetchData} />
       )}
       {modal?.type === 'edit' && (
-        <ShiftModal slug={slug} shift={modal.shift} employees={employees} sections={sections} onClose={() => setModal(null)} onDone={fetchData} />
+        <ShiftModal slug={slug} shift={modal.shift} employees={employees} onClose={() => setModal(null)} onDone={fetchData} />
       )}
       {modal?.type === 'assignments' && (
         <AssignmentsPanel slug={slug} shift={modal.shift} employees={employees} onClose={() => setModal(null)} />

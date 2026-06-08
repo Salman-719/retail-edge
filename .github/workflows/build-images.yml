@@ -37,6 +37,10 @@ jobs:
           - { name: live-bridge, context: services/live_bridge,        platforms: "linux/amd64,linux/arm64" }
           - { name: edge-agent,  context: services/edge_agent,         platforms: "linux/amd64,linux/arm64" }
           - { name: frontend,    context: frontend,                    platforms: "linux/amd64,linux/arm64" }
+          # MLflow tracking server (lean, multi-arch) — runs on the Graviton/arm64
+          # cloud node. The heavy eval-runner (mlops/Dockerfile) is built locally
+          # for GPU dev boxes, not pushed here.
+          - { name: mlflow,      context: ".",   file: mlops/Dockerfile.server, platforms: "linux/amd64,linux/arm64" }
           # CPU + CUDA variants of the GPU services, built from Dockerfile.dev
           # (plain python base → buildable in CI). Pushed with a -cpu/-cuda tag
           # suffix and selected by the edge overlays (cpu/cuda profiles).

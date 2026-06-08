@@ -17,9 +17,9 @@ variable "vpc_cidr" {
 }
 
 variable "server_instance_type" {
-  description = "EC2 type for the k3s server. Graviton (t4g) is cheapest; images are arm64."
+  description = "EC2 type for the k3s server. Graviton (t4g) is cheapest; images are arm64. t4g.xlarge (4 vCPU/16GB) fits the full tier (EEP, Postgres/TimescaleDB, Redis, IEP3/4/5, IEP6, monitoring, MLflow) on one node; drop to t4g.large for a lean install."
   type        = string
-  default     = "t4g.large"
+  default     = "t4g.xlarge"
 }
 
 variable "agent_instance_type" {
@@ -35,9 +35,9 @@ variable "agent_count" {
 }
 
 variable "server_root_volume_gb" {
-  description = "Root EBS volume size (GB) for each node."
+  description = "Root EBS volume size (GB) for each node. 60+ recommended once monitoring + MLflow + TimescaleDB are enabled."
   type        = number
-  default     = 40
+  default     = 60
 }
 
 variable "ssh_key_name" {
@@ -102,13 +102,14 @@ variable "secret_names" {
   description = "AWS Secrets Manager secret names (must match chart values.secrets.*)."
   type        = map(string)
   default = {
-    postgres_password = "retailvision/postgres-password"
-    redis_password    = "retailvision/redis-password"
-    jwt_secret        = "retailvision/jwt-secret"
-    agent_secret      = "retailvision/agent-secret"
-    redis_url         = "retailvision/redis-url"
-    s3_access_key     = "retailvision/s3-access-key"
-    s3_secret_key     = "retailvision/s3-secret-key"
-    openai_api_key    = "retailvision/openai-api-key"
+    postgres_password      = "retailvision/postgres-password"
+    redis_password         = "retailvision/redis-password"
+    jwt_secret             = "retailvision/jwt-secret"
+    agent_secret           = "retailvision/agent-secret"
+    redis_url              = "retailvision/redis-url"
+    s3_access_key          = "retailvision/s3-access-key"
+    s3_secret_key          = "retailvision/s3-secret-key"
+    openai_api_key         = "retailvision/openai-api-key"
+    grafana_admin_password = "retailvision/grafana-admin-password"
   }
 }

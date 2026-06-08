@@ -1,3 +1,10 @@
+{{- /*
+IEP3 StatefulSets are normally provisioned dynamically by EEP (iep3_manager.py)
+when a store version is activated. This static block is an escape hatch for manual
+or emergency deployments — disabled by default. Enable with:
+  --set iep3.staticProvisioning=true --set "iep3.stores={uuid1,uuid2}"
+*/}}
+{{- if .Values.iep3.staticProvisioning }}
 {{- range .Values.iep3.stores }}
 ---
 apiVersion: apps/v1
@@ -20,6 +27,9 @@ spec:
       labels:
         app: iep3
         store-id: {{ . }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9300"
     spec:
       serviceAccountName: iep3
       containers:
@@ -64,4 +74,5 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3
+{{- end }}
 {{- end }}

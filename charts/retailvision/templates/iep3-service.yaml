@@ -1,3 +1,4 @@
+{{- if .Values.iep3.staticProvisioning }}
 {{- range .Values.iep3.stores }}
 ---
 # Headless service required by StatefulSet for stable pod identity.
@@ -18,4 +19,5 @@ spec:
     - name: placeholder
       port: 9999
       targetPort: 9999
+{{- end }}
 {{- end }}

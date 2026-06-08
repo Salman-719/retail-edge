@@ -22,6 +22,11 @@ resource "random_password" "redis" {
   special = false
 }
 
+resource "random_password" "grafana_admin" {
+  length  = 24
+  special = false
+}
+
 locals {
   secret_values = {
     postgres_password = random_password.postgres.result
@@ -37,6 +42,8 @@ locals {
     #   aws secretsmanager put-secret-value --secret-id retailvision/openai-api-key \
     #     --secret-string 'sk-...'
     openai_api_key = "REPLACE_ME"
+    # Grafana admin password (monitoring). Rotate out-of-band like the others.
+    grafana_admin_password = random_password.grafana_admin.result
   }
 }
 

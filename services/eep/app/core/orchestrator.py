@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import uuid
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
 from app.core.config import settings
+from app.core import iep3_manager
+from app.core import iep4_manager
 from app.grpc_generated import agent_pb2
 from app.grpc_server import registry
 from app.models.camera_runtime_session import CameraRuntimeSession
@@ -158,6 +161,7 @@ async def start_camera_workers(store_id: str, camera_config_id: str) -> None:
             target_fps=target_fps,
             window_seconds=settings.WINDOW_SECONDS,
             redis_url=_REDIS_URL,
+            camera_config_id=camera_config_id,
             s3_config=agent_pb2.S3Config(
                 endpoint_url=_S3_ENDPOINT_URL,
                 access_key=_S3_ACCESS_KEY,
@@ -309,6 +313,13 @@ async def activate_version_now(
                 """),
                 {"id": uuid.UUID(new_version_id), "now": now},
             )
+
+    # Step 3.5 — ensure IEP3 + IEP4 exist for this store (idempotent).
+    # Skip in DEBUG_MODE: their lifecycle is managed by the dev pipeline controls.
+    if not settings.DEBUG_MODE:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, iep3_manager.apply_iep3, store_id)
+        await loop.run_in_executor(None, iep4_manager.apply_iep4, store_id)
 
     # Step 4 — restart cameras using the new version's camera configs.
     started_config_ids: list[str] = []

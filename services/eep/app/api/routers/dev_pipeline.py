@@ -179,8 +179,12 @@ _TRACK_TABLES = (
 )
 
 
-async def _reset_pipeline() -> None:
-    """Fresh restart: stop everything, wipe all track tables + Redis, restart IEP3.
+async def _reset_pipeline(store_id: str, window_seconds: float, num_cameras: int = 0) -> None:
+    """Fresh restart: stop everything, wipe all track tables + Redis, start IEP3.
+
+    Spawns a per-run IEP3 container with STORE_ID=store_id so the coordinator
+    reconciles exactly the store that IEP1 and IEP2 will process — not the
+    static placeholder UUID from the standing compose service.
 
     After this, IEP1 cameras are re-added (file replays from frame 1), fresh IEP2
     containers are spawned, and IEP3 starts with empty state — so each Start
@@ -191,6 +195,8 @@ async def _reset_pipeline() -> None:
     # 1) tear down any running pipeline
     await loop.run_in_executor(None, orch.iep1_remove_all)
     await loop.run_in_executor(None, orch.stop_all_iep2_dev)
+    await loop.run_in_executor(None, orch.stop_all_iep3_dev)
+    await loop.run_in_executor(None, orch.stop_all_iep4_dev)
 
     # 2) truncate all track tables (RESTART IDENTITY resets serial PKs)
     async with AsyncSessionLocal() as db:
@@ -202,8 +208,10 @@ async def _reset_pipeline() -> None:
     # 3) flush Redis streams + local-id counters
     await loop.run_in_executor(None, orch.flush_pipeline_redis)
 
-    # 4) restart IEP3 for a clean coordinator state, give it a moment to come up
-    await loop.run_in_executor(None, orch.restart_iep3)
+    # 4) spawn a fresh IEP3 container scoped to this store, give it a moment to come up
+    await loop.run_in_executor(None, orch.start_iep3, store_id, _DB_URL_SERVER, window_seconds, num_cameras)
+    # 5) spawn the IEP4 alert daemon for this store (dev: ENVIRONMENT=development)
+    await loop.run_in_executor(None, orch.start_iep4, store_id, _DB_URL_SERVER, window_seconds)
     await asyncio.sleep(3)
 
 
@@ -229,7 +237,7 @@ async def pipeline_start(body: PipelineStartRequest):
     # Every Start does a full fresh reset first → run begins from frame 1.
     # The reset includes a short wait, by which time the inference services
     # (watcher polls every 2 s) have applied the requested device.
-    await _reset_pipeline()
+    await _reset_pipeline(body.store_id, body.window_seconds, len(body.camera_ids))
     # Start all cameras in parallel — each task owns its own DB session.
     results = await asyncio.gather(*[_start_one(body, cid) for cid in body.camera_ids])
     all_ok = all(r["ok"] for r in results)
@@ -255,41 +263,93 @@ async def _stop_one(store_id: str, camera_id: str) -> dict:
 
 @router.post("/pipeline/stop")
 async def pipeline_stop(body: PipelineStopRequest):
+    loop = asyncio.get_running_loop()
     results = await asyncio.gather(*[_stop_one(body.store_id, cid) for cid in body.camera_ids])
+    await loop.run_in_executor(None, orch.stop_iep3, body.store_id)
+    await loop.run_in_executor(None, orch.stop_iep4, body.store_id)
     return {"status": "stopped", "cameras": results}
+
+
+class ShiftCloseRequest(BaseModel):
+    store_id: str
+    shift_date: str | None = None    # YYYY-MM-DD; defaults to store-local today
+
+
+@router.post("/shift/close")
+async def shift_close(body: ShiftCloseRequest):
+    """DEBUG manual trigger: run the end-of-shift closing sequence + IEP5 job for
+    a store. The dev pipeline has no camera_schedules, so this stands in for the
+    scheduler's automatic shift-end detection."""
+    from datetime import date, datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from app.core import shift_closer
+
+    if body.shift_date:
+        shift_date = date.fromisoformat(body.shift_date)
+    else:
+        async with AsyncSessionLocal() as db:
+            tz = (await db.execute(
+                text("SELECT timezone FROM stores WHERE id = :sid"),
+                {"sid": body.store_id},
+            )).scalar() or "UTC"
+        try:
+            shift_date = datetime.now(timezone.utc).astimezone(ZoneInfo(tz)).date()
+        except Exception:
+            shift_date = datetime.now(timezone.utc).date()
+
+    shift_end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    await shift_closer.close_shift_and_run_iep5(body.store_id, shift_date, shift_end_ms)
+    return {"status": "closed", "store_id": body.store_id, "shift_date": shift_date.isoformat()}
 
 
 @router.get("/tracking")
 async def get_tracking(
     camera_id: str = Query(...),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=2000),
+    since_ts: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """Recent tracking_history rows for one camera.
 
-    Returns up to :lim rows per local_id, ordered so that the identity that
-    appeared first always sorts first (stable display numbering in the UI).
-    Within each identity, rows are newest-first.
+    With since_ts: returns rows at or after that timestamp in ascending order
+    (incremental poll — accumulates the full run log without gaps).
+    Without since_ts: returns the latest :limit rows per local_id in the
+    stable display order (identity-first-seen ASC, within identity newest-first).
     """
-    rows = (await db.execute(
-        text("""
-            WITH ranked AS (
+    if since_ts is not None:
+        rows = (await db.execute(
+            text("""
                 SELECT local_id::text AS local_id, timestamp_ms,
                        floor_x, floor_y, zone_id::text AS zone_id,
-                       bbox_confidence, bbox_area,
-                       MIN(timestamp_ms) OVER (PARTITION BY local_id) AS id_first_seen,
-                       ROW_NUMBER()      OVER (PARTITION BY local_id ORDER BY timestamp_ms DESC) AS rn
+                       bbox_confidence, bbox_area
                 FROM tracking_history
-                WHERE camera_id = :cam
-            )
-            SELECT local_id, timestamp_ms, floor_x, floor_y, zone_id,
-                   bbox_confidence, bbox_area
-            FROM ranked
-            WHERE rn <= :lim
-            ORDER BY id_first_seen ASC, timestamp_ms DESC
-        """),
-        {"cam": camera_id, "lim": limit},
-    )).mappings().all()
+                WHERE camera_id = :cam AND timestamp_ms >= :since
+                ORDER BY timestamp_ms ASC
+                LIMIT :lim
+            """),
+            {"cam": camera_id, "since": since_ts, "lim": limit},
+        )).mappings().all()
+    else:
+        rows = (await db.execute(
+            text("""
+                WITH ranked AS (
+                    SELECT local_id::text AS local_id, timestamp_ms,
+                           floor_x, floor_y, zone_id::text AS zone_id,
+                           bbox_confidence, bbox_area,
+                           MIN(timestamp_ms) OVER (PARTITION BY local_id) AS id_first_seen,
+                           ROW_NUMBER()      OVER (PARTITION BY local_id ORDER BY timestamp_ms DESC) AS rn
+                    FROM tracking_history
+                    WHERE camera_id = :cam
+                )
+                SELECT local_id, timestamp_ms, floor_x, floor_y, zone_id,
+                       bbox_confidence, bbox_area
+                FROM ranked
+                WHERE rn <= :lim
+                ORDER BY id_first_seen ASC, timestamp_ms DESC
+            """),
+            {"cam": camera_id, "lim": limit},
+        )).mappings().all()
     total = (await db.execute(
         text("SELECT COUNT(*) FROM tracking_history WHERE camera_id = :cam"),
         {"cam": camera_id},

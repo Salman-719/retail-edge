@@ -20,7 +20,6 @@ from app.models.camera_config import CameraConfig
 from app.models.floor_plan import FloorPlan
 from app.models.obstacle import Obstacle
 from app.models.physical_camera import PhysicalCamera
-from app.models.section import Section
 from app.models.version import StoreConfigVersion
 from app.models.version_sync_event import VersionSyncEvent
 from app.models.zone import Zone
@@ -28,9 +27,9 @@ from app.schemas.draft import (
     ActivateDraftRequest,
     CalibrationResponse,
     CameraConfigResponse,
+    CameraIntrinsicsResponse,
     CreateCameraRequest,
     CreateDraftRequest,
-    CreateSectionRequest,
     DraftVersionResponse,
     FloorPlanDetailResponse,
     FloorPlanUploadResponse,
@@ -40,12 +39,17 @@ from app.schemas.draft import (
     ObstacleResponse,
     ObstacleUpdate,
     PatchCameraRequest,
-    PatchSectionRequest,
+    CameraPositionWorld,
+    PnpCalibrationResponse,
+    PnpRequest,
+    ProjectPointRequest,
+    ProjectPointResponse,
     PhysicalCameraResponse,
     PlaceCameraConfigRequest,
     ScaleRequest,
-    SectionResponse,
     SyncEventResponse,
+    TpsCalibrationResponse,
+    TpsRequest,
     UpdateCameraConfigRequest,
     VersionActivateRequest,
     VersionActivateResponse,
@@ -55,11 +59,70 @@ from app.schemas.draft import (
     ZoneUpdate,
 )
 from app.utils.homography import compute_homography
+from app.utils.pnp import classify_quality, compute_pnp, project_pixel_to_world
+from app.utils.intrinsics import apply_intrinsics
 from app.utils.calibration_xml import parse_intrinsic_xml, parse_extrinsic_xml
 from app.utils.shapely_utils import clamp_to_polygon, polygons_overlap
 from app.core.redis_client import get_redis
 
 router = APIRouter(tags=["draft"])
+
+import logging as _log
+_logger = _log.getLogger(__name__)
+
+
+# ─── Coordinate conversion helpers ───────────────────────────────────────────
+
+async def _get_floor_plan_scale(
+    version_id: uuid.UUID,
+    store_id: uuid.UUID,
+    db: AsyncSession,
+) -> FloorPlan:
+    """Load the floor plan for (version_id, store_id) and assert scale_defined.
+
+    Raises HTTP 422 if the floor plan is missing or scale is not yet defined.
+    """
+    fp_result = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == version_id,
+            FloorPlan.store_id == store_id,
+        )
+    )
+    fp = fp_result.scalar_one_or_none()
+    if not fp or not fp.scale_defined:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "Floor plan scale not defined. Complete step 2 before saving.",
+                "code": "SCALE_NOT_DEFINED",
+            },
+        )
+    return fp
+
+
+def _px_to_world(points: list, fp: FloorPlan) -> list:
+    """Convert [[canvas_px, canvas_py], ...] to [[world_x_m, world_y_m], ...] (metres)."""
+    return [
+        [(p[0] - fp.origin_x) / fp.pixels_per_meter,
+         (p[1] - fp.origin_y) / fp.pixels_per_meter]
+        for p in points
+    ]
+
+
+def _world_to_px(points: list, fp: FloorPlan) -> list:
+    """Convert [[world_x_m, world_y_m], ...] (metres) to [[canvas_px, canvas_py], ...]."""
+    return [
+        [w[0] * fp.pixels_per_meter + fp.origin_x,
+         w[1] * fp.pixels_per_meter + fp.origin_y]
+        for w in points
+    ]
+
+
+def _fp_boundary_to_px(fp: FloorPlan) -> list | None:
+    """Return boundary_polygon converted from world metres to canvas pixels."""
+    if not fp.boundary_polygon or not fp.scale_defined:
+        return fp.boundary_polygon
+    return _world_to_px(fp.boundary_polygon, fp)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -87,18 +150,31 @@ def _require_draft_access(draft: StoreConfigVersion, ctx: StoreContext) -> None:
         raise HTTPException(status_code=403, detail={"error": "Not your draft", "code": "DRAFT_ACCESS_DENIED"})
 
 
-async def _camera_config_response(cc: CameraConfig, db: AsyncSession) -> CameraConfigResponse:
+async def _camera_config_response(
+    cc: CameraConfig,
+    db: AsyncSession,
+    fp: FloorPlan | None = None,
+) -> CameraConfigResponse:
     pc_result = await db.execute(select(PhysicalCamera).where(PhysicalCamera.id == cc.physical_camera_id))
     pc = pc_result.scalar_one()
     frame_url = s3_client.generate_presigned_url_public(cc.frame_s3_key) if cc.frame_s3_key else None
+
+    # Convert stored world metres back to canvas pixels for the frontend.
+    if fp and fp.scale_defined:
+        pos_x = cc.position_x * fp.pixels_per_meter + fp.origin_x
+        pos_y = cc.position_y * fp.pixels_per_meter + fp.origin_y
+    else:
+        pos_x = cc.position_x
+        pos_y = cc.position_y
+
     return CameraConfigResponse(
         id=cc.id,
         version_id=cc.version_id,
         physical_camera_id=cc.physical_camera_id,
         physical_camera_name=pc.name,
-        section_id=cc.section_id,
-        position_x=cc.position_x,
-        position_y=cc.position_y,
+        store_id=cc.store_id,
+        position_x=pos_x,
+        position_y=pos_y,
         height_meters=cc.height_meters,
         fov_deg=cc.fov_deg,
         stream_url=pc.cloud_stream_url,
@@ -143,162 +219,157 @@ async def _clone_active_into_draft(draft_id: uuid.UUID, store_id: uuid.UUID, db:
     if not active:
         return
 
-    sections_result = await db.execute(
-        select(Section).where(Section.store_id == store_id, Section.status == "active")
+    # SPEC-00A: flattened — clone the single floor plan, then all zones,
+    # obstacles, and camera configs (with calibrations) directly. No section loop.
+    fp_result = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == active.id,
+            FloorPlan.store_id == store_id,
+        )
     )
-    sections = sections_result.scalars().all()
+    fp = fp_result.scalar_one_or_none()
+    if fp:
+        new_display_key = None
+        new_original_key = None
+        if fp.display_s3_key:
+            ext = fp.display_s3_key.rsplit(".", 1)[-1]
+            new_display_key = f"floor-plans/{store_id}/{uuid.uuid4()}.{ext}"
+            try:
+                s3_client.copy_object(fp.display_s3_key, new_display_key)
+            except Exception:
+                new_display_key = fp.display_s3_key
+        if fp.original_s3_key and fp.original_s3_key != fp.display_s3_key:
+            ext = fp.original_s3_key.rsplit(".", 1)[-1]
+            new_original_key = f"floor-plans/{store_id}/{uuid.uuid4()}.{ext}"
+            try:
+                s3_client.copy_object(fp.original_s3_key, new_original_key)
+            except Exception:
+                new_original_key = fp.original_s3_key
+        else:
+            new_original_key = new_display_key
+        db.add(FloorPlan(
+            version_id=draft_id,
+            store_id=store_id,
+            onboarding_method=fp.onboarding_method,
+            original_s3_key=new_original_key,
+            display_s3_key=new_display_key,
+            width_px=fp.width_px,
+            height_px=fp.height_px,
+            origin_x=fp.origin_x,
+            origin_y=fp.origin_y,
+            pixels_per_meter=fp.pixels_per_meter,
+            world_x_min=fp.world_x_min,
+            world_x_max=fp.world_x_max,
+            world_y_min=fp.world_y_min,
+            world_y_max=fp.world_y_max,
+            image_uploaded=fp.image_uploaded,
+            scale_defined=fp.scale_defined,
+        ))
 
-    for section in sections:
-        fp_result = await db.execute(
-            select(FloorPlan).where(
-                FloorPlan.version_id == active.id,
-                FloorPlan.section_id == section.id,
-            )
+    zones_result = await db.execute(
+        select(Zone).where(Zone.version_id == active.id)
+    )
+    for zone in zones_result.scalars().all():
+        db.add(Zone(
+            version_id=draft_id,
+            store_id=store_id,
+            name=zone.name,
+            type=zone.type,
+            points=zone.points,
+            queue_threshold_people=zone.queue_threshold_people,
+            queue_threshold_minutes=zone.queue_threshold_minutes,
+            staff_absence_minutes=zone.staff_absence_minutes,
+        ))
+
+    obstacles_result = await db.execute(
+        select(Obstacle).where(Obstacle.version_id == active.id)
+    )
+    for obs in obstacles_result.scalars().all():
+        db.add(Obstacle(
+            version_id=draft_id,
+            store_id=store_id,
+            name=obs.name,
+            points=obs.points,
+        ))
+
+    ccs_result = await db.execute(
+        select(CameraConfig).where(
+            CameraConfig.version_id == active.id,
+        ).order_by(CameraConfig.created_at.asc())
+    )
+    for cc in ccs_result.scalars().all():
+        new_frame_key = None
+        if cc.frame_s3_key:
+            ext = cc.frame_s3_key.rsplit(".", 1)[-1]
+            new_frame_key = f"camera-frames/{store_id}/{uuid.uuid4()}/{uuid.uuid4()}.{ext}"
+            try:
+                s3_client.copy_object(cc.frame_s3_key, new_frame_key)
+            except Exception:
+                new_frame_key = cc.frame_s3_key
+        new_cc = CameraConfig(
+            version_id=draft_id,
+            physical_camera_id=cc.physical_camera_id,
+            store_id=store_id,
+            position_x=cc.position_x,
+            position_y=cc.position_y,
+            height_meters=cc.height_meters,
+            fov_deg=cc.fov_deg,
+            frame_s3_key=new_frame_key,
+            frame_captured_at=cc.frame_captured_at,
+            frame_source=cc.frame_source,
+            status=cc.status,
         )
-        fp = fp_result.scalar_one_or_none()
-        if fp:
-            new_display_key = None
-            new_original_key = None
-            if fp.display_s3_key:
-                ext = fp.display_s3_key.rsplit(".", 1)[-1]
-                new_display_key = f"floor-plans/{store_id}/{section.id}/{uuid.uuid4()}.{ext}"
+        db.add(new_cc)
+        await db.flush()
+
+        cals_result = await db.execute(
+            select(Calibration)
+            .where(Calibration.camera_config_id == cc.id)
+            .order_by(Calibration.created_at.asc())
+        )
+        for cal in cals_result.scalars().all():
+            new_intrinsic_key = None
+            new_extrinsic_key = None
+            if cal.intrinsic_file_s3_key:
+                new_intrinsic_key = f"calibration-files/{store_id}/{new_cc.id}/intrinsic.xml"
                 try:
-                    s3_client.copy_object(fp.display_s3_key, new_display_key)
+                    s3_client.copy_object(cal.intrinsic_file_s3_key, new_intrinsic_key)
                 except Exception:
-                    new_display_key = fp.display_s3_key
-            if fp.original_s3_key and fp.original_s3_key != fp.display_s3_key:
-                ext = fp.original_s3_key.rsplit(".", 1)[-1]
-                new_original_key = f"floor-plans/{store_id}/{section.id}/{uuid.uuid4()}.{ext}"
+                    new_intrinsic_key = cal.intrinsic_file_s3_key
+            if cal.extrinsic_file_s3_key:
+                new_extrinsic_key = f"calibration-files/{store_id}/{new_cc.id}/extrinsic.xml"
                 try:
-                    s3_client.copy_object(fp.original_s3_key, new_original_key)
+                    s3_client.copy_object(cal.extrinsic_file_s3_key, new_extrinsic_key)
                 except Exception:
-                    new_original_key = fp.original_s3_key
-            else:
-                new_original_key = new_display_key
-            db.add(FloorPlan(
-                version_id=draft_id,
-                section_id=section.id,
-                onboarding_method=fp.onboarding_method,
-                original_s3_key=new_original_key,
-                display_s3_key=new_display_key,
-                width_px=fp.width_px,
-                height_px=fp.height_px,
-                origin_x=fp.origin_x,
-                origin_y=fp.origin_y,
-                pixels_per_meter=fp.pixels_per_meter,
-                world_x_min=fp.world_x_min,
-                world_x_max=fp.world_x_max,
-                world_y_min=fp.world_y_min,
-                world_y_max=fp.world_y_max,
-                image_uploaded=fp.image_uploaded,
-                scale_defined=fp.scale_defined,
+                    new_extrinsic_key = cal.extrinsic_file_s3_key
+            db.add(Calibration(
+                camera_config_id=new_cc.id,
+                method=cal.method,
+                status=cal.status,
+                is_current=cal.is_current,
+                correspondences=cal.correspondences,
+                homography_matrix=cal.homography_matrix,
+                rms_reprojection_error=cal.rms_reprojection_error,
+                max_reprojection_error=cal.max_reprojection_error,
+                point_count=cal.point_count,
+                coverage_score=cal.coverage_score,
+                condition_number=cal.condition_number,
+                intrinsic_file_s3_key=new_intrinsic_key,
+                extrinsic_file_s3_key=new_extrinsic_key,
+                intrinsic_matrix=cal.intrinsic_matrix,
+                dist_coeffs=cal.dist_coeffs,
+                rotation_vector=cal.rotation_vector,
+                rotation_matrix=cal.rotation_matrix,
+                translation_vector=cal.translation_vector,
+                camera_world_x=cal.camera_world_x,
+                camera_world_y=cal.camera_world_y,
+                camera_world_z=cal.camera_world_z,
+                image_width=cal.image_width,
+                image_height=cal.image_height,
+                computed_at=cal.computed_at,
+                verified_at=cal.verified_at,
+                verified_by=cal.verified_by,
             ))
-
-        zones_result = await db.execute(
-            select(Zone).where(Zone.version_id == active.id, Zone.section_id == section.id)
-        )
-        for zone in zones_result.scalars().all():
-            db.add(Zone(
-                version_id=draft_id,
-                section_id=section.id,
-                name=zone.name,
-                type=zone.type,
-                points=zone.points,
-                queue_threshold_people=zone.queue_threshold_people,
-                queue_threshold_minutes=zone.queue_threshold_minutes,
-                staff_absence_minutes=zone.staff_absence_minutes,
-            ))
-
-        obstacles_result = await db.execute(
-            select(Obstacle).where(Obstacle.version_id == active.id, Obstacle.section_id == section.id)
-        )
-        for obs in obstacles_result.scalars().all():
-            db.add(Obstacle(
-                version_id=draft_id,
-                section_id=section.id,
-                name=obs.name,
-                points=obs.points,
-            ))
-
-        ccs_result = await db.execute(
-            select(CameraConfig).where(
-                CameraConfig.version_id == active.id,
-                CameraConfig.section_id == section.id,
-            ).order_by(CameraConfig.created_at.asc())
-        )
-        for cc in ccs_result.scalars().all():
-            new_frame_key = None
-            if cc.frame_s3_key:
-                ext = cc.frame_s3_key.rsplit(".", 1)[-1]
-                new_frame_key = f"camera-frames/{store_id}/{uuid.uuid4()}/{uuid.uuid4()}.{ext}"
-                try:
-                    s3_client.copy_object(cc.frame_s3_key, new_frame_key)
-                except Exception:
-                    new_frame_key = cc.frame_s3_key
-            new_cc = CameraConfig(
-                version_id=draft_id,
-                physical_camera_id=cc.physical_camera_id,
-                section_id=section.id,
-                position_x=cc.position_x,
-                position_y=cc.position_y,
-                height_meters=cc.height_meters,
-                fov_deg=cc.fov_deg,
-                frame_s3_key=new_frame_key,
-                frame_captured_at=cc.frame_captured_at,
-                frame_source=cc.frame_source,
-                status=cc.status,
-            )
-            db.add(new_cc)
-            await db.flush()
-
-            cals_result = await db.execute(
-                select(Calibration)
-                .where(Calibration.camera_config_id == cc.id)
-                .order_by(Calibration.created_at.asc())
-            )
-            for cal in cals_result.scalars().all():
-                new_intrinsic_key = None
-                new_extrinsic_key = None
-                if cal.intrinsic_file_s3_key:
-                    new_intrinsic_key = f"calibration-files/{store_id}/{new_cc.id}/intrinsic.xml"
-                    try:
-                        s3_client.copy_object(cal.intrinsic_file_s3_key, new_intrinsic_key)
-                    except Exception:
-                        new_intrinsic_key = cal.intrinsic_file_s3_key
-                if cal.extrinsic_file_s3_key:
-                    new_extrinsic_key = f"calibration-files/{store_id}/{new_cc.id}/extrinsic.xml"
-                    try:
-                        s3_client.copy_object(cal.extrinsic_file_s3_key, new_extrinsic_key)
-                    except Exception:
-                        new_extrinsic_key = cal.extrinsic_file_s3_key
-                db.add(Calibration(
-                    camera_config_id=new_cc.id,
-                    method=cal.method,
-                    status=cal.status,
-                    is_current=cal.is_current,
-                    correspondences=cal.correspondences,
-                    homography_matrix=cal.homography_matrix,
-                    rms_reprojection_error=cal.rms_reprojection_error,
-                    max_reprojection_error=cal.max_reprojection_error,
-                    point_count=cal.point_count,
-                    coverage_score=cal.coverage_score,
-                    condition_number=cal.condition_number,
-                    intrinsic_file_s3_key=new_intrinsic_key,
-                    extrinsic_file_s3_key=new_extrinsic_key,
-                    intrinsic_matrix=cal.intrinsic_matrix,
-                    dist_coeffs=cal.dist_coeffs,
-                    rotation_vector=cal.rotation_vector,
-                    rotation_matrix=cal.rotation_matrix,
-                    translation_vector=cal.translation_vector,
-                    camera_world_x=cal.camera_world_x,
-                    camera_world_y=cal.camera_world_y,
-                    camera_world_z=cal.camera_world_z,
-                    image_width=cal.image_width,
-                    image_height=cal.image_height,
-                    computed_at=cal.computed_at,
-                    verified_at=cal.verified_at,
-                    verified_by=cal.verified_by,
-                ))
 
 
 @router.post("/store/{slug}/versions/draft", response_model=DraftVersionResponse, status_code=201)
@@ -406,12 +477,11 @@ async def _cleanup_draft_s3(version_id: uuid.UUID, store_id: uuid.UUID, db: Asyn
 # ─── Floor Plan ───────────────────────────────────────────────────────────────
 
 @router.post(
-    "/store/{slug}/draft/sections/{section_id}/floor-plan/upload",
+    "/store/{slug}/draft/floor-plan/upload",
     response_model=FloorPlanUploadResponse,
 )
 async def upload_floor_plan(
     slug: str,
-    section_id: uuid.UUID,
     file: UploadFile = File(...),
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -425,7 +495,7 @@ async def upload_floor_plan(
     ext = (file.filename or "image.jpg").rsplit(".", 1)[-1].lower()
     if ext not in {"jpg", "jpeg", "png", "webp"}:
         ext = "jpg"
-    s3_key = f"floor-plans/{ctx.store_id}/{section_id}/{uuid.uuid4()}.{ext}"
+    s3_key = f"floor-plans/{ctx.store_id}/{uuid.uuid4()}.{ext}"
     content_type = file.content_type or "image/jpeg"
     s3_client.upload_bytes(content, s3_key, content_type)
 
@@ -433,7 +503,6 @@ async def upload_floor_plan(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -445,13 +514,12 @@ async def upload_floor_plan(
                 s3_client.delete_object(fp.display_s3_key)
             except Exception:
                 pass
-        # Cascade wipe: zones, obstacles, camera configs for this section/version
-        await db.execute(delete(Zone).where(Zone.version_id == draft.id, Zone.section_id == section_id))
-        await db.execute(delete(Obstacle).where(Obstacle.version_id == draft.id, Obstacle.section_id == section_id))
+        # Cascade wipe: zones, obstacles, camera configs for this version
+        await db.execute(delete(Zone).where(Zone.version_id == draft.id))
+        await db.execute(delete(Obstacle).where(Obstacle.version_id == draft.id))
         cc_result = await db.execute(
             select(CameraConfig).where(
                 CameraConfig.version_id == draft.id,
-                CameraConfig.section_id == section_id,
             )
         )
         for cc in cc_result.scalars().all():
@@ -463,7 +531,6 @@ async def upload_floor_plan(
         await db.execute(
             delete(CameraConfig).where(
                 CameraConfig.version_id == draft.id,
-                CameraConfig.section_id == section_id,
             )
         )
         fp.original_s3_key = s3_key
@@ -483,7 +550,7 @@ async def upload_floor_plan(
     else:
         fp = FloorPlan(
             version_id=draft.id,
-            section_id=section_id,
+            store_id=ctx.store_id,
             onboarding_method="standard",
             original_s3_key=s3_key,
             display_s3_key=s3_key,
@@ -501,7 +568,7 @@ async def upload_floor_plan(
     return FloorPlanUploadResponse(
         id=fp.id,
         version_id=fp.version_id,
-        section_id=fp.section_id,
+        store_id=fp.store_id,
         onboarding_method=fp.onboarding_method,
         display_url=display_url,
         width_px=fp.width_px,
@@ -512,12 +579,11 @@ async def upload_floor_plan(
 
 
 @router.get(
-    "/store/{slug}/draft/sections/{section_id}/floor-plan",
+    "/store/{slug}/draft/floor-plan",
     response_model=FloorPlanDetailResponse,
 )
 async def get_draft_floor_plan(
     slug: str,
-    section_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):
@@ -525,7 +591,6 @@ async def get_draft_floor_plan(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -536,7 +601,7 @@ async def get_draft_floor_plan(
     return FloorPlanDetailResponse(
         id=fp.id,
         version_id=fp.version_id,
-        section_id=fp.section_id,
+        store_id=fp.store_id,
         onboarding_method=fp.onboarding_method,
         display_url=display_url,
         width_px=fp.width_px,
@@ -548,19 +613,18 @@ async def get_draft_floor_plan(
         world_x_max=fp.world_x_max,
         world_y_min=fp.world_y_min,
         world_y_max=fp.world_y_max,
-        boundary_polygon=fp.boundary_polygon,
+        boundary_polygon=_fp_boundary_to_px(fp),
         image_uploaded=fp.image_uploaded,
         scale_defined=fp.scale_defined,
     )
 
 
 @router.put(
-    "/store/{slug}/draft/sections/{section_id}/floor-plan/scale",
+    "/store/{slug}/draft/floor-plan/scale",
     response_model=FloorPlanDetailResponse,
 )
 async def set_floor_plan_scale(
     slug: str,
-    section_id: uuid.UUID,
     body: ScaleRequest,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -571,7 +635,6 @@ async def set_floor_plan_scale(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -591,7 +654,15 @@ async def set_floor_plan_scale(
     fp.pixels_per_meter = pixels_per_meter
     fp.scale_defined = True
     if body.boundary_polygon is not None:
-        fp.boundary_polygon = body.boundary_polygon if len(body.boundary_polygon) >= 3 else None
+        if len(body.boundary_polygon) >= 3:
+            # Convert boundary from canvas pixels to world metres before storing.
+            fp.boundary_polygon = [
+                [(p[0] - body.origin_x) / pixels_per_meter,
+                 (p[1] - body.origin_y) / pixels_per_meter]
+                for p in body.boundary_polygon
+            ]
+        else:
+            fp.boundary_polygon = None
     fp.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
@@ -599,25 +670,24 @@ async def set_floor_plan_scale(
 
     display_url = s3_client.generate_presigned_url_public(fp.display_s3_key) if fp.display_s3_key else None
     return FloorPlanDetailResponse(
-        id=fp.id, version_id=fp.version_id, section_id=fp.section_id,
+        id=fp.id, version_id=fp.version_id, store_id=fp.store_id,
         onboarding_method=fp.onboarding_method, display_url=display_url,
         width_px=fp.width_px, height_px=fp.height_px,
         origin_x=fp.origin_x, origin_y=fp.origin_y,
         pixels_per_meter=fp.pixels_per_meter,
         world_x_min=fp.world_x_min, world_x_max=fp.world_x_max,
         world_y_min=fp.world_y_min, world_y_max=fp.world_y_max,
-        boundary_polygon=fp.boundary_polygon,
+        boundary_polygon=_fp_boundary_to_px(fp),
         image_uploaded=fp.image_uploaded, scale_defined=fp.scale_defined,
     )
 
 
 @router.put(
-    "/store/{slug}/draft/sections/{section_id}/floor-plan/world-bounds",
+    "/store/{slug}/draft/floor-plan/world-bounds",
     response_model=FloorPlanDetailResponse,
 )
 async def set_floor_plan_boundary_polygon(
     slug: str,
-    section_id: uuid.UUID,
     body: WorldBoundsRequest,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -628,7 +698,6 @@ async def set_floor_plan_boundary_polygon(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -646,42 +715,67 @@ async def set_floor_plan_boundary_polygon(
 
     display_url = s3_client.generate_presigned_url_public(fp.display_s3_key) if fp.display_s3_key else None
     return FloorPlanDetailResponse(
-        id=fp.id, version_id=fp.version_id, section_id=fp.section_id,
+        id=fp.id, version_id=fp.version_id, store_id=fp.store_id,
         onboarding_method=fp.onboarding_method, display_url=display_url,
         width_px=fp.width_px, height_px=fp.height_px,
         origin_x=fp.origin_x, origin_y=fp.origin_y,
         pixels_per_meter=fp.pixels_per_meter,
         world_x_min=fp.world_x_min, world_x_max=fp.world_x_max,
         world_y_min=fp.world_y_min, world_y_max=fp.world_y_max,
-        boundary_polygon=fp.boundary_polygon,
+        boundary_polygon=_fp_boundary_to_px(fp),
         image_uploaded=fp.image_uploaded, scale_defined=fp.scale_defined,
     )
 
 
 # ─── Zones ────────────────────────────────────────────────────────────────────
 
-@router.get("/store/{slug}/draft/sections/{section_id}/zones", response_model=list[ZoneResponse])
+def _zone_to_response(zone: Zone, fp: FloorPlan | None) -> dict:
+    """Return a dict suitable for ZoneResponse, converting points world→canvas pixels."""
+    points = zone.points
+    if fp and fp.scale_defined and points:
+        points = _world_to_px(points, fp)
+    return {
+        "id": zone.id,
+        "version_id": zone.version_id,
+        "store_id": zone.store_id,
+        "name": zone.name,
+        "type": zone.type,
+        "points": points,
+        "queue_threshold_people": zone.queue_threshold_people,
+        "queue_threshold_minutes": zone.queue_threshold_minutes,
+        "staff_absence_minutes": zone.staff_absence_minutes,
+        "created_at": zone.created_at,
+        "updated_at": zone.updated_at,
+    }
+
+
+@router.get("/store/{slug}/draft/zones", response_model=list[ZoneResponse])
 async def list_draft_zones(
     slug: str,
-    section_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):
     draft = await _require_draft(ctx.store_id, db)
     result = await db.execute(
-        select(Zone).where(Zone.version_id == draft.id, Zone.section_id == section_id)
+        select(Zone).where(Zone.version_id == draft.id)
     )
-    return result.scalars().all()
+    zones = result.scalars().all()
+    fp_result = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == draft.id,
+        )
+    )
+    fp = fp_result.scalar_one_or_none()
+    return [_zone_to_response(z, fp) for z in zones]
 
 
 @router.post(
-    "/store/{slug}/draft/sections/{section_id}/zones",
+    "/store/{slug}/draft/zones",
     response_model=ZoneResponse,
     status_code=201,
 )
 async def create_zone(
     slug: str,
-    section_id: uuid.UUID,
     body: ZoneCreate,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -693,7 +787,6 @@ async def create_zone(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -711,23 +804,25 @@ async def create_zone(
                 detail={"error": f"Point {point} is outside floor plan bounds ({fp.width_px}x{fp.height_px})", "code": "POINT_OUT_OF_BOUNDS"},
             )
 
-    # Check for name uniqueness within this section/version
+    # Check for name uniqueness within this version
     existing_name = await db.execute(
         select(Zone).where(
             Zone.version_id == draft.id,
-            Zone.section_id == section_id,
             Zone.name == body.name,
         )
     )
     if existing_name.scalar_one_or_none():
         raise HTTPException(status_code=409, detail={"error": "Zone name already exists", "code": "ZONE_NAME_TAKEN"})
 
-    # Check polygon overlap with existing zones
+    # Convert incoming canvas pixels to world metres for storage.
+    world_points = _px_to_world(body.points, fp)
+
+    # Check polygon overlap with existing zones (comparison in world metres — consistent).
     existing_zones = await db.execute(
-        select(Zone).where(Zone.version_id == draft.id, Zone.section_id == section_id)
+        select(Zone).where(Zone.version_id == draft.id)
     )
     for existing in existing_zones.scalars().all():
-        if polygons_overlap(body.points, existing.points):
+        if polygons_overlap(world_points, existing.points):
             raise HTTPException(
                 status_code=422,
                 detail={"error": f"Zone overlaps with '{existing.name}'", "code": "ZONE_OVERLAP"},
@@ -735,10 +830,10 @@ async def create_zone(
 
     zone = Zone(
         version_id=draft.id,
-        section_id=section_id,
+        store_id=ctx.store_id,
         name=body.name,
         type=body.type,
-        points=body.points,
+        points=world_points,
         queue_threshold_people=body.queue_threshold_people,
         queue_threshold_minutes=body.queue_threshold_minutes,
         staff_absence_minutes=body.staff_absence_minutes,
@@ -746,16 +841,15 @@ async def create_zone(
     db.add(zone)
     await db.commit()
     await db.refresh(zone)
-    return zone
+    return _zone_to_response(zone, fp)
 
 
 @router.put(
-    "/store/{slug}/draft/sections/{section_id}/zones/{zone_id}",
+    "/store/{slug}/draft/zones/{zone_id}",
     response_model=ZoneResponse,
 )
 async def update_zone(
     slug: str,
-    section_id: uuid.UUID,
     zone_id: uuid.UUID,
     body: ZoneUpdate,
     ctx: StoreContext = Depends(get_store_context),
@@ -768,40 +862,42 @@ async def update_zone(
         select(Zone).where(
             Zone.id == zone_id,
             Zone.version_id == draft.id,
-            Zone.section_id == section_id,
         )
     )
     zone = result.scalar_one_or_none()
     if not zone:
         raise HTTPException(status_code=404, detail={"error": "Zone not found", "code": "NOT_FOUND"})
 
-    new_points = body.points if body.points is not None else zone.points
+    fp: FloorPlan | None = None
+    new_world_points = zone.points  # default: keep existing (already in world metres)
 
     if body.points is not None:
         fp_result = await db.execute(
             select(FloorPlan).where(
                 FloorPlan.version_id == draft.id,
-                FloorPlan.section_id == section_id,
             )
         )
         fp = fp_result.scalar_one_or_none()
-        if fp:
+        if fp and fp.scale_defined:
             for point in body.points:
                 if not (0 <= point[0] <= fp.width_px and 0 <= point[1] <= fp.height_px):
                     raise HTTPException(
                         status_code=422,
                         detail={"error": f"Point {point} is outside floor plan bounds ({fp.width_px}x{fp.height_px})", "code": "POINT_OUT_OF_BOUNDS"},
                     )
+            # Convert incoming canvas pixels to world metres.
+            new_world_points = _px_to_world(body.points, fp)
+        elif fp:
+            new_world_points = body.points
 
         existing_zones = await db.execute(
             select(Zone).where(
                 Zone.version_id == draft.id,
-                Zone.section_id == section_id,
                 Zone.id != zone_id,
             )
         )
         for existing in existing_zones.scalars().all():
-            if polygons_overlap(new_points, existing.points):
+            if polygons_overlap(new_world_points, existing.points):
                 raise HTTPException(
                     status_code=422,
                     detail={"error": f"Zone overlaps with '{existing.name}'", "code": "ZONE_OVERLAP"},
@@ -812,7 +908,7 @@ async def update_zone(
     if body.type is not None:
         zone.type = body.type
     if body.points is not None:
-        zone.points = body.points
+        zone.points = new_world_points
     if body.queue_threshold_people is not None:
         zone.queue_threshold_people = body.queue_threshold_people
     if body.queue_threshold_minutes is not None:
@@ -823,13 +919,12 @@ async def update_zone(
 
     await db.commit()
     await db.refresh(zone)
-    return zone
+    return _zone_to_response(zone, fp)
 
 
-@router.delete("/store/{slug}/draft/sections/{section_id}/zones/{zone_id}", status_code=204)
+@router.delete("/store/{slug}/draft/zones/{zone_id}", status_code=204)
 async def delete_zone(
     slug: str,
-    section_id: uuid.UUID,
     zone_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -840,7 +935,6 @@ async def delete_zone(
         delete(Zone).where(
             Zone.id == zone_id,
             Zone.version_id == draft.id,
-            Zone.section_id == section_id,
         )
     )
     await db.commit()
@@ -848,28 +942,26 @@ async def delete_zone(
 
 # ─── Obstacles ────────────────────────────────────────────────────────────────
 
-@router.get("/store/{slug}/draft/sections/{section_id}/obstacles", response_model=list[ObstacleResponse])
+@router.get("/store/{slug}/draft/obstacles", response_model=list[ObstacleResponse])
 async def list_draft_obstacles(
     slug: str,
-    section_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):
     draft = await _require_draft(ctx.store_id, db)
     result = await db.execute(
-        select(Obstacle).where(Obstacle.version_id == draft.id, Obstacle.section_id == section_id)
+        select(Obstacle).where(Obstacle.version_id == draft.id)
     )
     return result.scalars().all()
 
 
 @router.post(
-    "/store/{slug}/draft/sections/{section_id}/obstacles",
+    "/store/{slug}/draft/obstacles",
     response_model=ObstacleResponse,
     status_code=201,
 )
 async def create_obstacle(
     slug: str,
-    section_id: uuid.UUID,
     body: ObstacleCreate,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -878,7 +970,7 @@ async def create_obstacle(
     _require_draft_access(draft, ctx)
     obstacle = Obstacle(
         version_id=draft.id,
-        section_id=section_id,
+        store_id=ctx.store_id,
         name=body.name,
         points=body.points,
     )
@@ -889,12 +981,11 @@ async def create_obstacle(
 
 
 @router.put(
-    "/store/{slug}/draft/sections/{section_id}/obstacles/{obstacle_id}",
+    "/store/{slug}/draft/obstacles/{obstacle_id}",
     response_model=ObstacleResponse,
 )
 async def update_obstacle(
     slug: str,
-    section_id: uuid.UUID,
     obstacle_id: uuid.UUID,
     body: ObstacleUpdate,
     ctx: StoreContext = Depends(get_store_context),
@@ -907,7 +998,6 @@ async def update_obstacle(
         select(Obstacle).where(
             Obstacle.id == obstacle_id,
             Obstacle.version_id == draft.id,
-            Obstacle.section_id == section_id,
         )
     )
     obstacle = result.scalar_one_or_none()
@@ -925,10 +1015,9 @@ async def update_obstacle(
     return obstacle
 
 
-@router.delete("/store/{slug}/draft/sections/{section_id}/obstacles/{obstacle_id}", status_code=204)
+@router.delete("/store/{slug}/draft/obstacles/{obstacle_id}", status_code=204)
 async def delete_obstacle(
     slug: str,
-    section_id: uuid.UUID,
     obstacle_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -939,13 +1028,42 @@ async def delete_obstacle(
         delete(Obstacle).where(
             Obstacle.id == obstacle_id,
             Obstacle.version_id == draft.id,
-            Obstacle.section_id == section_id,
         )
     )
     await db.commit()
 
 
 # ─── Physical Cameras ─────────────────────────────────────────────────────────
+
+async def _invalidate_calibrations(db: AsyncSession, physical_camera_id: uuid.UUID) -> None:
+    """Reject all current calibrations for a physical camera's configs.
+
+    Called when lens/FOV changes: old rvec/tvec were computed against the old
+    intrinsics and are now wrong. History is preserved (is_current=FALSE), not
+    deleted. Force recalibration.
+    """
+    config_ids = (
+        await db.execute(
+            select(CameraConfig.id).where(
+                CameraConfig.physical_camera_id == physical_camera_id
+            )
+        )
+    ).scalars().all()
+    if not config_ids:
+        return
+    await db.execute(
+        update(Calibration)
+        .where(
+            Calibration.camera_config_id.in_(config_ids),
+            Calibration.is_current == True,
+        )
+        .values(is_current=False, status="rejected")
+    )
+    import logging as _log
+    _log.getLogger(__name__).info(
+        "calibration invalidated due to lens/FOV change, camera_id=%s", physical_camera_id
+    )
+
 
 @router.post("/store/{slug}/cameras", response_model=PhysicalCameraResponse, status_code=201)
 async def create_camera(
@@ -964,7 +1082,15 @@ async def create_camera(
         cloud_stream_url=body.cloud_stream_url,
         stream_username=body.stream_username,
         stream_password=body.stream_password,
+        lens_focal_length_mm=body.lens_focal_length_mm,
+        h_fov_deg=body.h_fov_deg,
+        v_fov_deg=body.v_fov_deg,
+        stream_width=body.stream_width,
+        stream_height=body.stream_height,
     )
+    # Stream resolution is user-supplied; compute intrinsics when FOV + resolution
+    # are both present (skipped silently otherwise).
+    apply_intrinsics(camera)
     db.add(camera)
     await db.commit()
     await db.refresh(camera)
@@ -990,13 +1116,68 @@ async def patch_camera(
     if not camera:
         raise HTTPException(status_code=404, detail={"error": "Camera not found", "code": "NOT_FOUND"})
 
-    for field, value in body.model_dump(exclude_none=True).items():
+    updates = body.model_dump(exclude_none=True)
+    # Any of these change the intrinsic matrix (fx/fy/cx/cy), so they force a
+    # recompute and invalidate prior extrinsic calibrations.
+    intrinsics_fields = {
+        "lens_focal_length_mm", "h_fov_deg", "v_fov_deg",
+        "stream_width", "stream_height",
+    }
+    intrinsics_changed = any(
+        field in updates and updates[field] != getattr(camera, field)
+        for field in intrinsics_fields
+    )
+
+    for field, value in updates.items():
         setattr(camera, field, value)
     camera.updated_at = datetime.now(timezone.utc)
+
+    if intrinsics_changed:
+        apply_intrinsics(camera)
+        await _invalidate_calibrations(db, camera.id)
 
     await db.commit()
     await db.refresh(camera)
     return camera
+
+
+@router.get(
+    "/store/{slug}/cameras/{camera_id}/intrinsics",
+    response_model=CameraIntrinsicsResponse,
+)
+async def get_camera_intrinsics(
+    slug: str,
+    camera_id: uuid.UUID,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(PhysicalCamera).where(
+            PhysicalCamera.id == camera_id,
+            PhysicalCamera.store_id == ctx.store_id,
+        )
+    )
+    camera = result.scalar_one_or_none()
+    if not camera:
+        raise HTTPException(status_code=404, detail={"error": "Camera not found", "code": "NOT_FOUND"})
+    if camera.fx is None or camera.fy is None or camera.cx is None or camera.cy is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Camera intrinsics not yet computed (set FOV and ensure stream resolution is detected)",
+                "code": "INTRINSICS_UNAVAILABLE",
+            },
+        )
+    return CameraIntrinsicsResponse(
+        camera_matrix=[
+            [camera.fx, 0.0, camera.cx],
+            [0.0, camera.fy, camera.cy],
+            [0.0, 0.0, 1.0],
+        ],
+        dist_coeffs=camera.dist_coeffs or [0.0, 0.0, 0.0, 0.0, 0.0],
+        source=camera.intrinsics_source,
+        resolution=[camera.stream_width, camera.stream_height],
+    )
 
 
 @router.delete("/store/{slug}/cameras/{camera_id}", status_code=204)
@@ -1018,12 +1199,11 @@ async def delete_camera(
 # ─── Camera Configs ───────────────────────────────────────────────────────────
 
 @router.get(
-    "/store/{slug}/draft/sections/{section_id}/camera-configs",
+    "/store/{slug}/draft/camera-configs",
     response_model=list[CameraConfigResponse],
 )
 async def list_draft_camera_configs(
     slug: str,
-    section_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1031,21 +1211,26 @@ async def list_draft_camera_configs(
     result = await db.execute(
         select(CameraConfig).where(
             CameraConfig.version_id == draft.id,
-            CameraConfig.section_id == section_id,
         ).order_by(CameraConfig.created_at.asc())
     )
     configs = result.scalars().all()
-    return [await _camera_config_response(cc, db) for cc in configs]
+    # Load floor plan once for position conversion.
+    fp_result = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == draft.id,
+        )
+    )
+    fp = fp_result.scalar_one_or_none()
+    return [await _camera_config_response(cc, db, fp=fp) for cc in configs]
 
 
 @router.post(
-    "/store/{slug}/draft/sections/{section_id}/camera-configs",
+    "/store/{slug}/draft/camera-configs",
     response_model=CameraConfigResponse,
     status_code=201,
 )
 async def place_camera_config(
     slug: str,
-    section_id: uuid.UUID,
     body: PlaceCameraConfigRequest,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -1077,19 +1262,21 @@ async def place_camera_config(
             detail={"error": "Camera already placed in this draft", "code": "CAMERA_ALREADY_PLACED"},
         )
 
+    # Convert canvas pixels to world metres before storing.
+    fp = await _get_floor_plan_scale(draft.id, ctx.store_id, db)
     cc = CameraConfig(
         version_id=draft.id,
         physical_camera_id=body.physical_camera_id,
-        section_id=section_id,
-        position_x=body.position_x,
-        position_y=body.position_y,
+        store_id=ctx.store_id,
+        position_x=(body.position_x - fp.origin_x) / fp.pixels_per_meter,
+        position_y=(body.position_y - fp.origin_y) / fp.pixels_per_meter,
         height_meters=body.height_meters,
         fov_deg=body.fov_deg,
     )
     db.add(cc)
     await db.commit()
     await db.refresh(cc)
-    return await _camera_config_response(cc, db)
+    return await _camera_config_response(cc, db, fp=fp)
 
 
 @router.put(
@@ -1116,13 +1303,24 @@ async def update_camera_config(
     if not cc:
         raise HTTPException(status_code=404, detail={"error": "Camera config not found", "code": "NOT_FOUND"})
 
-    for field, value in body.model_dump(exclude_none=True).items():
+    updates = body.model_dump(exclude_none=True)
+
+    # If position is being updated, convert canvas pixels → world metres.
+    fp: FloorPlan | None = None
+    if "position_x" in updates or "position_y" in updates:
+        fp = await _get_floor_plan_scale(draft.id, ctx.store_id, db)
+        if "position_x" in updates:
+            updates["position_x"] = (updates["position_x"] - fp.origin_x) / fp.pixels_per_meter
+        if "position_y" in updates:
+            updates["position_y"] = (updates["position_y"] - fp.origin_y) / fp.pixels_per_meter
+
+    for field, value in updates.items():
         setattr(cc, field, value)
     cc.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(cc)
-    return await _camera_config_response(cc, db)
+    return await _camera_config_response(cc, db, fp=fp)
 
 
 @router.delete("/store/{slug}/draft/camera-configs/{config_id}", status_code=204)
@@ -1324,6 +1522,392 @@ async def compute_homography_calibration(
 
 
 @router.post(
+    "/store/{slug}/draft/camera-configs/{config_id}/calibration/pnp",
+    response_model=PnpCalibrationResponse,
+    status_code=201,
+)
+async def compute_pnp_calibration(
+    slug: str,
+    config_id: uuid.UUID,
+    body: PnpRequest,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """Solve camera extrinsics from 2D-3D correspondences (angled cameras).
+
+    Replaces homography for non-top-down cameras. Reads intrinsics fresh from
+    physical_cameras (never reuses a prior calibration's snapshot).
+    """
+    draft = await _require_draft(ctx.store_id, db)
+    _require_draft_access(draft, ctx)
+
+    cc_result = await db.execute(
+        select(CameraConfig).where(
+            CameraConfig.id == config_id,
+            CameraConfig.version_id == draft.id,
+        )
+    )
+    cc = cc_result.scalar_one_or_none()
+    if not cc:
+        raise HTTPException(status_code=404, detail={"error": "Camera config not found", "code": "NOT_FOUND"})
+
+    # Load intrinsics fresh from the physical camera.
+    pc_result = await db.execute(
+        select(PhysicalCamera).where(PhysicalCamera.id == cc.physical_camera_id)
+    )
+    camera = pc_result.scalar_one_or_none()
+    if camera is None or camera.fx is None or camera.fy is None or camera.cx is None or camera.cy is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "Camera intrinsics not set. Configure lens FOV on this camera before calibrating.",
+                "code": "INTRINSICS_NOT_SET",
+            },
+        )
+
+    camera_matrix = [
+        [camera.fx, 0.0, camera.cx],
+        [0.0, camera.fy, camera.cy],
+        [0.0, 0.0, 1.0],
+    ]
+    dist_coeffs = camera.dist_coeffs or [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    corr_list = [
+        {
+            "frame_px": c.frame_px,
+            "frame_py": c.frame_py,
+            "world_x": c.world_x,
+            "world_y": c.world_y,
+            "world_z": c.world_z,
+        }
+        for c in body.correspondences
+    ]
+
+    try:
+        result = compute_pnp(corr_list, camera_matrix, dist_coeffs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": str(exc), "code": "PNP_FAILED"})
+
+    quality = classify_quality(result["rms_reprojection_error"], camera.stream_width)
+    now = datetime.now(timezone.utc)
+
+    # Demote any prior current calibration for this config.
+    await db.execute(
+        update(Calibration)
+        .where(Calibration.camera_config_id == config_id, Calibration.is_current == True)
+        .values(is_current=False)
+    )
+
+    cal = Calibration(
+        camera_config_id=config_id,
+        method="pnp",
+        status="ok",
+        is_current=True,
+        correspondences=corr_list,
+        intrinsic_matrix=camera_matrix,        # snapshot
+        dist_coeffs=list(dist_coeffs),         # snapshot
+        rotation_vector=result["rotation_vector"],
+        translation_vector=result["translation_vector"],
+        camera_world_x=result["camera_world_x"],
+        camera_world_y=result["camera_world_y"],
+        camera_world_z=result["camera_world_z"],
+        rms_reprojection_error=result["rms_reprojection_error"],
+        max_reprojection_error=result["max_reprojection_error"],
+        point_count=result["point_count"],
+        computed_at=now,
+    )
+    db.add(cal)
+
+    cc.status = "calibrated"
+    cc.updated_at = now
+
+    await db.commit()
+    await db.refresh(cal)
+
+    # Signal IEP2 to reload calibration without pod restart (handled in M7-S3).
+    try:
+        await redis.publish(f"iep2:reload:{config_id}", "pnp")
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            "Failed to publish pnp reload signal  config_id=%s: %s", config_id, exc
+        )
+
+    return PnpCalibrationResponse(
+        calibration_id=cal.id,
+        method="pnp",
+        status="ok",
+        rms_reprojection_error=result["rms_reprojection_error"],
+        max_reprojection_error=result["max_reprojection_error"],
+        point_count=result["point_count"],
+        quality=quality,
+        camera_position_world=CameraPositionWorld(
+            x=result["camera_world_x"],
+            y=result["camera_world_y"],
+            z=result["camera_world_z"],
+        ),
+    )
+
+
+# ─── TPS Calibration ──────────────────────────────────────────────────────────
+
+def _project_tps(cal: "Calibration", frame_px: float, frame_py: float) -> tuple[float, float] | None:
+    """Reconstruct TPS interpolators from stored correspondences and project one point.
+
+    Returns (world_x_m, world_y_m) or None on failure.
+    """
+    try:
+        import numpy as np
+        from scipy.interpolate import RBFInterpolator
+
+        corr = cal.correspondences or []
+        if len(corr) < 4:
+            return None
+        frame_pts = np.array([[c["frame_px"], c["frame_py"]] for c in corr])
+        world_pts = np.array([[c["world_x_m"], c["world_y_m"]] for c in corr])
+
+        rbf_x = RBFInterpolator(frame_pts, world_pts[:, 0], kernel="thin_plate_spline", smoothing=0)
+        rbf_y = RBFInterpolator(frame_pts, world_pts[:, 1], kernel="thin_plate_spline", smoothing=0)
+
+        query = np.array([[frame_px, frame_py]])
+        return float(rbf_x(query)[0]), float(rbf_y(query)[0])
+    except Exception as exc:
+        _logger.warning("TPS projection failed: %s", exc)
+        return None
+
+
+def _tps_quality(coverage: float) -> str:
+    return "excellent" if coverage >= 0.70 else "good"
+
+
+@router.post(
+    "/store/{slug}/draft/camera-configs/{config_id}/calibration/tps",
+    response_model=TpsCalibrationResponse,
+    status_code=201,
+)
+async def compute_tps_calibration(
+    slug: str,
+    config_id: uuid.UUID,
+    body: TpsRequest,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """Fit a Thin-Plate Spline calibration from 2D frame↔floor-map correspondences."""
+    draft = await _require_draft(ctx.store_id, db)
+    _require_draft_access(draft, ctx)
+
+    cc_result = await db.execute(
+        select(CameraConfig).where(
+            CameraConfig.id == config_id,
+            CameraConfig.version_id == draft.id,
+        )
+    )
+    cc = cc_result.scalar_one_or_none()
+    if not cc:
+        raise HTTPException(status_code=404, detail={"error": "Camera config not found", "code": "NOT_FOUND"})
+
+    if len(body.correspondences) < 8:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Minimum 8 correspondences required.", "code": "TOO_FEW_POINTS"},
+        )
+
+    # Validate no duplicate frame points.
+    seen: set[tuple[float, float]] = set()
+    for c in body.correspondences:
+        key = (round(c.frame_px, 2), round(c.frame_py, 2))
+        if key in seen:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "Duplicate frame points detected. Each frame point must be unique.", "code": "DUPLICATE_FRAME_POINTS"},
+            )
+        seen.add(key)
+
+    # Load floor plan scale for map_px → world metres conversion.
+    fp = await _get_floor_plan_scale(draft.id, ctx.store_id, db)
+
+    # Build corr_list with both pixel and world-metre values.
+    corr_list = []
+    for c in body.correspondences:
+        world_x = (c.map_px - fp.origin_x) / fp.pixels_per_meter
+        world_y = (c.map_py - fp.origin_y) / fp.pixels_per_meter
+        corr_list.append({
+            "frame_px":  c.frame_px,
+            "frame_py":  c.frame_py,
+            "map_px":    c.map_px,
+            "map_py":    c.map_py,
+            "world_x_m": world_x,
+            "world_y_m": world_y,
+        })
+
+    try:
+        import numpy as np
+        from scipy.interpolate import RBFInterpolator
+        from shapely.geometry import MultiPoint
+
+        frame_pts = np.array([[c["frame_px"], c["frame_py"]] for c in corr_list])
+        world_pts = np.array([[c["world_x_m"], c["world_y_m"]] for c in corr_list])
+
+        # Fit TPS (will raise if degenerate).
+        RBFInterpolator(frame_pts, world_pts[:, 0], kernel="thin_plate_spline", smoothing=0)
+        RBFInterpolator(frame_pts, world_pts[:, 1], kernel="thin_plate_spline", smoothing=0)
+
+        # Coverage score: convex hull of frame points vs stream resolution.
+        hull_area = float(MultiPoint(frame_pts).convex_hull.area)
+        pc_result = await db.execute(
+            select(PhysicalCamera).where(PhysicalCamera.id == cc.physical_camera_id)
+        )
+        pc = pc_result.scalar_one()
+        if pc.stream_width and pc.stream_height and pc.stream_width > 0 and pc.stream_height > 0:
+            frame_area = pc.stream_width * pc.stream_height
+            coverage_score = hull_area / frame_area
+        else:
+            x_range = float(frame_pts[:, 0].max() - frame_pts[:, 0].min())
+            y_range = float(frame_pts[:, 1].max() - frame_pts[:, 1].min())
+            bbox_area = x_range * y_range
+            coverage_score = hull_area / bbox_area if bbox_area > 0 else 0.0
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": f"TPS fitting failed: {exc}", "code": "TPS_FAILED"},
+        )
+
+    if coverage_score < 0.40:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": f"Point coverage too low ({coverage_score:.2f}). Spread points across more of the frame.",
+                "code": "POOR_COVERAGE",
+            },
+        )
+
+    now = datetime.now(timezone.utc)
+
+    # Demote prior current calibration.
+    await db.execute(
+        update(Calibration)
+        .where(Calibration.camera_config_id == config_id, Calibration.is_current == True)
+        .values(is_current=False)
+    )
+
+    cal = Calibration(
+        camera_config_id=config_id,
+        method="tps",
+        status="ok",
+        is_current=True,
+        correspondences=corr_list,
+        coverage_score=coverage_score,
+        point_count=len(corr_list),
+        computed_at=now,
+    )
+    db.add(cal)
+    cc.status = "calibrated"
+    cc.updated_at = now
+
+    await db.commit()
+    await db.refresh(cal)
+
+    try:
+        await redis.publish(f"iep2:reload:{config_id}", "tps")
+    except Exception as exc:
+        _logger.warning("Failed to publish tps reload signal config_id=%s: %s", config_id, exc)
+
+    return TpsCalibrationResponse(
+        calibration_id=cal.id,
+        method="tps",
+        status="ok",
+        coverage_score=coverage_score,
+        point_count=len(corr_list),
+        quality=_tps_quality(coverage_score),
+    )
+
+
+@router.post(
+    "/store/{slug}/draft/camera-configs/{config_id}/project-point",
+    response_model=ProjectPointResponse,
+)
+async def project_point(
+    slug: str,
+    config_id: uuid.UUID,
+    body: ProjectPointRequest,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Project a frame pixel to floor world coords using the current calibration.
+
+    Method-agnostic: uses PnP ray-plane projection or homography depending on
+    the active calibration, so the onboarding verification preview matches IEP2's
+    runtime projection. Never exposes rvec/tvec to the client.
+    """
+    draft = await _require_draft(ctx.store_id, db)
+    _require_draft_access(draft, ctx)
+
+    cc_result = await db.execute(
+        select(CameraConfig).where(
+            CameraConfig.id == config_id,
+            CameraConfig.version_id == draft.id,
+        )
+    )
+    cc = cc_result.scalar_one_or_none()
+    if not cc:
+        raise HTTPException(status_code=404, detail={"error": "Camera config not found", "code": "NOT_FOUND"})
+
+    cal_result = await db.execute(
+        select(Calibration).where(
+            Calibration.camera_config_id == config_id,
+            Calibration.is_current == True,
+            Calibration.status.in_(("ok", "verified")),
+        )
+    )
+    cal = cal_result.scalar_one_or_none()
+    if cal is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "No current calibration to project with", "code": "NO_CALIBRATION"},
+        )
+
+    if cal.method == "tps":
+        world = _project_tps(cal, body.frame_px, body.frame_py)
+    else:
+        world = project_pixel_to_world(
+            cal.method,
+            body.frame_px,
+            body.frame_py,
+            homography_matrix=cal.homography_matrix,
+            intrinsic_matrix=cal.intrinsic_matrix,
+            dist_coeffs=cal.dist_coeffs,
+            rotation_vector=cal.rotation_vector,
+            translation_vector=cal.translation_vector,
+        )
+
+    if world is None:
+        return ProjectPointResponse(method=cal.method, world_x=None, world_y=None, map_px=None, map_py=None)
+
+    world_x, world_y = world
+
+    # For TPS: convert world metres → canvas pixels for the frontend overlay.
+    map_px: float | None = world_x
+    map_py: float | None = world_y
+    if cal.method == "tps":
+        fp_result = await db.execute(
+            select(FloorPlan).where(
+                FloorPlan.version_id == draft.id,
+            )
+        )
+        fp_row = fp_result.scalar_one_or_none()
+        if fp_row and fp_row.scale_defined:
+            map_px = world_x * fp_row.pixels_per_meter + fp_row.origin_x
+            map_py = world_y * fp_row.pixels_per_meter + fp_row.origin_y
+
+    return ProjectPointResponse(method=cal.method, world_x=world_x, world_y=world_y, map_px=map_px, map_py=map_py)
+
+
+@router.post(
     "/store/{slug}/draft/camera-configs/{config_id}/calibration/files",
     response_model=CalibrationResponse,
     status_code=201,
@@ -1458,80 +2042,6 @@ async def verify_calibration(
     return cal
 
 
-# ─── Sections ─────────────────────────────────────────────────────────────────
-
-@router.post("/store/{slug}/sections", response_model=SectionResponse, status_code=201)
-async def create_section(
-    slug: str,
-    body: CreateSectionRequest,
-    ctx: StoreContext = Depends(get_store_context),
-    db: AsyncSession = Depends(get_db),
-):
-    require_owner_or_manager(ctx)
-    section = Section(
-        store_id=ctx.store_id,
-        name=body.name,
-        type=body.type,
-        display_order=body.display_order,
-        is_default=False,
-    )
-    db.add(section)
-    await db.commit()
-    await db.refresh(section)
-    return section
-
-
-@router.patch("/store/{slug}/sections/{section_id}", response_model=SectionResponse)
-async def patch_section(
-    slug: str,
-    section_id: uuid.UUID,
-    body: PatchSectionRequest,
-    ctx: StoreContext = Depends(get_store_context),
-    db: AsyncSession = Depends(get_db),
-):
-    require_owner_or_manager(ctx)
-    result = await db.execute(
-        select(Section).where(Section.id == section_id, Section.store_id == ctx.store_id)
-    )
-    section = result.scalar_one_or_none()
-    if not section:
-        raise HTTPException(status_code=404, detail={"error": "Section not found", "code": "NOT_FOUND"})
-
-    for field, value in body.model_dump(exclude_none=True).items():
-        setattr(section, field, value)
-    section.updated_at = datetime.now(timezone.utc)
-
-    await db.commit()
-    await db.refresh(section)
-    return section
-
-
-@router.delete("/store/{slug}/sections/{section_id}", status_code=204)
-async def delete_section(
-    slug: str,
-    section_id: uuid.UUID,
-    ctx: StoreContext = Depends(get_store_context),
-    db: AsyncSession = Depends(get_db),
-):
-    require_owner_or_manager(ctx)
-    result = await db.execute(
-        select(Section).where(
-            Section.id == section_id,
-            Section.store_id == ctx.store_id,
-            Section.is_default == False,
-        )
-    )
-    section = result.scalar_one_or_none()
-    if not section:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": "Section not found or is the default section", "code": "NOT_FOUND"},
-        )
-    section.status = "inactive"
-    section.updated_at = datetime.now(timezone.utc)
-    await db.commit()
-
-
 # ─── Activation ───────────────────────────────────────────────────────────────
 
 @router.post("/store/{slug}/versions/draft/activate", response_model=VersionActivateResponse, status_code=202)
@@ -1545,28 +2055,18 @@ async def activate_draft(
     draft = await _require_draft(ctx.store_id, db)
     _require_draft_access(draft, ctx)
 
-    # Pre-activation checklist: at least one section must have a floor plan uploaded.
-    sections_result = await db.execute(
-        select(Section).where(Section.store_id == ctx.store_id, Section.status == "active")
+    # Pre-activation checklist: the store's floor plan must be uploaded.
+    fp_r = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == draft.id,
+            FloorPlan.store_id == ctx.store_id,
+            FloorPlan.image_uploaded == True,
+        ).limit(1)
     )
-    sections = sections_result.scalars().all()
-    has_floor_plan = False
-    for section in sections:
-        fp_r = await db.execute(
-            select(FloorPlan).where(
-                FloorPlan.version_id == draft.id,
-                FloorPlan.section_id == section.id,
-                FloorPlan.image_uploaded == True,
-            ).limit(1)
-        )
-        if fp_r.scalars().first():
-            has_floor_plan = True
-            break
-
-    if not has_floor_plan:
+    if not fp_r.scalars().first():
         raise HTTPException(
             status_code=422,
-            detail={"error": "At least one floor plan must be uploaded", "code": "NO_FLOOR_PLAN"},
+            detail={"error": "A floor plan must be uploaded", "code": "NO_FLOOR_PLAN"},
         )
 
     # Checklist: at least one camera config must be verified.

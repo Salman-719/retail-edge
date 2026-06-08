@@ -1,6 +1,7 @@
 """
 Tests for PositionSelector — Process 2 scoring and winner selection.
-Covers Architecture Spec §10 invariant 4 (one row per GlobalID per batch).
+Since SPEC-002 the selector writes one row per GlobalID per 5s bucket (was one
+per batch); within a single bucket the best-camera winner is still unique.
 Pure scoring tests need no DB — tested directly on _selection_score.
 write_canonical_positions tested with mocked repo.
 """
@@ -61,6 +62,7 @@ class FakeSelectorRepo:
         self._cam_infos   = cam_infos   or {}
         self._resolutions = resolutions or {}
         self.written      = []   # (global_id, source_camera, score)
+        self.written_rows = []   # list[GlobalPosition] — full bucket rows
         self.last_seen_updates = []
 
     async def get_positions_for_selection(self, conn, store_id, start, end):
@@ -83,15 +85,15 @@ class FakeSelectorRepo:
             return ResolutionResult(w, h, "cfg-default")
         return None
 
-    async def write_global_position(self, conn, global_id, store_id,
-                                     version_id, batch_number, timestamp_ms,
-                                     floor_x, floor_y, zone_id,
-                                     source_camera, source_local_id,
-                                     selection_score):
-        self.written.append((global_id, source_camera, float(selection_score)))
+    async def write_global_positions_bulk(self, conn, store_id, rows):
+        for r in rows:
+            self.written.append((r.global_id, r.source_camera, float(r.selection_score)))
+        self.written_rows.extend(rows)
+        return len(rows)
 
     async def update_global_last_seen(self, conn, global_id, floor_x, floor_y,
-                                       last_seen_ts, zone_id, set_entry_zone):
+                                       last_seen_ts, zone_id, set_entry_zone,
+                                       entry_zone_id=None):
         self.last_seen_updates.append(global_id)
 
 
@@ -167,6 +169,56 @@ async def test_one_row_per_global_id(settings):
     assert GLOBAL_02 in written_globals
     assert written_globals.count(GLOBAL_01) == 1  # exactly one per global
     assert written_globals.count(GLOBAL_02) == 1
+
+
+async def test_buckets_split_into_separate_rows(settings):
+    """SPEC-002: one GlobalID seen across 3 distinct 5s buckets → 3 rows, each
+    stamped at its 5s bucket boundary (timestamp_ms % 5000 == 0)."""
+    positions = [
+        make_pos(global_id=GLOBAL_01, camera_id=CAM_01,
+                 timestamp_ms=WINDOW_START + 1_234),
+        make_pos(global_id=GLOBAL_01, camera_id=CAM_01,
+                 timestamp_ms=WINDOW_START + 5_678),
+        make_pos(global_id=GLOBAL_01, camera_id=CAM_01,
+                 timestamp_ms=WINDOW_START + 12_999),
+    ]
+    repo = FakeSelectorRepo(positions=positions, resolutions={CAM_01: (1920, 1080)})
+    selector = PositionSelector(repo, settings)
+
+    n = await selector.write_canonical_positions(
+        fake_conn(), STORE_ID, 1, WINDOW_START, WINDOW_END
+    )
+
+    assert n == 3, "Three distinct buckets — three rows"
+    assert len(repo.written_rows) == 3
+    bucket_ts = sorted(r.timestamp_ms for r in repo.written_rows)
+    assert bucket_ts == [WINDOW_START, WINDOW_START + 5_000, WINDOW_START + 10_000]
+    assert all(r.timestamp_ms % 5000 == 0 for r in repo.written_rows), \
+        "stored timestamp must be the bucket boundary"
+
+
+async def test_same_bucket_collapses_to_one_row(settings):
+    """Two observations of one GlobalID in the SAME bucket collapse to a single
+    row (per-bucket winner selection)."""
+    positions = [
+        make_pos(global_id=GLOBAL_01, camera_id=CAM_01,
+                 timestamp_ms=WINDOW_START + 1_000, bbox_area=100_000),
+        make_pos(global_id=GLOBAL_01, camera_id=CAM_02,
+                 timestamp_ms=WINDOW_START + 2_000, bbox_area=80_000),
+    ]
+    repo = FakeSelectorRepo(
+        positions=positions,
+        resolutions={CAM_01: (1920, 1080), CAM_02: (1920, 1080)},
+    )
+    selector = PositionSelector(repo, settings)
+
+    n = await selector.write_canonical_positions(
+        fake_conn(), STORE_ID, 1, WINDOW_START, WINDOW_END
+    )
+
+    assert n == 1, "Same bucket — one row"
+    assert repo.written_rows[0].timestamp_ms == WINDOW_START
+    assert repo.written[0][1] == CAM_01, "Larger bbox wins within the bucket"
 
 
 async def test_empty_positions_returns_zero(settings):

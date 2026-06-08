@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: RetailVision
+    folder: RetailVision
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards

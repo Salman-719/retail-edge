@@ -10,10 +10,16 @@ bottom; do not skip.
 - **[EDGE]** an in-store Jetson device.
 
 ### Architecture (what you are building)
-- **Cloud**: AWS-native **k3s on one EC2 instance** (Graviton, no EKS) running
-  EEP (API/gRPC), per-store IEP3, **IEP6 (AI analytics agent, OpenAI)**, in-cluster
-  Postgres + Redis, and the frontend. One Elastic IP fronts everything via k3s
-  ServiceLB. Object storage = S3. Secrets = AWS Secrets Manager. TLS = cert-manager.
+- **Cloud**: AWS-native **k3s on one EC2 instance** (Graviton, no EKS) running:
+  - **EEP** (API/gRPC) — also the control plane that **dynamically provisions** the
+    per-store workers via the k8s API: **IEP3** (reconciliation StatefulSet),
+    **IEP4** (alert daemon StatefulSet), and **IEP5** (end-of-shift analytics Job).
+  - **IEP6** (AI analytics agent, OpenAI), the **frontend**, in-cluster
+    **PostgreSQL = TimescaleDB** (hypertables for analytics) + **Redis**.
+  - **Observability**: Prometheus + Grafana + redis/postgres/node exporters.
+  - **MLflow** tracking server + model registry (MLOps), artifacts in S3.
+  - One Elastic IP fronts everything via k3s ServiceLB. Object storage = S3.
+    Secrets = AWS Secrets Manager. TLS = cert-manager.
 - **Edge**: k3s on a Jetson per store (IEP1 ingest + YOLO/ReID GPU + per-camera
   IEP2), talking to the cloud EEP over TLS gRPC.
 - **No domain needed**: public hostnames are `app.<EIP>.nip.io` and
@@ -43,6 +49,8 @@ bottom; do not skip.
 > export REGION=eu-west-1
 > export BUCKET=retailvision-prod-objects-692461731658
 > ```
+> Optional observability/MLOps hostnames (also `*.nip.io`): Grafana at
+> `grafana.$EIP.nip.io`, MLflow at `mlflow.$EIP.nip.io` (set at Helm install, A7).
 
 ---
 
@@ -73,16 +81,19 @@ git checkout deploy/aws-k3s
 ### A3. [LOCAL] Build & publish the images (GHCR)
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.2.0
+git push origin v1.2.0
 ```
-**Expect:** a "Build & Push Images" run starts in GitHub → **Actions**. Wait
-until the `eep`, `iep3`, and `frontend` matrix jobs are green (≈10–20 min). The
-`yolo`/`reid` jobs may fail (arm64/CUDA emulation) — ignore them for cloud.
+**Expect:** a "Build & Push Images" run starts in GitHub → **Actions**. Wait until
+the cloud matrix jobs are green (≈15–25 min): `eep`, `iep3`, `iep4`, `iep5`,
+`iep6`, `frontend`, and `mlflow`. The Jetson `yolo`/`reid` jobs may fail
+(arm64/CUDA emulation) — ignore them for cloud (the edge builds those on-device).
 
 Then make the cloud images pullable without credentials:
-- GitHub → repo → **Packages** → open `eep`, `iep3`, `frontend` →
-  **Package settings → Change visibility → Public** (do this for all three).
+- GitHub → repo → **Packages** → open each of `eep`, `iep3`, `iep4`, `iep5`,
+  `iep6`, `frontend`, `mlflow` → **Package settings → Change visibility →
+  Public**. (EEP provisions `iep3`/`iep4`/`iep5` at runtime, so those images must
+  be pullable too.)
 
 ### A4. [LOCAL] Provision infrastructure (Terraform)
 
@@ -100,7 +111,8 @@ letsencrypt_email = "you@example.com"
 s3_bucket_name    = "retailvision-prod-objects-692461731658"   # must be globally unique
 git_repo_url      = "https://github.com/Salman-719/retail-edge.git"   # must be PUBLIC
 git_branch        = "deploy/aws-k3s"
-server_instance_type = "t4g.large"
+server_instance_type = "t4g.xlarge"   # 4 vCPU/16GB — fits the full tier incl. monitoring + MLflow + TimescaleDB. Use t4g.large for a lean install.
+server_root_volume_gb = 60
 agent_count       = 0
 ```
 Apply:
@@ -165,11 +177,15 @@ export EIP=34.248.161.113 OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 cd /opt/retail-edge
 ```
-Then install — this is **one line**:
+Then install — this is **one line** (monitoring + MLflow are enabled by
+`values.production.yaml`; the `--set …host=` flags expose Grafana/MLflow via
+ingress — omit them to keep those internal and reach them by port-forward):
 ```bash
-helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION -n retailvision --create-namespace
+helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set monitoring.grafana.host=grafana.$EIP.nip.io --set mlflow.host=mlflow.$EIP.nip.io -n retailvision --create-namespace
 ```
-**Expect:** `STATUS: deployed` within ~30s (no migrate hook to wait on).
+**Expect:** `STATUS: deployed` within ~30s (no migrate hook to wait on). EEP runs
+Alembic at startup, building the schema through revision **0013** (incl. the
+TimescaleDB hypertables from 0010).
 
 ### A8. [SERVER] Verify the platform is live
 
@@ -177,7 +193,10 @@ helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision
 k3s kubectl -n retailvision get pods
 ```
 **Expect** all `Running` / `1/1`: `postgres-0`, `redis-server-0`, `eep-…`,
-`frontend-…`, `iep6-agent-…`. (No `iep3` yet — that's per-store, Part B.)
+`frontend-…`, `iep6-agent-…`, plus the observability/MLOps pods `prometheus-…`,
+`grafana-…`, `redis-exporter-…`, `postgres-exporter-…`, `node-exporter-…`,
+`mlflow-…`. (No `iep3`/`iep4` yet — those are provisioned per-store when you
+activate a store version, Part B.)
 
 ```bash
 k3s kubectl -n retailvision logs deploy/eep --tail=20
@@ -186,9 +205,29 @@ k3s kubectl -n retailvision exec deploy/iep6-agent -- wget -qO- localhost:8006/h
 # end-to-end (use a REAL store UUID, not 'test' — store_id is a uuid):
 # curl -sk "https://app.<EIP>.nip.io/api/agent/insights?store_id=<store-uuid>"
 ```
-**Expect:** EEP log shows `alembic … Running upgrade … 0006`, `Application startup
-complete`, `Uvicorn running on http://0.0.0.0:8000`, `GET /health 200 OK` — **no**
+**Expect:** EEP log shows `alembic … Running upgrade … 0013`, `iep3_manager: using
+in-cluster k8s config` (and iep4/iep5 the same), `Application startup complete`,
+`Uvicorn running on http://0.0.0.0:8000`, `GET /health 200 OK` — **no**
 Postgres/Redis errors.
+
+Confirm **TimescaleDB** is active and the analytics hypertables exist:
+```bash
+k3s kubectl -n retailvision exec postgres-0 -- psql -U retailvision -d retailvision -c "\dx" | grep timescaledb
+k3s kubectl -n retailvision exec postgres-0 -- psql -U retailvision -d retailvision -c "SELECT hypertable_name FROM timescaledb_information.hypertables;"
+```
+**Expect:** the `timescaledb` extension is listed and hypertables such as
+`global_tracking_history` appear.
+
+**Observability + MLflow** (no public host needed — port-forward):
+```bash
+# Grafana (admin / the grafana-admin-password secret value):
+k3s kubectl -n retailvision get secret retailvision-secrets -o jsonpath='{.data.grafana-admin-password}' | base64 -d; echo
+# If you set monitoring.grafana.host: browse https://grafana.$EIP.nip.io
+# Prometheus targets all UP:
+k3s kubectl -n retailvision exec deploy/prometheus -- wget -qO- 'localhost:9090/api/v1/targets?state=active' | head -c 400; echo
+# MLflow UI (or https://mlflow.$EIP.nip.io if a host was set):
+k3s kubectl -n retailvision exec deploy/mlflow -- wget -qO- localhost:5000/health   # OK
+```
 
 ```bash
 curl -sk -o /dev/null -w "%{http_code}\n" "https://app.$EIP.nip.io/api/stores"
@@ -229,37 +268,45 @@ The **`id`** column is the UUID (e.g. `3f2a…-…`). The newest row is at the t
 store page, click the `GET /api/store/<slug>/...` (or `GET /api/stores`) request →
 **Response** → copy the `"id"` field.
 
-> Note: store **URLs use the slug** (`/api/store/ali-salman/...`), but
-> `iep3.stores` in Helm needs the **UUID** from above.
+> Note: store **URLs use the slug** (`/api/store/ali-salman/...`); the **UUID** is
+> what the per-store workers are keyed on.
 
-### B2. [SERVER] Start that store's IEP3 worker
+### B2. Activate the store → EEP provisions IEP3 + IEP4 automatically
 
-Set your variables (use your EIP and the new store UUID):
+**This is automatic.** When you **activate a store config version** in the UI
+(after onboarding cameras/zones), EEP's lifecycle managers provision that store's
+workers via the k8s API — no Helm change needed:
+- **IEP3** (reconciliation) — a StatefulSet `iep3-<short>` + headless Service.
+- **IEP4** (alerts) — a StatefulSet `iep4-<short>`.
+
+(This is why the `eep` ServiceAccount has the `eep-pipeline-manager` Role, and why
+the `iep3`/`iep4`/`iep5` images must be Public — see A3.)
+
+**[SERVER]** Verify after activation:
 ```bash
-export EIP=34.248.161.113 OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
-export STORE=00000000-0000-0000-0000-000000000001     # the UUID from B1
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-cd /opt/retail-edge
+k3s kubectl -n retailvision get statefulset,pods -l 'app in (iep3,iep4)'
+k3s kubectl -n retailvision logs deploy/eep --tail=30 | grep -Ei "iep3_manager|iep4_manager"
 ```
-Re-run Helm (one line):
+**Expect:** `iep3-<short>` and `iep4-<short>` each `1/1 Running`; EEP log shows
+`created StatefulSet iep3-… (store=…)` and the same for iep4.
+
+**IEP5** (end-of-shift analytics) is **not** long-running — EEP launches it as a
+`batch/v1` Job when a shift closes (`shift_closer.py`). After a shift close:
 ```bash
-helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set "iep3.stores={$STORE}" -n retailvision
+k3s kubectl -n retailvision get jobs -l app=iep5
 ```
+**Expect:** a `iep5-<short>-<YYYY-MM-DD>` Job that reaches `Completed` (auto-cleaned
+after 24h via `ttlSecondsAfterFinished`).
 
-> ⚠️ **`iep3.stores` is the COMPLETE list, not an "add".** Helm makes the running
-> IEP3 workers match exactly what you pass. To add a second store, pass **both**
-> UUIDs — `--set "iep3.stores={uuid1,uuid2}"`. If you pass only the new one, the
-> previous store's IEP3 worker is **deleted**. (Tip: keep the running set in
-> `values.production.yaml` under `iep3.stores:` so you don't have to remember it.)
+> **Escape hatch (manual/emergency only):** to pin IEP3 StatefulSets via Helm
+> instead of letting EEP manage them, install with
+> `--set iep3.staticProvisioning=true --set "iep3.stores={uuid1,uuid2}"`. The
+> `iep3.stores` list is the COMPLETE set (Helm makes the workers match it exactly).
+> Leave `staticProvisioning=false` (default) for normal operation.
 
-Verify:
-```bash
-k3s kubectl -n retailvision get pods -l app=iep3
-```
-**Expect:** one `iep3-<short>` `1/1 Running` pod **per UUID** in the list.
-
-> Capacity: each store adds one IEP3 pod. For several stores, add nodes
-> (`agent_count` in `terraform.tfvars` → `terraform apply`) or a bigger
+> Capacity: each active store adds an IEP3 + IEP4 pod. For several stores, add
+> nodes (`agent_count` in `terraform.tfvars` → `terraform apply`) or a bigger
 > `server_instance_type`.
 
 ### B3. Per new store — what changes (and what doesn't)
@@ -457,11 +504,15 @@ git fetch origin && git merge origin/reconfig-edge      # only if integrating br
 
 **2. [LOCAL] Bump the version (single source of truth) + build images**
 - Set the new tag in **`charts/retailvision/values.yaml`** (`eep.image.tag`,
-  `iep3.image.tag`, `frontend.image.tag`, `iep6.image.tag`) and in the
-  **`infra/edge/overlays/*`** `newTag` values (iep1/yolo/reid). Commit + push.
+  `iep3.image.tag`, `iep4.image.tag`, `iep5.image.tag`, `iep6.image.tag`,
+  `frontend.image.tag`, `mlflow.image.tag`) and in the **`infra/edge/overlays/*`**
+  `newTag` values (iep1/yolo/reid). Bump `Chart.yaml` `appVersion`. Commit + push.
+- **If you integrated new Alembic migrations**, make sure the chain has a single
+  linear head (no duplicate revision numbers) — e.g. renumber a local migration
+  that collides with an upstream one, fixing its `down_revision`.
 - Trigger the image build:
   ```bash
-  git tag v1.1.0 && git push origin v1.1.0     # CI builds all images + -cpu/-cuda variants
+  git tag v1.2.0 && git push origin v1.2.0     # CI builds all images + -cpu/-cuda variants
   ```
   > ⚠️ **Wait for ALL matrix jobs to go green before deploying.** Each service is a
   > separate job; deploying while (say) the `eep` job is still running causes
@@ -472,15 +523,18 @@ git fetch origin && git merge origin/reconfig-edge      # only if integrating br
 **3. [SERVER] Roll out the cloud** (EEP self-applies new Alembic migrations)
 ```bash
 export EIP=34.248.161.113 OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
-export STORE=70ed5b0c-6c56-43ac-a9e0-a3a81d0db52f
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 cd /opt/retail-edge && git pull
-helm upgrade retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set "iep3.stores={$STORE}" -n retailvision
+helm upgrade retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set monitoring.grafana.host=grafana.$EIP.nip.io --set mlflow.host=mlflow.$EIP.nip.io -n retailvision
 k3s kubectl -n retailvision rollout status deploy/eep && k3s kubectl -n retailvision get pods
 ```
 > Tags now come from `values.yaml` (step 2), so no per-image `--set …tag` needed.
-> ⚠️ If a migration is **incompatible with existing rows** (e.g. the 2048-dim
-> change vs old data), do the **clean reinstall** (Part E) so Postgres re-seeds.
+> IEP3/IEP4 are re-provisioned by EEP per active store — no `iep3.stores` flag in
+> normal operation (that's only for `staticProvisioning=true`).
+> ⚠️ **Switching Postgres → TimescaleDB requires a fresh data volume**, and a
+> migration that is **incompatible with existing rows** (e.g. the 2048-dim change,
+> or first-time TimescaleDB adoption) needs the **clean reinstall** (Part E) so
+> Postgres re-seeds. Existing data is lost — back up first if it matters.
 
 **4. [EDGE] Update each store's device** (`git pull` first)
 - **cpu / cuda**: re-run the bootstrap — it re-applies the overlay at the new tag
@@ -589,16 +643,26 @@ sudo systemctl restart retailvision-edge-agent
 | **[EDGE]** bootstrap aborts: `Packages were downgraded ... without --allow-downgrades` (nvidia-container-toolkit) | JetPack already has a newer toolkit | already fixed (script skips it if present) — `git pull` then re-run the bootstrap |
 | **[EDGE]** `retailvision-edge-agent.service not found` / namespace empty | bootstrap aborted before steps 4–7 | fix the abort cause above, then re-run the bootstrap (it's idempotent) |
 | **[EDGE/SERVER]** git pull: `detected dubious ownership` | repo owned by a different user | `sudo -i` (or `git config --global --add safe.directory <path>`), then pull |
+| `iep3-…`/`iep4-…` pod never appears after activating a store | EEP lacks RBAC, or image private, or not `in-cluster` | check `kubectl -n retailvision logs deploy/eep | grep iep[34]_manager`; ensure `eep-pipeline-manager` Role exists and `iep3`/`iep4` images are Public |
+| `iep5-…` Job `Error`/`BackoffLimitExceeded` | analytics failed for that shift | `kubectl -n retailvision logs job/iep5-<short>-<date>`; fix data/config, it re-runs on next shift close (or delete the Job to retry) |
+| `CREATE EXTENSION timescaledb` error / hypertable missing | Postgres image is stock `postgres`, not TimescaleDB, or volume pre-dates the switch | ensure `postgres.image.repository=timescale/timescaledb`; do the **clean reinstall** (fresh volume) below |
+| Grafana login fails | wrong admin password | read it: `kubectl -n retailvision get secret retailvision-secrets -o jsonpath='{.data.grafana-admin-password}' | base64 -d` |
+| Prometheus target `iep3` down | IEP3 pod has no scrape annotation / not running | confirm the pod has `prometheus.io/scrape=true` (set by `iep3_manager`) and is `Running` |
+| `mlflow` pod `CrashLoopBackOff` | S3 creds/endpoint or PVC issue | `kubectl -n retailvision logs deploy/mlflow`; verify `s3-access-key`/`s3-secret-key` secrets and `s3.bucket` |
 
 ### Clean reinstall (fresh database)
 
-Postgres seeds `schema.sql` **only on an empty volume**, so a true reset must drop
-the PVC. **[SERVER]:**
+Postgres seeds `schema.sql` **only on an empty volume**, so a true reset (including
+the **first switch to TimescaleDB**) must drop the PVC. **[SERVER]:**
 ```bash
 helm uninstall retailvision -n retailvision 2>/dev/null
 k3s kubectl delete namespace retailvision --ignore-not-found --wait=true
+# Belt-and-braces: ensure the Postgres PVC is gone (PVCs can outlive a namespace
+# if finalizers hang). Confirm none remain:
+k3s kubectl get pvc -A | grep retailvision || echo "no retailvision PVCs (good)"
 ```
-Then re-run **A7**.
+Then re-run **A7**. EEP rebuilds the schema via Alembic (0001→0013) on the fresh
+TimescaleDB volume, then you re-create the store (Part B).
 
 ### Rotate a Secrets Manager value (e.g. a password)
 
