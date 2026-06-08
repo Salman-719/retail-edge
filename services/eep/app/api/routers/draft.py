@@ -20,6 +20,7 @@ from app.models.camera_config import CameraConfig
 from app.models.floor_plan import FloorPlan
 from app.models.obstacle import Obstacle
 from app.models.physical_camera import PhysicalCamera
+from app.models.punch_in_station import PunchInStation
 from app.models.version import StoreConfigVersion
 from app.models.version_sync_event import VersionSyncEvent
 from app.models.zone import Zone
@@ -46,6 +47,8 @@ from app.schemas.draft import (
     ProjectPointResponse,
     PhysicalCameraResponse,
     PlaceCameraConfigRequest,
+    PunchStationRequest,
+    PunchStationResponse,
     ScaleRequest,
     SyncEventResponse,
     TpsCalibrationResponse,
@@ -297,6 +300,7 @@ async def _clone_active_into_draft(draft_id: uuid.UUID, store_id: uuid.UUID, db:
             CameraConfig.version_id == active.id,
         ).order_by(CameraConfig.created_at.asc())
     )
+    cc_id_map: dict[uuid.UUID, uuid.UUID] = {}  # old camera_config_id -> new (for punch station)
     for cc in ccs_result.scalars().all():
         new_frame_key = None
         if cc.frame_s3_key:
@@ -321,6 +325,7 @@ async def _clone_active_into_draft(draft_id: uuid.UUID, store_id: uuid.UUID, db:
         )
         db.add(new_cc)
         await db.flush()
+        cc_id_map[cc.id] = new_cc.id
 
         cals_result = await db.execute(
             select(Calibration)
@@ -370,6 +375,28 @@ async def _clone_active_into_draft(draft_id: uuid.UUID, store_id: uuid.UUID, db:
                 verified_at=cal.verified_at,
                 verified_by=cal.verified_by,
             ))
+
+    # Punch-in station — copy with remapped camera_config_id (employee-linking).
+    station_result = await db.execute(
+        select(PunchInStation).where(PunchInStation.version_id == active.id)
+    )
+    src_station = station_result.scalar_one_or_none()
+    if src_station is not None:
+        new_cc_id = cc_id_map.get(src_station.camera_config_id)
+        if new_cc_id is not None:
+            db.add(PunchInStation(
+                version_id=draft_id,
+                store_id=store_id,
+                camera_config_id=new_cc_id,
+                world_x=src_station.world_x,
+                world_y=src_station.world_y,
+                radius_m=src_station.radius_m,
+            ))
+        else:
+            _logger.warning(
+                "clone draft: punch station camera_config %s was not cloned; skipping station",
+                src_station.camera_config_id,
+            )
 
 
 @router.post("/store/{slug}/versions/draft", response_model=DraftVersionResponse, status_code=201)
@@ -514,7 +541,10 @@ async def upload_floor_plan(
                 s3_client.delete_object(fp.display_s3_key)
             except Exception:
                 pass
-        # Cascade wipe: zones, obstacles, camera configs for this version
+        # Cascade wipe: punch station, zones, obstacles, camera configs for this
+        # version. The punch station is removed first — it FK-references the camera
+        # configs deleted below (employee-linking).
+        await db.execute(delete(PunchInStation).where(PunchInStation.version_id == draft.id))
         await db.execute(delete(Zone).where(Zone.version_id == draft.id))
         await db.execute(delete(Obstacle).where(Obstacle.version_id == draft.id))
         cc_result = await db.execute(
@@ -1350,6 +1380,144 @@ async def delete_camera_config(
             pass
 
     await db.execute(delete(CameraConfig).where(CameraConfig.id == config_id))
+    await db.commit()
+
+
+# ─── Punch-in Station (employee-linking) ──────────────────────────────────────
+
+async def _punch_station_response(
+    station: PunchInStation, fp: FloorPlan, db: AsyncSession
+) -> PunchStationResponse:
+    """Build the API response, converting stored world metres back to canvas px."""
+    name = None
+    cc_result = await db.execute(
+        select(CameraConfig).where(CameraConfig.id == station.camera_config_id)
+    )
+    cc = cc_result.scalar_one_or_none()
+    if cc is not None:
+        pc_result = await db.execute(
+            select(PhysicalCamera).where(PhysicalCamera.id == cc.physical_camera_id)
+        )
+        pc = pc_result.scalar_one_or_none()
+        name = pc.name if pc is not None else None
+
+    px, py = _world_to_px([[station.world_x, station.world_y]], fp)[0]
+    return PunchStationResponse(
+        id=station.id,
+        version_id=station.version_id,
+        store_id=station.store_id,
+        camera_config_id=station.camera_config_id,
+        camera_config_name=name,
+        position_x=px,
+        position_y=py,
+        radius_m=station.radius_m,
+    )
+
+
+@router.get("/store/{slug}/draft/punch-station", response_model=PunchStationResponse)
+async def get_draft_punch_station(
+    slug: str,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+):
+    draft = await _require_draft(ctx.store_id, db)
+    result = await db.execute(
+        select(PunchInStation).where(PunchInStation.version_id == draft.id)
+    )
+    station = result.scalar_one_or_none()
+    if not station:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "No punch-in station configured", "code": "NO_PUNCH_STATION"},
+        )
+    fp = await _get_floor_plan_scale(draft.id, ctx.store_id, db)
+    return await _punch_station_response(station, fp, db)
+
+
+@router.put("/store/{slug}/draft/punch-station", response_model=PunchStationResponse)
+async def set_draft_punch_station(
+    slug: str,
+    body: PunchStationRequest,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+):
+    draft = await _require_draft(ctx.store_id, db)
+    _require_draft_access(draft, ctx)
+
+    fp = await _get_floor_plan_scale(draft.id, ctx.store_id, db)
+
+    # The punch camera must belong to this draft and be calibrated (so it can
+    # actually project floor coordinates for the resolver).
+    cc_result = await db.execute(
+        select(CameraConfig).where(
+            CameraConfig.id == body.camera_config_id,
+            CameraConfig.version_id == draft.id,
+        )
+    )
+    cc = cc_result.scalar_one_or_none()
+    if cc is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Camera config not in this draft", "code": "CAMERA_NOT_IN_DRAFT"},
+        )
+    if cc.status not in ("calibrated", "verified"):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "Punch camera must be calibrated before placing the station",
+                "code": "CAMERA_NOT_CALIBRATED",
+            },
+        )
+
+    # Point must be within floor bounds (same check as zones).
+    if not (0 <= body.position_x <= fp.width_px and 0 <= body.position_y <= fp.height_px):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": f"Point is outside floor plan bounds ({fp.width_px}x{fp.height_px})",
+                "code": "POINT_OUT_OF_BOUNDS",
+            },
+        )
+
+    world_x, world_y = _px_to_world([[body.position_x, body.position_y]], fp)[0]
+
+    result = await db.execute(
+        select(PunchInStation).where(PunchInStation.version_id == draft.id)
+    )
+    station = result.scalar_one_or_none()
+    if station is None:
+        station = PunchInStation(
+            version_id=draft.id,
+            store_id=ctx.store_id,
+            camera_config_id=body.camera_config_id,
+            world_x=world_x,
+            world_y=world_y,
+            radius_m=body.radius_m,
+        )
+        db.add(station)
+    else:
+        station.camera_config_id = body.camera_config_id
+        station.world_x = world_x
+        station.world_y = world_y
+        station.radius_m = body.radius_m
+        station.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(station)
+    return await _punch_station_response(station, fp, db)
+
+
+@router.delete("/store/{slug}/draft/punch-station", status_code=204)
+async def delete_draft_punch_station(
+    slug: str,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+):
+    draft = await _require_draft(ctx.store_id, db)
+    _require_draft_access(draft, ctx)
+    await db.execute(
+        delete(PunchInStation).where(PunchInStation.version_id == draft.id)
+    )
     await db.commit()
 
 

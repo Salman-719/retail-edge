@@ -30,7 +30,7 @@ LIMIT 1
 
 GET_DELTA = """
 SELECT gth.global_id, gth.zone_id, gth.timestamp_ms, gth.batch_number,
-       gth.floor_x, gth.floor_y, gth.source_camera, gi.is_employee
+       gth.floor_x, gth.floor_y, gth.source_camera, gi.is_employee, gi.employee_id
 FROM global_tracking_history gth
 JOIN global_identities gi ON gi.global_id = gth.global_id
 WHERE gth.store_id = $1
@@ -45,12 +45,12 @@ UPSERT_ACTIVE_PERSON_STATE = """
 INSERT INTO active_person_state (
     global_id, store_id, current_zone_id,
     entered_current_zone_at, last_seen_at,
-    last_batch_number, is_employee, updated_at
+    last_batch_number, is_employee, employee_id, updated_at
 )
 SELECT * FROM unnest(
     $1::uuid[], $2::uuid[], $3::uuid[],
     $4::bigint[], $5::bigint[],
-    $6::bigint[], $7::bool[], $8::timestamptz[]
+    $6::bigint[], $7::bool[], $8::uuid[], $9::timestamptz[]
 )
 ON CONFLICT (global_id, store_id) DO UPDATE SET
     current_zone_id         = EXCLUDED.current_zone_id,
@@ -62,12 +62,13 @@ ON CONFLICT (global_id, store_id) DO UPDATE SET
     last_seen_at      = EXCLUDED.last_seen_at,
     last_batch_number = EXCLUDED.last_batch_number,
     is_employee       = EXCLUDED.is_employee,
+    employee_id       = COALESCE(EXCLUDED.employee_id, active_person_state.employee_id),
     updated_at        = EXCLUDED.updated_at
 """
 
 LOAD_ACTIVE_PERSON_STATE = """
 SELECT global_id, current_zone_id, entered_current_zone_at,
-       last_seen_at, last_batch_number, is_employee
+       last_seen_at, last_batch_number, is_employee, employee_id
 FROM active_person_state
 WHERE store_id = $1
 """
@@ -209,15 +210,19 @@ WHERE employee_id = $1
 LIMIT 1
 """
 
-# Latest employee presence in the store. Without an employee_id<->global_id
-# link (Employee ReID flow, not yet implemented) this cannot target a specific
-# employee — it reflects the most recently seen staff member. See staff_employee.
 LATEST_EMPLOYEE_PRESENCE = """
 SELECT MAX(aps.last_seen_at) AS last_seen_at
 FROM active_person_state aps
-JOIN global_identities gi ON gi.global_id = aps.global_id
 WHERE aps.store_id = $1
-  AND gi.is_employee = TRUE
+  AND aps.is_employee = TRUE
+"""
+
+# Presence of a specific linked employee (uses employee_id set by the punch resolver).
+LATEST_PRESENCE_FOR_EMPLOYEE = """
+SELECT MAX(aps.last_seen_at) AS last_seen_at
+FROM active_person_state aps
+WHERE aps.store_id = $1
+  AND aps.employee_id = $2
 """
 
 # ── Alerts ───────────────────────────────────────────────────────────────────

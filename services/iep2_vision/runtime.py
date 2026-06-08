@@ -894,12 +894,11 @@ async def run_daemon(settings) -> None:
                     frame_count += 1
 
                 # ── Strict batch-close order: centroids → batch_complete → XACK → cleanup ──
-                fake_settings = type("_S", (), {
-                    "camera_id": settings.camera_id,
-                    "store_id":  settings.store_id,
-                })()
-                rt = _DaemonBatchHelper(fake_settings)
-                await rt._flush_centroids_daemon(manager, persistence, manifest.get("batch_number", 0))
+                await _flush_centroids_daemon(
+                    manager, persistence,
+                    settings.camera_id, settings.store_id,
+                    manifest.get("batch_number", 0),
+                )
 
                 await server_redis.xadd(
                     "stream:iep2:batch_complete",
@@ -945,26 +944,28 @@ async def run_daemon(settings) -> None:
             sync_redis.close()
 
 
-class _DaemonBatchHelper:
-    """Thin adapter so flush_centroids can reuse IEP2Runtime's method."""
-    def __init__(self, settings):
-        self.settings = settings
-
-    async def _flush_centroids_daemon(self, manager, persistence, batch_number):
-        active = manager.get_active_centroids()
-        if not active:
-            return
-        records = [
-            {
-                "local_id":         str(uuid.UUID(int=lid)),
-                "camera_id":        self.settings.camera_id,
-                "store_id":         self.settings.store_id,
-                "centroid":         arr.astype("float32").tobytes(),
-                "updated_at_batch": batch_number,
-            }
-            for lid, arr in active.items()
-        ]
-        await persistence.upsert_local_centroids(records)
+async def _flush_centroids_daemon(
+    manager,
+    persistence,
+    camera_id: str,
+    store_id: str,
+    batch_number: int,
+) -> None:
+    """UPSERT active centroids at daemon batch-close (centroids → batch_complete → XACK order)."""
+    active = manager.get_active_centroids()
+    if not active:
+        return
+    records = [
+        {
+            "local_id":         str(uuid.UUID(int=lid)),
+            "camera_id":        camera_id,
+            "store_id":         store_id,
+            "centroid":         arr.astype("float32").tobytes(),
+            "updated_at_batch": batch_number,
+        }
+        for lid, arr in active.items()
+    ]
+    await persistence.upsert_local_centroids(records)
 
 
 # ---------------------------------------------------------------------------

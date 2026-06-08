@@ -62,6 +62,7 @@ class AlertRepository:
                 floor_y=float(r["floor_y"]),
                 source_camera=r["source_camera"],
                 is_employee=bool(r["is_employee"]),
+                employee_id=r["employee_id"],
             )
             for r in rows
         ]
@@ -70,10 +71,10 @@ class AlertRepository:
 
     async def upsert_active_person_state(
         self,
-        rows: list[tuple[uuid.UUID, uuid.UUID | None, int | None, int, int, bool]],
+        rows: list[tuple[uuid.UUID, uuid.UUID | None, int | None, int, int, bool, uuid.UUID | None]],
     ) -> None:
         """rows: (global_id, current_zone_id, entered_current_zone_at,
-        last_seen_at, last_batch_number, is_employee). Bulk unnest upsert."""
+        last_seen_at, last_batch_number, is_employee, employee_id). Bulk unnest upsert."""
         if not rows:
             return
         now = datetime.now(timezone.utc)
@@ -84,12 +85,13 @@ class AlertRepository:
         last_seens   = [r[3] for r in rows]
         batch_nums   = [r[4] for r in rows]
         is_employees = [r[5] for r in rows]
+        employee_ids = [r[6] for r in rows]
         updated_ats  = [now] * len(rows)
         async with self._pool.acquire() as conn:
             await conn.execute(
                 q.UPSERT_ACTIVE_PERSON_STATE,
                 global_ids, store_ids, zone_ids, entered_ats,
-                last_seens, batch_nums, is_employees, updated_ats,
+                last_seens, batch_nums, is_employees, employee_ids, updated_ats,
             )
 
     async def load_active_person_state(self) -> list[asyncpg.Record]:
@@ -238,6 +240,11 @@ class AlertRepository:
     async def latest_employee_presence(self) -> int | None:
         async with self._pool.acquire() as conn:
             v = await conn.fetchval(q.LATEST_EMPLOYEE_PRESENCE, self._store_id)
+        return int(v) if v is not None else None
+
+    async def latest_presence_for_employee(self, employee_id: uuid.UUID) -> int | None:
+        async with self._pool.acquire() as conn:
+            v = await conn.fetchval(q.LATEST_PRESENCE_FOR_EMPLOYEE, self._store_id, employee_id)
         return int(v) if v is not None else None
 
     # ── Alerts ───────────────────────────────────────────────────────────────

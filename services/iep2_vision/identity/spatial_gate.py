@@ -41,8 +41,36 @@ def evaluate(
       allowed=False  — hard veto; caller must skip this candidate.
       allowed=True   — candidate is reachable; use threshold for the similarity check.
     """
-    # Gate disabled — always pass with base threshold.
-    return GateResult(allowed=True, threshold=cfg.base_threshold)
+    # Gate disabled when floor positions are unavailable.
+    if new_pos is None or lost_pos is None:
+        return GateResult(allowed=True, threshold=cfg.base_threshold)
+
+    # Cannot compute distance gate with no elapsed time.
+    if elapsed_frames <= 0 or fps <= 0:
+        return GateResult(allowed=True, threshold=cfg.base_threshold)
+
+    elapsed_time_s = elapsed_frames / fps
+    max_dist = cfg.max_walking_speed_mps * elapsed_time_s
+
+    dx = new_pos[0] - lost_pos[0]
+    dy = new_pos[1] - lost_pos[1]
+    actual_dist = math.sqrt(dx * dx + dy * dy)
+
+    # Hard veto: person physically couldn't have covered this distance.
+    if actual_dist > max_dist:
+        return GateResult(allowed=False, threshold=cfg.base_threshold)
+
+    d_ratio = actual_dist / max_dist  # ∈ [0, 1]
+    t_ratio = min(elapsed_frames / lost_ttl_frames, 1.0)
+
+    # Adjustment is centred at d_ratio=0.5 where threshold == base_threshold.
+    # Higher d_ratio → person is near max reachable distance → raise threshold.
+    # Higher t_ratio → person has been lost longer → lower threshold.
+    base_adj = cfg.base_threshold - cfg.w_dist / 2
+    adjusted = base_adj + d_ratio * cfg.w_dist - t_ratio * cfg.w_time
+    adjusted = max(cfg.min_threshold, min(1.0, adjusted))
+
+    return GateResult(allowed=True, threshold=adjusted)
 
 
 # ---------------------------------------------------------------------------

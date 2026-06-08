@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     GRPC_SERVER_KEY_PATH:  str = Field(default="")
     AGENT_SECRET: str = Field(default="")  # empty = dev mode (no auth check)
 
+    # ── Punch-in resolver (employee-linking) ─────────────────────────────────
+    PUNCH_RESOLVER_INTERVAL_S: float = 20.0    # tick cadence
+    PUNCH_SETTLE_MS: int = 90_000              # wait past T for IEP3 to reconcile the window
+    PUNCH_MATCH_WINDOW_MS: int = 10_000        # ±window around T when matching positions
+    PUNCH_MAX_WAIT_MS: int = 600_000           # give up after this -> status 'unmatched'
+
     # ── Feature flags ────────────────────────────────────────────────────────
     # Explicit false default — never rely on absence of this var.
     DEBUG_MODE: bool = False

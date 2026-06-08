@@ -70,6 +70,7 @@ def _run_migrations() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _app = app  # local alias — `import app.models` below rebinds the name `app` to the package
     from app.core.config import settings as _settings
     logger.info(
         "EEP starting  window_seconds=%.1f  db_host=%s  debug_mode=%s",
@@ -119,7 +120,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    asyncio.create_task(_cleanup_deactivated_users())
+    # Keep strong references to long-lived background tasks. asyncio only holds a
+    # weak reference to tasks, so an unreferenced create_task() result can be GC'd
+    # before it runs (the resolver's startup log never fired without this).
+    from app.core import punch_resolver
+    _app.state.background_tasks = [
+        asyncio.create_task(_cleanup_deactivated_users()),
+        asyncio.create_task(punch_resolver.run_forever()),  # employee-linking
+    ]
+
     await _close_orphan_sessions()
 
     try:
