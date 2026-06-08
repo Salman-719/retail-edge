@@ -730,6 +730,7 @@ sudo systemctl restart retailvision-edge-agent
 | Terraform warns `Helm uninstall ... resources were kept due to resource policy` for cert-manager CRDs | Helm preserves cert-manager CRDs by design across reinstall/retry | safe to ignore if the final Terraform apply completes successfully |
 | Helm `chart requires kubeVersion ... incompatible with Kubernetes v1.30.x-eks-...` | EKS reports a provider-suffixed Kubernetes version; Helm treats it like a prerelease unless the chart allows `-0` | chart `kubeVersion` must be `>=1.26.0-0`; pull latest `deploy/aws-eks` or patch `charts/retailvision/Chart.yaml` before installing |
 | Public app returns nginx `503 Service Temporarily Unavailable` | ingress/NLB is reachable, but the `frontend` Service has no Ready pod endpoints | inspect `kubectl -n retailvision get pods,endpoints`, events, and `describe pod`; fix Pending/ImagePull/secret/migration failures before retrying the URL |
+| Public app returns nginx `504`, while `curl http://frontend/` works inside the namespace | ingress-nginx and the frontend pods are on different nodes, but the EKS node security group blocks the frontend container port (`80`) between nodes | pull the Terraform fix that adds `node_security_group_additional_rules.ingress_nodes_all`, then run `terraform plan` and `terraform apply` from the CloudShell directory that owns the Terraform state |
 | `helm ... namespaces "retailvision" not found` on first try | namespace race | include `--create-namespace` (step A6) |
 | Pod `ImagePullBackOff`: GHCR `not found` | the chart tag was never built/pushed | trigger **Build & Push Images** with tag `1.2.0` or push Git tag `v1.2.0`; wait for all required jobs to pass, then restart affected deployments |
 | Pod `ImagePullBackOff`: GHCR `403 Forbidden` | the GHCR package is private | make the package Public, or configure an `imagePullSecret`; for the current public-image deployment, make all cloud packages Public |
@@ -750,6 +751,26 @@ sudo systemctl restart retailvision-edge-agent
 | Grafana login fails | wrong admin password | read it: `kubectl -n retailvision get secret retailvision-secrets -o jsonpath='{.data.grafana-admin-password}' | base64 -d` |
 | Prometheus target `iep3` down | IEP3 pod has no scrape annotation / not running | confirm the pod has `prometheus.io/scrape=true` (set by `iep3_manager`) and is `Running` |
 | `mlflow` pod `CrashLoopBackOff` | S3 creds/endpoint or PVC issue | `kubectl -n retailvision logs deploy/mlflow`; verify `s3-access-key`/`s3-secret-key` secrets and `s3.bucket` |
+
+### Recover a Cross-Node Ingress 504
+
+Apply the node security-group fix from the CloudShell checkout that owns the live
+Terraform state:
+
+```bash
+export PATH="/usr/local/bin:$PATH"
+export AWS_REGION=eu-west-1
+cd /root/retail-edge
+git pull --ff-only origin deploy/aws-eks
+cd infra/aws
+terraform init -reconfigure
+terraform plan -out node-sg-fix.tfplan
+terraform apply node-sg-fix.tfplan
+curl -I https://app.52.17.97.51.nip.io
+```
+
+The plan should add the node security-group self-ingress rule. Review the plan and
+do not apply it if it proposes unrelated destructive changes.
 
 ### Recover a Partial EKS Apply
 

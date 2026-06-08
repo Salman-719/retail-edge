@@ -85,6 +85,20 @@ module "eks" {
     "karpenter.sh/discovery" = local.cluster_name
   }
 
+  # Pods use their container ports directly across VPC-CNI nodes. The module's
+  # recommended self rule starts at 1025, which blocks workloads such as the
+  # frontend on port 80 when ingress-nginx runs on a different node.
+  node_security_group_additional_rules = {
+    ingress_nodes_all = {
+      description = "Allow all pod and node traffic between EKS nodes"
+      protocol    = "-1"
+      from_port   = 0
+      to_port     = 0
+      type        = "ingress"
+      self        = true
+    }
+  }
+
   tags = {
     "karpenter.sh/discovery" = local.cluster_name
   }
