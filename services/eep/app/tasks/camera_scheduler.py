@@ -4,9 +4,10 @@ Evaluates all active camera_schedules against the current local time in each
 store's timezone. Calls _on_camera_start / _on_camera_stop when the running
 state changes. Camera start/stop is delegated to orchestrator (gRPC to Edge Agent).
 """
+import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import text
@@ -20,6 +21,32 @@ log = logging.getLogger(__name__)
 # In-memory set of currently-running (store_id, camera_config_id) pairs.
 # Rebuilt on EEP startup from Redis-backed camera_status via rebuild_running_cameras().
 _running_cameras: set[tuple[str, str]] = set()
+
+# Per-store shift START date (store-local), recorded when a store's first camera
+# starts. Used as the shift_date when the store's last camera stops (end of
+# shift), so shifts spanning midnight keep their start date (SPEC-004).
+_store_shift_start: dict[str, date] = {}
+
+
+def _stores_running() -> set[str]:
+    return {sid for (sid, _cfg) in _running_cameras}
+
+
+def _fire_shift_end(store_id: str, shift_date: date) -> None:
+    """Run the end-of-shift closing + IEP5 launch as a background task so the
+    scheduler tick is never blocked by the closing transaction's retry waits."""
+    from app.core import shift_closer
+
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    async def _run() -> None:
+        try:
+            await shift_closer.close_shift_and_run_iep5(store_id, shift_date, now_ms)
+        except Exception:
+            log.exception("shift-end handler failed for store=%s", store_id)
+
+    log.info("SCHEDULE: shift end detected — store=%s shift_date=%s", store_id, shift_date)
+    asyncio.create_task(_run())
 
 
 def mark_running(store_id: str, camera_config_id: str) -> None:
@@ -221,6 +248,9 @@ async def evaluate_schedules() -> None:
         return
 
     now_utc = datetime.now(timezone.utc)
+    stores_before = _stores_running()
+    # store_id -> tz string, for resolving store-local shift dates on transitions.
+    store_tz: dict[str, str] = {str(r["store_id"]): (r["store_timezone"] or "UTC") for r in rows}
 
     for row in rows:
         try:
@@ -260,6 +290,22 @@ async def evaluate_schedules() -> None:
                 "evaluate_schedules: error processing schedule_id=%s",
                 row.get("schedule_id"),
             )
+
+    # ── Per-store shift start/end detection ──────────────────────────────────
+    stores_after = _stores_running()
+
+    def _local_today(sid: str) -> date:
+        try:
+            return now_utc.astimezone(ZoneInfo(store_tz.get(sid, "UTC"))).date()
+        except Exception:
+            return now_utc.date()
+
+    for sid in stores_after - stores_before:        # 0 -> >0 : shift start
+        _store_shift_start.setdefault(sid, _local_today(sid))
+
+    for sid in stores_before - stores_after:        # >0 -> 0 : shift end
+        shift_date = _store_shift_start.pop(sid, _local_today(sid))
+        _fire_shift_end(sid, shift_date)
 
     await _activate_pending_versions(now_utc)
 

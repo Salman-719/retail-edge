@@ -104,10 +104,13 @@ async def lifespan(app: FastAPI):
     # Step 6: start schedule evaluator.
     start_scheduler()
 
-    # Step 7: initialise k8s clients for IEP3 StatefulSet provisioning.
-    # Gracefully no-ops when running on the laptop (no cluster available).
-    from app.core.iep3_manager import init_k8s_clients
-    await asyncio.get_running_loop().run_in_executor(None, init_k8s_clients)
+    # Step 7: initialise k8s/Docker clients for IEP3/IEP4/IEP5 provisioning.
+    # Gracefully fall back to Docker (production-local) or no-op on the laptop.
+    from app.core import iep3_manager, iep4_manager, iep5_manager
+    _loop = asyncio.get_running_loop()
+    await _loop.run_in_executor(None, iep3_manager.init_k8s_clients)
+    await _loop.run_in_executor(None, iep4_manager.init_k8s_clients)
+    await _loop.run_in_executor(None, iep5_manager.init_k8s_clients)
 
     # Non-blocking background tasks — failures here do not block startup.
     try:

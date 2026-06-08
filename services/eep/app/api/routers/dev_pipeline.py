@@ -196,6 +196,7 @@ async def _reset_pipeline(store_id: str, window_seconds: float, num_cameras: int
     await loop.run_in_executor(None, orch.iep1_remove_all)
     await loop.run_in_executor(None, orch.stop_all_iep2_dev)
     await loop.run_in_executor(None, orch.stop_all_iep3_dev)
+    await loop.run_in_executor(None, orch.stop_all_iep4_dev)
 
     # 2) truncate all track tables (RESTART IDENTITY resets serial PKs)
     async with AsyncSessionLocal() as db:
@@ -209,6 +210,8 @@ async def _reset_pipeline(store_id: str, window_seconds: float, num_cameras: int
 
     # 4) spawn a fresh IEP3 container scoped to this store, give it a moment to come up
     await loop.run_in_executor(None, orch.start_iep3, store_id, _DB_URL_SERVER, window_seconds, num_cameras)
+    # 5) spawn the IEP4 alert daemon for this store (dev: ENVIRONMENT=development)
+    await loop.run_in_executor(None, orch.start_iep4, store_id, _DB_URL_SERVER, window_seconds)
     await asyncio.sleep(3)
 
 
@@ -263,7 +266,41 @@ async def pipeline_stop(body: PipelineStopRequest):
     loop = asyncio.get_running_loop()
     results = await asyncio.gather(*[_stop_one(body.store_id, cid) for cid in body.camera_ids])
     await loop.run_in_executor(None, orch.stop_iep3, body.store_id)
+    await loop.run_in_executor(None, orch.stop_iep4, body.store_id)
     return {"status": "stopped", "cameras": results}
+
+
+class ShiftCloseRequest(BaseModel):
+    store_id: str
+    shift_date: str | None = None    # YYYY-MM-DD; defaults to store-local today
+
+
+@router.post("/shift/close")
+async def shift_close(body: ShiftCloseRequest):
+    """DEBUG manual trigger: run the end-of-shift closing sequence + IEP5 job for
+    a store. The dev pipeline has no camera_schedules, so this stands in for the
+    scheduler's automatic shift-end detection."""
+    from datetime import date, datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from app.core import shift_closer
+
+    if body.shift_date:
+        shift_date = date.fromisoformat(body.shift_date)
+    else:
+        async with AsyncSessionLocal() as db:
+            tz = (await db.execute(
+                text("SELECT timezone FROM stores WHERE id = :sid"),
+                {"sid": body.store_id},
+            )).scalar() or "UTC"
+        try:
+            shift_date = datetime.now(timezone.utc).astimezone(ZoneInfo(tz)).date()
+        except Exception:
+            shift_date = datetime.now(timezone.utc).date()
+
+    shift_end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    await shift_closer.close_shift_and_run_iep5(body.store_id, shift_date, shift_end_ms)
+    return {"status": "closed", "store_id": body.store_id, "shift_date": shift_date.isoformat()}
 
 
 @router.get("/tracking")

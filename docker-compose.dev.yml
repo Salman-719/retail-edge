@@ -34,6 +34,9 @@ services:
       IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
       # iep3_manager Docker fallback (used by activate_version_now in dev/production-local).
       IEP3_IMAGE: "retail-edge-iep3_reconciliation:latest"
+      # IEP4 alert daemon (dev pipeline spawn) + IEP5 analytics job (shift_closer launch).
+      IEP4_IMAGE: "retail-edge-iep4_alerts:latest"
+      IEP5_IMAGE: "retail-edge-iep5_analytics:latest"
       SERVER_REDIS_URL: "redis://redis:6379/0"
     volumes:
       # Dev-only: EEP calls IEP1.AddCamera over this control socket. (docker.sock
