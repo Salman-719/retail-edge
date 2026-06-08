@@ -23,16 +23,8 @@ spec:
     - host: {{ .Values.ingress.appHost | quote }}
       http:
         paths:
-          {{- if .Values.iep6.enabled }}
-          # AI agent API → IEP6 (more specific than /, takes precedence).
-          - path: /api/agent
-            pathType: Prefix
-            backend:
-              service:
-                name: iep6
-                port:
-                  number: 8006
-          {{- end }}
+          # Single entry → frontend nginx, which proxies /api/* to EEP and
+          # /api/(store/*/agent|agent) to IEP6 (see frontend-deployment configmap).
           - path: /
             pathType: Prefix
             backend:
