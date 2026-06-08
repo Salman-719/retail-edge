@@ -224,6 +224,7 @@ def start_iep3(
     store_id: str,
     database_url_server: str,
     window_seconds: float,
+    expected_cameras: int = 0,
 ) -> str:
     """Spawn (or replace) a per-run IEP3 container scoped to store_id.
 
@@ -252,12 +253,13 @@ def start_iep3(
             "WINDOW_SECONDS":      str(window_seconds),
             "DATABASE_URL_SERVER": database_url_server,
             "SERVER_REDIS_URL":    SERVER_REDIS_URL,
+            "EXPECTED_CAMERAS":    str(expected_cameras),
         },
         network=DOCKER_NETWORK,
         detach=True,
         restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
     )
-    logger.info("Started IEP3 container name=%s store=%s", name, store_id)
+    logger.info("Started IEP3 container name=%s store=%s expected_cameras=%d", name, store_id, expected_cameras)
     return name
 
 

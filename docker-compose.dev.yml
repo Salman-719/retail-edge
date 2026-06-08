@@ -8,6 +8,12 @@
 
 services:
 
+  iep1-daemon:
+    environment:
+      # Reduce per-camera raw-frame buffer from 30→5 in dev to prevent OOM with
+      # multiple cameras (30 frames × N cams × ~1 MB/frame uncompressed BGR).
+      FRAME_QUEUE_SIZE: "5"
+
   # Disable the static IEP3 service — EEP spawns per-run IEP3 containers
   # dynamically via dev_orchestrator.start_iep3() when the dev screen starts.
   iep3_reconciliation:

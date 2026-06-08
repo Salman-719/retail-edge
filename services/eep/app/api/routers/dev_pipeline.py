@@ -179,7 +179,7 @@ _TRACK_TABLES = (
 )
 
 
-async def _reset_pipeline(store_id: str, window_seconds: float) -> None:
+async def _reset_pipeline(store_id: str, window_seconds: float, num_cameras: int = 0) -> None:
     """Fresh restart: stop everything, wipe all track tables + Redis, start IEP3.
 
     Spawns a per-run IEP3 container with STORE_ID=store_id so the coordinator
@@ -208,7 +208,7 @@ async def _reset_pipeline(store_id: str, window_seconds: float) -> None:
     await loop.run_in_executor(None, orch.flush_pipeline_redis)
 
     # 4) spawn a fresh IEP3 container scoped to this store, give it a moment to come up
-    await loop.run_in_executor(None, orch.start_iep3, store_id, _DB_URL_SERVER, window_seconds)
+    await loop.run_in_executor(None, orch.start_iep3, store_id, _DB_URL_SERVER, window_seconds, num_cameras)
     await asyncio.sleep(3)
 
 
@@ -234,7 +234,7 @@ async def pipeline_start(body: PipelineStartRequest):
     # Every Start does a full fresh reset first → run begins from frame 1.
     # The reset includes a short wait, by which time the inference services
     # (watcher polls every 2 s) have applied the requested device.
-    await _reset_pipeline(body.store_id, body.window_seconds)
+    await _reset_pipeline(body.store_id, body.window_seconds, len(body.camera_ids))
     # Start all cameras in parallel — each task owns its own DB session.
     results = await asyncio.gather(*[_start_one(body, cid) for cid in body.camera_ids])
     all_ok = all(r["ok"] for r in results)

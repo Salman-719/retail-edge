@@ -58,6 +58,10 @@ class Iep3Settings(BaseSettings):
     expected_cameras_refresh_batches: int = Field(default=10, gt=0)
     orphan_sweep_interval_batches:    int = Field(default=50, gt=0)
 
+    # ── Dev override — set by dev_orchestrator when fewer cameras than the full
+    # active version are started. 0 means "resolve from DB" (production path). ──
+    expected_cameras: int = Field(default=0, ge=0)
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

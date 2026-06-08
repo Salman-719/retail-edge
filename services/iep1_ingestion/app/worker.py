@@ -18,10 +18,11 @@ from services.iep1_ingestion.app.window import WindowAccumulator
 
 logger = logging.getLogger(__name__)
 
-TMPFS_ROOT    = os.environ.get("TMPFS_FRAME_ROOT", "/dev/shm/frames")
-JPEG_QUALITY  = int(os.environ.get("JPEG_QUALITY", "85"))
-STREAM_PREFIX = "stream:iep1"
-STREAM_MAXLEN = 1000
+TMPFS_ROOT       = os.environ.get("TMPFS_FRAME_ROOT", "/dev/shm/frames")
+JPEG_QUALITY     = int(os.environ.get("JPEG_QUALITY", "85"))
+FRAME_QUEUE_SIZE = int(os.environ.get("FRAME_QUEUE_SIZE", "30"))
+STREAM_PREFIX    = "stream:iep1"
+STREAM_MAXLEN    = 1000
 
 
 def now_ms() -> int:
@@ -76,7 +77,7 @@ class CameraWorker:
 
     async def start(self, redis: aioredis.Redis) -> None:
         self._loop        = asyncio.get_running_loop()
-        self._frame_queue = asyncio.Queue(maxsize=30)
+        self._frame_queue = asyncio.Queue(maxsize=FRAME_QUEUE_SIZE)
         self._redis       = redis
         self._thread = threading.Thread(
             target=self._capture_loop, daemon=True,

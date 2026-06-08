@@ -1,15 +1,16 @@
 FROM python:3.11-slim
 
 WORKDIR /workspace
-RUN apt-get update && apt-get install -y ca-certificates
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
     libgl1 \
     libglib2.0-0 \
     libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 # Build the services.iep2_vision package tree inside the container.
 # The docker-compose build context is the iep2_vision/ directory itself,

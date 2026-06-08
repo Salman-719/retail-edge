@@ -322,6 +322,10 @@ class IEP2Runtime:
                     floor_x=floor_x,
                     floor_y=floor_y,
                     zone_id=zone_id,
+                    bbox_x1=x1,
+                    bbox_y1=y1,
+                    bbox_x2=x2,
+                    bbox_y2=y2,
                 )
                 rows += 1
         return rows
@@ -655,17 +659,18 @@ async def _watch_reload_signals(
             await pubsub.subscribe(channel)
             log.info("Subscribed to reload channel  channel=%s", channel)
             async for message in pubsub.listen():
-                if message["type"] == "message" and message["data"] == b"homography":
+                if message["type"] == "message":
+                    cal_type = (message["data"] or b"").decode("utf-8", errors="ignore")
                     log.info(
-                        "Homography reload signal received  camera_config_id=%s",
-                        camera_config_id,
+                        "Calibration reload signal received  type=%s  camera_config_id=%s",
+                        cal_type, camera_config_id,
                     )
                     try:
                         await projector.load(pool, _uuid.UUID(camera_config_id))
-                        log.info("Homography reloaded  camera_config_id=%s", camera_config_id)
+                        log.info("Calibration reloaded  type=%s  camera_config_id=%s", cal_type, camera_config_id)
                     except Exception as exc:
                         log.error(
-                            "Homography reload failed  camera_config_id=%s: %s",
+                            "Calibration reload failed  camera_config_id=%s: %s",
                             camera_config_id, exc,
                         )
         except asyncio.CancelledError:
@@ -881,6 +886,10 @@ async def run_daemon(settings) -> None:
                             floor_x=floor_x,
                             floor_y=floor_y,
                             zone_id=zone_id,
+                            bbox_x1=x1,
+                            bbox_y1=y1,
+                            bbox_x2=x2,
+                            bbox_y2=y2,
                         )
                     frame_count += 1
 
