@@ -47,7 +47,7 @@ import mlflow
 # checks whichever of these the run actually logged and skips the others — a
 # crowded-scene run is NOT failed for lacking false_positive_total, and vice
 # versa. See _applicable_thresholds() below.
-THRESHOLDS = {
+_DETECTION_THRESHOLDS = {
     # ── Detection quality ──────────────────────────────────────────────────────
     # avg_confidence: CALIBRATED to this project's clips, not the docs' number.
     # docs_models Round 4 reported 86.1% but on a DIFFERENT video; on the cashier
@@ -85,6 +85,49 @@ THRESHOLDS = {
     "false_positive_total":  (0.0,  "lte"),   #    — detection_experiments.md Round 4
 }
 
+# ── ReID thresholds (PROXY — no identity ground truth; see REID_RESULTS.md) ────
+# Calibrated from the 7-run reid experiment on the crowded clip (GT = 16 people):
+#   resnet50_msmt17 @0.85: count_error 18, match_rate 0.60  (the promoted model)
+#   osnet_x1_0_market1501 : count_error 20, match_rate 0.57  (passes)
+#   osnet_x1_0_msmt17     : count_error 39, match_rate 0.35  (correctly FAILS)
+# count_error here = |unique_local_ids - 16| (recovery quality), NOT the detection
+# metric of the same name — these only apply to runs in the `reid` experiment.
+# ⚠️ PROXY: a passing reid run is "proxy-good" (recovers plausibly), not certified
+# correct (false merges can't be detected without identity labels).
+_REID_THRESHOLDS = {
+    "count_error":     (18.0, "lte"),   # |unique_local_ids - 16|; resnet50/osnet_market pass, osnet_msmt17 (39) fails
+    "reid_match_rate": (0.55, "gte"),   # recoveries/attempts; 0.60/0.57 pass, 0.35 fails
+}
+
+# ── Tracking thresholds ───────────────────────────────────────────────────────
+# Calibrated from the 7-run tracking experiment (detection FIXED at rtdetr-x conf0.5,
+# crowded clip, 16 people / peak 14). The gate must PASS the winner (BoT-SORT) and
+# FAIL the eliminated tracker (StrongSORT). Observed @ match_thresh 0.8:
+#   BoT-SORT (winner): track_fragmentation 3.56, id_switches  7   → PASS both
+#   OC-SORT          : track_fragmentation 4.06, id_switches 14   → fails (frag + switches)
+#   ByteTrack        : track_fragmentation 5.12, id_switches  5   → fails (frag)
+#   StrongSORT       : track_fragmentation 5.19, id_switches 64   → FAILS decisively
+# track_fragmentation (unique_track_ids / GT) is the PRIMARY churn metric and the
+# basis of the tracker decision; <=4.0 isolates BoT-SORT as the only passing tracker.
+# id_switches <=12 fails StrongSORT's 64 (≈9× the rest) by a wide margin.
+# ⚠️ NOTE: absolute counts are inflated (1810-frame / 3072×2048 clip) and inherit
+# detection over-count — the gate is a RELATIVE bar that reproduces the ranking
+# decision, not an absolute-accuracy certificate. See TRACKING_RESULTS.md.
+_TRACKING_THRESHOLDS = {
+    "track_fragmentation": (4.0,  "lte"),  # unique_track_ids/16; BoT-SORT 3.56 passes, others >4 fail
+    "id_switches":         (12.0, "lte"),  # BoT-SORT 7 passes, StrongSORT 64 fails decisively
+}
+
+# Which threshold set to use, by MLflow experiment name.
+THRESHOLDS_BY_EXPERIMENT = {
+    "detection": _DETECTION_THRESHOLDS,
+    "reid":      _REID_THRESHOLDS,
+    "tracking":  _TRACKING_THRESHOLDS,
+}
+
+# Back-compat alias (some docs reference THRESHOLDS); defaults to detection.
+THRESHOLDS = _DETECTION_THRESHOLDS
+
 # ── Optional per-scene applicability ──────────────────────────────────────────
 # A metric is only checked if it was logged in the run. We additionally avoid
 # failing a run for a metric that does not apply to its scene.
@@ -121,14 +164,25 @@ def check_run(run_id: str, tracking_uri: str) -> bool:
     params = run.data.params
     scene = run.data.tags.get("scene") or params.get("scene")
 
+    # Pick the threshold set by the run's MLflow experiment (detection vs reid).
+    exp_name = client.get_experiment(run.info.experiment_id).name
+    thresholds = THRESHOLDS_BY_EXPERIMENT.get(exp_name)
+
     print(f"\n{'='*60}")
-    print(f"Run ID:   {run_id}")
-    print(f"Run name: {run.info.run_name or 'unnamed'}")
-    print(f"Scene:    {scene or 'unknown'}")
+    print(f"Run ID:     {run_id}")
+    print(f"Run name:   {run.info.run_name or 'unnamed'}")
+    print(f"Experiment: {exp_name}")
+    print(f"Scene:      {scene or 'unknown'}")
     print(f"{'='*60}\n")
 
+    if thresholds is None:
+        print(f"ℹ️  No promotion gate defined for experiment '{exp_name}'.")
+        print("   (e.g. tracking — winner chosen by ranking, not a gate.)")
+        print(f"{'='*60}\n")
+        return False
+
     all_passed = True
-    for metric_name, (threshold, direction) in THRESHOLDS.items():
+    for metric_name, (threshold, direction) in thresholds.items():
         if not _applicable(metric_name, scene):
             print(f"➖ SKIP    {metric_name}: not applicable to scene '{scene}'")
             continue
@@ -165,8 +219,23 @@ def check_run(run_id: str, tracking_uri: str) -> bool:
     return all_passed
 
 
-# ── Registered-model name in the MLflow Model Registry ─────────────────────────
-REGISTERED_MODEL = "retailvision-detector"
+# ── Registered-model name in the MLflow Model Registry, by experiment ──────────
+# Each experiment promotes into its own registered model so a detection winner and a
+# tracking winner don't collide as versions of the same name.
+REGISTERED_MODEL_BY_EXPERIMENT = {
+    "detection": "retailvision-detector",
+    "tracking":  "retailvision-tracker",
+    "reid":      "retailvision-reid",
+}
+# Back-compat alias (docs reference REGISTERED_MODEL); defaults to detection.
+REGISTERED_MODEL = REGISTERED_MODEL_BY_EXPERIMENT["detection"]
+
+# Per-experiment params worth copying onto the model version as tags.
+_VERSION_TAG_PARAMS = {
+    "detection": ("model", "conf", "scene"),
+    "tracking":  ("tracker", "match_thresh", "scene"),
+    "reid":      ("model", "reid_threshold", "scene"),
+}
 
 
 def register_to_staging(run_id: str, tracking_uri: str) -> None:
@@ -175,45 +244,54 @@ def register_to_staging(run_id: str, tracking_uri: str) -> None:
     Human-in-the-loop boundary: the gate may auto-register a *candidate* (cheap,
     reversible bookkeeping that changes nothing live), but a HUMAN must later set it
     to Production and deploy. So we land the version in 'Staging', not 'Production'.
+
+    The target registered model is chosen by the run's experiment (detection →
+    retailvision-detector, tracking → retailvision-tracker, reid → retailvision-reid).
     """
     import mlflow
     mlflow.set_tracking_uri(tracking_uri)
     client = mlflow.MlflowClient()
 
+    run = client.get_run(run_id)
+    exp_name = client.get_experiment(run.info.experiment_id).name
+    model_name = REGISTERED_MODEL_BY_EXPERIMENT.get(exp_name)
+    if model_name is None:
+        print(f"ℹ️  No registered model mapped for experiment '{exp_name}'; skipping registration.")
+        return
+
     # Ensure the registered model exists (idempotent).
     try:
         client.create_registered_model(
-            REGISTERED_MODEL,
-            description="RetailVision person detector. Versions auto-registered to "
+            model_name,
+            description=f"RetailVision {exp_name} winner. Versions auto-registered to "
                         "Staging by the promotion gate; Production set manually.",
         )
     except Exception:
         pass  # already exists
 
-    run = client.get_run(run_id)
     p = run.data.params
     mv = client.create_model_version(
-        name=REGISTERED_MODEL,
+        name=model_name,
         source=f"runs:/{run_id}/model",
         run_id=run_id,
-        description=f"{p.get('model')} conf={p.get('conf')} — auto-registered to "
+        description=f"{run.info.run_name or exp_name} — auto-registered to "
                     f"Staging by check_promotion.py (gate passed). Human approves Production.",
     )
-    for k in ("model", "conf", "scene"):
+    for k in _VERSION_TAG_PARAMS.get(exp_name, ()):
         if p.get(k) is not None:
-            client.set_model_version_tag(REGISTERED_MODEL, mv.version, k, str(p[k]))
-    client.set_model_version_tag(REGISTERED_MODEL, mv.version, "registered_by", "check_promotion.py")
+            client.set_model_version_tag(model_name, mv.version, k, str(p[k]))
+    client.set_model_version_tag(model_name, mv.version, "registered_by", "check_promotion.py")
     # Stage = Staging (NOT Production). Aliases also supported on newer MLflow.
     try:
-        client.transition_model_version_stage(REGISTERED_MODEL, mv.version, "Staging")
+        client.transition_model_version_stage(model_name, mv.version, "Staging")
     except Exception:
         pass
     try:
-        client.set_registered_model_alias(REGISTERED_MODEL, "candidate", mv.version)
+        client.set_registered_model_alias(model_name, "candidate", mv.version)
     except Exception:
         pass
 
-    print(f"📦  REGISTERED  {REGISTERED_MODEL} v{mv.version} → Staging (alias @candidate)")
+    print(f"📦  REGISTERED  {model_name} v{mv.version} → Staging (alias @candidate)")
     print( "   Human step: review, then set Production + deploy manually if approved.")
 
 

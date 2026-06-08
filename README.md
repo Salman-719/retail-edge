@@ -56,7 +56,11 @@ Redis topology
 | [`docs/MLFLOW_GUIDE.md`](docs/MLFLOW_GUIDE.md) | MLflow setup + how to run the offline model experiments |
 | [`docs/MLOPS_PIPELINE.md`](docs/MLOPS_PIPELINE.md) | Lifecycle: CI, experiment tracking, promotion gate + model registry |
 | [`docs/docs_models/detection/DETECTION_RESULTS.md`](docs/docs_models/detection/DETECTION_RESULTS.md) | Detection experiment — 24 runs, model comparison + decision |
-| [`docs/DETECTION_SCREENSHOTS.md`](docs/DETECTION_SCREENSHOTS.md) | MLflow screenshots (runs, comparison, mannequin rejection, registry) |
+| [`docs/DETECTION_SCREENSHOTS.md`](docs/DETECTION_SCREENSHOTS.md) | Detection MLflow screenshots (runs, comparison, mannequin rejection, registry) |
+| [`docs/docs_models/tracking/TRACKING_RESULTS.md`](docs/docs_models/tracking/TRACKING_RESULTS.md) | Tracking experiment — 7 runs, tracker comparison + decision (BoT-SORT) |
+| [`docs/TRACKING_SCREENSHOTS.md`](docs/TRACKING_SCREENSHOTS.md) | Tracking MLflow screenshots (comparison, track-timeline, sweep, performance) |
+| [`docs/docs_models/reid/REID_RESULTS.md`](docs/docs_models/reid/REID_RESULTS.md) | ReID experiment — 7 runs, model comparison + threshold sweep (resnet50_msmt17) |
+| [`docs/MLFLOW_ANALYSIS.md`](docs/MLFLOW_ANALYSIS.md) | Cross-experiment analysis of all 3 MLflow experiments (synthesis + limitations) |
 
 ---
 
