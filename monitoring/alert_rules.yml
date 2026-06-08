@@ -1,0 +1,47 @@
+groups:
+  - name: retailvision_pipeline
+    rules:
+      # Pipeline stalled: the detector is processing no frames. Fires after 2 min
+      # so a brief gap between batches doesn't trip it. (Will also fire when the
+      # pipeline simply isn't running — that's the intended "nothing flowing"
+      # signal.)
+      - alert: NoFramesFlowing
+        expr: rate(detector_frames_total[2m]) == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No frames processed by the detector for 2m"
+          description: "rate(detector_frames_total[2m]) is 0 — the vision pipeline appears stalled or stopped."
+
+      # A pipeline stage is falling behind: a Redis stream is backing up.
+      - alert: RedisStreamBacklog
+        expr: redis_stream_length{stream=~"stream:iep.*"} > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis stream {{ $labels.stream }} backlog > 1000"
+          description: "Stream {{ $labels.stream }} has been over 1000 entries for 5m — a downstream consumer is falling behind."
+
+      # IEP3 reconciliation is slow: p95 batch reconcile time too high.
+      - alert: IEP3ReconcileSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(iep3_batch_reconcile_seconds_bucket[5m]))) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IEP3 p95 reconcile time > 10s"
+          description: "IEP3 batch reconciliation p95 has exceeded 10s for 5m — reconciliation may be falling behind the window."
+
+  - name: retailvision_infra
+    rules:
+      # Any scrape target is down.
+      - alert: TargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Target {{ $labels.job }} is down"
+          description: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }}) for 1m."

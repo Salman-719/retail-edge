@@ -48,3 +48,23 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  # MLflow eval runner on GPU. Builds CUDA torch into the image and reserves the
+  # GPU for the run. Usage (note: include this file for BOTH build and run):
+  #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+  #     --profile mlops build mlops
+  #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+  #     --profile mlops run --rm mlops python mlops/eval/run_detection_eval.py
+  mlops:
+    build:
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
+    environment:
+      INFERENCE_DEVICE: "gpu"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

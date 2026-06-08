@@ -7,6 +7,13 @@ import logging
 import time
 
 from app.db import get_pool
+from app.metrics import (
+    IEP3_BATCHES,
+    IEP3_MATCHES,
+    IEP3_NEW,
+    IEP3_RECONCILE,
+    IEP3_TRANSITIONS,
+)
 from app.reader import BatchReader
 from app.reid.matcher import ReidMatcher
 from app.repository import Iep3Repository
@@ -153,6 +160,15 @@ class Reconciler:
             "positions_written":   n_written,
             **cleanup_stats,
         }
+
+        # Prometheus metrics (job "iep3", scraped on :9300). Updated after a
+        # successful commit so a rolled-back batch isn't counted.
+        IEP3_BATCHES.inc()
+        IEP3_RECONCILE.observe(reconcile_elapsed)
+        IEP3_MATCHES.inc(len(known))
+        IEP3_NEW.inc(n_new_globals)
+        IEP3_TRANSITIONS.labels(transition="lost").inc(cleanup_stats.get("newly_lost", 0))
+        IEP3_TRANSITIONS.labels(transition="exited").inc(cleanup_stats.get("newly_exited", 0))
 
         logger.info("Batch %d reconciled: %s", batch_number, stats)
 

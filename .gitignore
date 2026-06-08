@@ -1,3 +1,7 @@
+# MLflow — local-file backend (we use the Postgres+MinIO backend instead, but
+# guard against accidental file-mode runs creating an mlruns/ dir)
+mlruns/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -58,3 +62,4 @@ docsme/
 # TLS private keys — never commit
 *.key
 certs/*.key
+mlops/outputs/

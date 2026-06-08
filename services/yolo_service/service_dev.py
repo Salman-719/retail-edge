@@ -24,8 +24,28 @@ import msgpack
 import numpy as np
 import zmq
 import zmq.asyncio
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 log = logging.getLogger("yolo_service_dev")
+
+# ── Prometheus metrics (job "detector", scraped on :9400) ──────────────────────
+# Named "detector_*" not "yolo_*" because the real detector is RT-DETR-x
+# (rtdetr-x.pt); dev uses a lighter YOLO11n stand-in. The actual model in use is
+# exposed via the detector_info{model=...} gauge. Defined once at import time.
+DETECTOR_INFER = Histogram(
+    "detector_inference_seconds",
+    "Detection latency per batch",
+)
+DETECTOR_BATCH = Histogram(
+    "detector_batch_size",
+    "Frames per inference batch",
+    buckets=[1, 2, 4, 8, 16, 32],
+)
+DETECTOR_FRAMES = Counter("detector_frames_total", "Frames processed")
+DETECTOR_DETECTIONS = Counter("detector_detections_total", "Person detections returned")
+# Which detector model is actually loaded (RT-DETR-x in prod, YOLO11n in dev).
+# Value is always 1; the information lives in the label. Set at startup.
+DETECTOR_INFO = Gauge("detector_info", "Loaded detector model (value always 1)", ["model"])
 
 # ── Device selection (CPU / GPU) shared with the dev pipeline ──────────────────
 # The dev screen's CPU/GPU toggle writes the desired device to Redis key
@@ -199,15 +219,18 @@ def _decode_frame(jpeg_bytes: bytes) -> np.ndarray:
 
 def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
     """Batch inference — R4 filters to class 0 (person) only. Identical to service.py."""
+    DETECTOR_BATCH.observe(len(batch_items))
     frames = [_decode_frame(item["frame"]) for item in batch_items]
-    results = model(
-        frames,
-        verbose=False,
-        conf=YOLO_CONF_THRESHOLD,
-        iou=YOLO_IOU_THRESHOLD,
-        device=_state["device"],
-        half=_state["device"] != "cpu",
-    )
+    with DETECTOR_INFER.time():
+        results = model(
+            frames,
+            verbose=False,
+            conf=YOLO_CONF_THRESHOLD,
+            iou=YOLO_IOU_THRESHOLD,
+            device=_state["device"],
+            half=_state["device"] != "cpu",
+        )
+    DETECTOR_FRAMES.inc(len(frames))
     responses = []
     for item, result in zip(batch_items, results):
         detections = []
@@ -222,6 +245,7 @@ def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
                     "bbox_xyxy":  [float(x) for x in xyxy],
                     "confidence": float(conf),
                 })
+        DETECTOR_DETECTIONS.inc(len(detections))
         responses.append({
             "request_id":   item["request_id"],
             "camera_id":    item["camera_id"],
@@ -298,6 +322,11 @@ async def main() -> None:
 
     asyncio.create_task(_run_health_server(health_servicer))
     await asyncio.sleep(0)
+
+    # Prometheus /metrics on :9400 (own background thread). Scraped as job "detector".
+    start_http_server(9400)
+    DETECTOR_INFO.labels(model=os.path.basename(DETECTOR_MODEL)).set(1)
+    log.info("Prometheus metrics server started on :9400 (model=%s)", DETECTOR_MODEL)
 
     # Resolve the initial device synchronously (so warmup uses it), then start
     # the watcher thread that keeps it in sync with the dev screen's toggle.
