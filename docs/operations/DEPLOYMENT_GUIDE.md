@@ -102,6 +102,19 @@ Then make the cloud images pullable without credentials:
   Public**. (EEP provisions `iep3`/`iep4`/`iep5` at runtime, so those images must
   be pullable too.)
 
+Before installing Helm, verify the required tag exists. The production chart
+currently expects `1.2.0`:
+```bash
+for image in eep iep3 iep4 iep5 iep6 frontend mlflow; do
+  token="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:salman-719/retailvision/$image:pull" | jq -r .token)"
+  curl -fsSL -H "Authorization: Bearer $token" \
+    "https://ghcr.io/v2/salman-719/retailvision/$image/manifests/1.2.0" \
+    -H 'Accept: application/vnd.oci.image.index.v1+json' >/dev/null &&
+    echo "$image:1.2.0 OK" || echo "$image:1.2.0 MISSING/PRIVATE"
+done
+```
+Do not install Helm until every required cloud image prints `OK`.
+
 ### A4. [LOCAL] Provision EKS infrastructure (Terraform)
 
 ```bash
@@ -149,19 +162,27 @@ git commit -m "Migrate cloud deployment to EKS"
 git push origin deploy/aws-eks
 ```
 
-Then open **AWS Console → CloudShell** in `eu-west-1` and install the deploy
-tools for that CloudShell session:
+Then open **AWS Console → CloudShell** in `eu-west-1`. If your prompt is root
+(`#`) because you ran `sudo -i`, either type `exit` to return to the normal
+CloudShell user or keep going; the commands below install tools into
+`/usr/local/bin` so both users can find them.
+
+Install the deploy tools:
 ```bash
-mkdir -p "$HOME/bin"
 sudo yum install -y unzip tar gzip git jq
+
 curl -fsSL https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip -o /tmp/terraform.zip
-unzip -o /tmp/terraform.zip -d "$HOME/bin"
+unzip -o /tmp/terraform.zip -d /tmp
+sudo install -m 0755 /tmp/terraform /usr/local/bin/terraform
+
 curl -fsSL https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz -o /tmp/helm.tgz
 tar -xzf /tmp/helm.tgz -C /tmp
-mv /tmp/linux-amd64/helm "$HOME/bin/helm"
-curl -fsSL https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-05-12/bin/linux/amd64/kubectl -o "$HOME/bin/kubectl"
-chmod +x "$HOME/bin/terraform" "$HOME/bin/helm" "$HOME/bin/kubectl"
-export PATH="$HOME/bin:$PATH"
+sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+
+curl -fsSL https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-05-12/bin/linux/amd64/kubectl -o /tmp/kubectl
+sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+
+hash -r
 terraform version
 helm version
 kubectl version --client
@@ -702,10 +723,16 @@ sudo systemctl restart retailvision-edge-agent
 | Symptom | Cause | Fix |
 |---|---|---|
 | `aws ... InvalidClientTokenId` | profile region not enabled (opt-in) | `aws configure set region eu-west-1 --profile adsal` |
-| `SessionManagerPlugin is not found` | plugin missing | `brew install --cask session-manager-plugin` |
 | zsh `command not found: --flag` | multi-line paste mangled | paste **one line** at a time |
-| `helm ... namespaces "retailvision" not found` on first try | namespace race | include `--create-namespace` (step A7) |
-| Pod `ImagePullBackOff` | build not green or package private | A3: build green + set `eep`/`iep3`/`frontend` **Public**; verify `k3s crictl pull` |
+| Terraform `aws-load-balancer-webhook-service ... no endpoints` | AWS Load Balancer Controller webhook was registered before its pod became Ready | wait for `kubectl -n kube-system rollout status deploy/aws-load-balancer-controller`, verify endpoints, then rerun `terraform apply eks.tfplan` |
+| Terraform `secret ... scheduled for deletion` | old k3s destroy scheduled Secrets Manager secrets for deletion; names cannot be recreated yet | restore or force-delete the old secrets, then rerun `terraform apply eks.tfplan` |
+| Terraform `secret ... already exists` | one old secret still exists outside current state | import it or delete it; for clean redeploy, force-delete it with the same secrets cleanup command below |
+| Terraform warns `Helm uninstall ... resources were kept due to resource policy` for cert-manager CRDs | Helm preserves cert-manager CRDs by design across reinstall/retry | safe to ignore if the final Terraform apply completes successfully |
+| Helm `chart requires kubeVersion ... incompatible with Kubernetes v1.30.x-eks-...` | EKS reports a provider-suffixed Kubernetes version; Helm treats it like a prerelease unless the chart allows `-0` | chart `kubeVersion` must be `>=1.26.0-0`; pull latest `deploy/aws-eks` or patch `charts/retailvision/Chart.yaml` before installing |
+| Public app returns nginx `503 Service Temporarily Unavailable` | ingress/NLB is reachable, but the `frontend` Service has no Ready pod endpoints | inspect `kubectl -n retailvision get pods,endpoints`, events, and `describe pod`; fix Pending/ImagePull/secret/migration failures before retrying the URL |
+| `helm ... namespaces "retailvision" not found` on first try | namespace race | include `--create-namespace` (step A6) |
+| Pod `ImagePullBackOff`: GHCR `not found` | the chart tag was never built/pushed | trigger **Build & Push Images** with tag `1.2.0` or push Git tag `v1.2.0`; wait for all required jobs to pass, then restart affected deployments |
+| Pod `ImagePullBackOff`: GHCR `403 Forbidden` | the GHCR package is private | make the package Public, or configure an `imagePullSecret`; for the current public-image deployment, make all cloud packages Public |
 | `ImagePullBackOff` on a **freshly-tagged** image (e.g. `eep:1.1.0`) right after a release | that service's CI job hasn't finished (or failed); other images already pushed | wait for **all** matrix jobs green (check per-image tag in Packages); then `kubectl -n retailvision delete pod -l app=<svc>` to retry. Confirm which tags exist: `curl -s "https://ghcr.io/token?scope=repository:<owner>/retailvision/<svc>:pull&service=ghcr.io"` then query `/v2/.../tags/list` |
 | Pod `Pending` "Insufficient cpu" | Karpenter cannot launch enough capacity or limits are too low | check `kubectl -n kube-system logs deploy/karpenter`, AWS quotas, and `karpenter_cpu_limit`; raise limits or allow larger instance families (D3) |
 | `relation "tracking_history" does not exist` | Postgres volume not freshly seeded | clean reinstall below (needs an **empty** PVC) |
@@ -716,13 +743,60 @@ sudo systemctl restart retailvision-edge-agent
 | `certificate retailvision-app-tls` not Ready | Let's Encrypt rate-limited nip.io | re-run A7 with `--set ingress.clusterIssuer=retailvision-ca-issuer` |
 | **[EDGE]** bootstrap aborts: `Packages were downgraded ... without --allow-downgrades` (nvidia-container-toolkit) | JetPack already has a newer toolkit | already fixed (script skips it if present) — `git pull` then re-run the bootstrap |
 | **[EDGE]** `retailvision-edge-agent.service not found` / namespace empty | bootstrap aborted before steps 4–7 | fix the abort cause above, then re-run the bootstrap (it's idempotent) |
-| **[EDGE/SERVER]** git pull: `detected dubious ownership` | repo owned by a different user | `sudo -i` (or `git config --global --add safe.directory <path>`), then pull |
+| **[EDGE/CLOUDSHELL]** git pull: `detected dubious ownership` | repo owned by a different user | use the same user that cloned it, or `git config --global --add safe.directory <path>` |
 | `iep3-…`/`iep4-…` pod never appears after activating a store | EEP lacks RBAC, or image private, or not `in-cluster` | check `kubectl -n retailvision logs deploy/eep | grep iep[34]_manager`; ensure `eep-pipeline-manager` Role exists and `iep3`/`iep4` images are Public |
 | `iep5-…` Job `Error`/`BackoffLimitExceeded` | analytics failed for that shift | `kubectl -n retailvision logs job/iep5-<short>-<date>`; fix data/config, it re-runs on next shift close (or delete the Job to retry) |
 | `CREATE EXTENSION timescaledb` error / hypertable missing | Postgres image is stock `postgres`, not TimescaleDB, or volume pre-dates the switch | ensure `postgres.image.repository=timescale/timescaledb`; do the **clean reinstall** (fresh volume) below |
 | Grafana login fails | wrong admin password | read it: `kubectl -n retailvision get secret retailvision-secrets -o jsonpath='{.data.grafana-admin-password}' | base64 -d` |
 | Prometheus target `iep3` down | IEP3 pod has no scrape annotation / not running | confirm the pod has `prometheus.io/scrape=true` (set by `iep3_manager`) and is `Running` |
 | `mlflow` pod `CrashLoopBackOff` | S3 creds/endpoint or PVC issue | `kubectl -n retailvision logs deploy/mlflow`; verify `s3-access-key`/`s3-secret-key` secrets and `s3.bucket` |
+
+### Recover a Partial EKS Apply
+
+If Terraform created EKS but failed on Helm releases or Secrets Manager, do not
+destroy the cluster immediately. First inspect the controller and clean old
+secrets:
+
+```bash
+aws eks update-kubeconfig --name "$(terraform output -raw cluster_name)" --region eu-west-1
+kubectl -n kube-system get pods,endpoints | grep aws-load-balancer
+kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=180s
+```
+
+If `aws-load-balancer-webhook-service` has no endpoints, inspect:
+
+```bash
+kubectl -n kube-system describe deploy aws-load-balancer-controller
+kubectl -n kube-system logs deploy/aws-load-balancer-controller --tail=100
+```
+
+For a clean redeploy after wiping k3s, permanently remove stale Secrets Manager
+entries that are pending deletion or left outside Terraform state:
+
+```bash
+for s in \
+  retailvision/postgres-password \
+  retailvision/redis-password \
+  retailvision/jwt-secret \
+  retailvision/agent-secret \
+  retailvision/redis-url \
+  retailvision/s3-access-key \
+  retailvision/s3-secret-key \
+  retailvision/openai-api-key \
+  retailvision/grafana-admin-password
+do
+  aws secretsmanager delete-secret \
+    --region eu-west-1 \
+    --secret-id "$s" \
+    --force-delete-without-recovery 2>/dev/null || true
+done
+```
+
+Then rerun:
+
+```bash
+terraform apply eks.tfplan
+```
 
 ### Clean reinstall (fresh database)
 
