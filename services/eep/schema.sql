@@ -48,36 +48,9 @@ CREATE TABLE store_members (
     user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     store_id     UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     role         VARCHAR(20) NOT NULL CHECK (role IN ('manager', 'viewer')),
-    access_scope VARCHAR(20) NOT NULL DEFAULT 'full_store'
-                 CHECK (access_scope IN ('full_store', 'section_scoped')),
     invited_by   UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT one_membership_per_user_per_store UNIQUE (user_id, store_id)
-);
-
--- sections here so store_member_sections can reference it directly
-CREATE TABLE sections (
-    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_id      UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    name          VARCHAR(255) NOT NULL,
-    type          VARCHAR(30) NOT NULL DEFAULT 'floor'
-                  CHECK (type IN ('floor', 'wing', 'outdoor', 'warehouse', 'other')),
-    display_order INTEGER NOT NULL DEFAULT 0,
-    is_default    BOOLEAN NOT NULL DEFAULT FALSE,
-    status        VARCHAR(20) NOT NULL DEFAULT 'active'
-                  CHECK (status IN ('active', 'inactive')),
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT one_default_section_per_store
-        UNIQUE (store_id, is_default)
-        DEFERRABLE INITIALLY DEFERRED
-);
-
-CREATE TABLE store_member_sections (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_member_id UUID NOT NULL REFERENCES store_members(id) ON DELETE CASCADE,
-    section_id      UUID NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
-    CONSTRAINT unique_member_section UNIQUE (store_member_id, section_id)
 );
 
 CREATE TABLE store_member_permissions (
@@ -98,9 +71,6 @@ CREATE TABLE invitations (
     store_id      UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     invited_email VARCHAR(255) NOT NULL,
     role          VARCHAR(20) NOT NULL CHECK (role IN ('manager', 'viewer')),
-    access_scope  VARCHAR(20) NOT NULL DEFAULT 'full_store'
-                  CHECK (access_scope IN ('full_store', 'section_scoped')),
-    section_ids   JSONB NOT NULL DEFAULT '[]',
     permissions   JSONB NOT NULL DEFAULT '{}',
     token         VARCHAR(255) UNIQUE NOT NULL,
     invited_by    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -181,13 +151,13 @@ CREATE UNIQUE INDEX one_active_per_store
 
 CREATE TABLE coordinate_frames (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    section_id         UUID NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+    store_id           UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     version_id         UUID NOT NULL REFERENCES store_config_versions(id) ON DELETE CASCADE,
     origin_description TEXT,
     x_axis_description TEXT,
     units              VARCHAR(20) NOT NULL DEFAULT 'meters',
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT unique_frame_per_section_version UNIQUE (section_id, version_id)
+    CONSTRAINT unique_frame_per_version UNIQUE (version_id, store_id)
 );
 
 -- ============================================================================
@@ -198,7 +168,7 @@ CREATE TABLE coordinate_frames (
 CREATE TABLE floor_plans (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     version_id          UUID NOT NULL REFERENCES store_config_versions(id) ON DELETE CASCADE,
-    section_id          UUID NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+    store_id            UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     onboarding_method   VARCHAR(20) NOT NULL
                         CHECK (onboarding_method IN ('standard', 'calibration_files')),
     original_s3_key     VARCHAR(500),
@@ -218,7 +188,7 @@ CREATE TABLE floor_plans (
     coordinate_frame_id UUID REFERENCES coordinate_frames(id) ON DELETE SET NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT unique_floor_plan_per_section_version UNIQUE (version_id, section_id),
+    CONSTRAINT unique_floor_plan_per_version UNIQUE (version_id, store_id),
     CONSTRAINT method1_requires_image
         CHECK (onboarding_method != 'standard' OR (
             NOT image_uploaded OR (
@@ -238,7 +208,7 @@ CREATE TABLE floor_plans (
 CREATE TABLE zones (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     version_id              UUID NOT NULL REFERENCES store_config_versions(id) ON DELETE CASCADE,
-    section_id              UUID NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+    store_id                UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     name                    VARCHAR(255) NOT NULL,
     type                    VARCHAR(30) NOT NULL
                             CHECK (type IN (
@@ -251,13 +221,13 @@ CREATE TABLE zones (
     staff_absence_minutes   INTEGER,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT zone_name_unique_per_section_version UNIQUE (version_id, section_id, name)
+    CONSTRAINT zone_name_unique_per_version UNIQUE (version_id, store_id, name)
 );
 
 CREATE TABLE obstacles (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     version_id UUID NOT NULL REFERENCES store_config_versions(id) ON DELETE CASCADE,
-    section_id UUID NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+    store_id   UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     name       VARCHAR(255),
     points     JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -293,7 +263,7 @@ CREATE TABLE camera_configs (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     version_id          UUID NOT NULL REFERENCES store_config_versions(id) ON DELETE CASCADE,
     physical_camera_id  UUID NOT NULL REFERENCES physical_cameras(id) ON DELETE CASCADE,
-    section_id          UUID NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+    store_id            UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     position_x          FLOAT NOT NULL,
     position_y          FLOAT NOT NULL,
     height_meters       FLOAT,
@@ -351,22 +321,13 @@ CREATE TABLE employees (
                          CHECK (break_status IN ('none', 'on_break')),
     break_started_at     TIMESTAMPTZ,
     last_seen_at         TIMESTAMPTZ,
-    last_seen_section_id UUID REFERENCES sections(id) ON DELETE SET NULL,
+    last_seen_zone_id    UUID REFERENCES zones(id) ON DELETE SET NULL,
     is_active            BOOLEAN NOT NULL DEFAULT TRUE,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT unique_employee_code_per_store
         UNIQUE (store_id, employee_code)
         DEFERRABLE INITIALLY DEFERRED
-);
-
-CREATE TABLE employee_sections (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    employee_id UUID NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
-    section_id  UUID NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
-    is_primary  BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT unique_employee_section UNIQUE (employee_id, section_id)
 );
 
 CREATE TABLE employee_embeddings (
@@ -386,7 +347,6 @@ CREATE TABLE employee_embeddings (
 CREATE TABLE shift_patterns (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     employee_id        UUID NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
-    section_id         UUID NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
     day_of_week        SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
     start_time         TIME NOT NULL,
     end_time           TIME NOT NULL,
@@ -400,7 +360,6 @@ CREATE TABLE shift_patterns (
 CREATE TABLE shift_instances (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     employee_id        UUID NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
-    section_id         UUID NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
     shift_pattern_id   UUID REFERENCES shift_patterns(id) ON DELETE SET NULL,
     scheduled_start    TIMESTAMPTZ NOT NULL,
     scheduled_end      TIMESTAMPTZ NOT NULL,
@@ -437,7 +396,6 @@ CREATE TABLE alerts (
                     'camera_offline', 'camera_degraded'
                 )),
     employee_id UUID REFERENCES employees(id) ON DELETE SET NULL,
-    section_id  UUID REFERENCES sections(id) ON DELETE SET NULL,
     zone_id     UUID REFERENCES zones(id) ON DELETE SET NULL,
     details     JSONB,
     resolved_at TIMESTAMPTZ,
@@ -601,7 +559,6 @@ CREATE INDEX idx_users_email            ON users(email);
 CREATE INDEX idx_users_account_type     ON users(account_type);
 CREATE INDEX idx_store_members_user_id  ON store_members(user_id);
 CREATE INDEX idx_store_members_store_id ON store_members(store_id);
-CREATE INDEX idx_member_sections_member ON store_member_sections(store_member_id);
 CREATE INDEX idx_invitations_token      ON invitations(token);
 CREATE INDEX idx_invitations_store_id   ON invitations(store_id);
 CREATE INDEX idx_invitations_email      ON invitations(invited_email);
@@ -616,8 +573,6 @@ CREATE INDEX idx_audit_logs_entity      ON audit_logs(entity_type, entity_id);
 CREATE INDEX idx_stores_slug          ON stores(slug);
 CREATE INDEX idx_stores_status        ON stores(status);
 CREATE INDEX idx_stores_created_by    ON stores(created_by);
-CREATE INDEX idx_sections_store_id    ON sections(store_id);
-CREATE INDEX idx_sections_status      ON sections(store_id, status);
 CREATE INDEX idx_versions_store_id    ON store_config_versions(store_id);
 CREATE INDEX idx_versions_status      ON store_config_versions(store_id, status);
 CREATE INDEX idx_versions_active_from ON store_config_versions(active_from DESC);
@@ -626,12 +581,12 @@ CREATE INDEX idx_versions_expires_at  ON store_config_versions(expires_at)
 
 -- Domain 3
 CREATE INDEX idx_floor_plans_version_id ON floor_plans(version_id);
-CREATE INDEX idx_floor_plans_section_id ON floor_plans(section_id);
+CREATE INDEX idx_floor_plans_store_id   ON floor_plans(store_id);
 CREATE INDEX idx_zones_version_id       ON zones(version_id);
-CREATE INDEX idx_zones_section_id       ON zones(section_id);
+CREATE INDEX idx_zones_store_id         ON zones(store_id);
 CREATE INDEX idx_zones_type             ON zones(version_id, type);
 CREATE INDEX idx_obstacles_version_id   ON obstacles(version_id);
-CREATE INDEX idx_obstacles_section_id   ON obstacles(section_id);
+CREATE INDEX idx_obstacles_store_id     ON obstacles(store_id);
 
 -- Domain 4
 CREATE INDEX idx_physical_cameras_store_id   ON physical_cameras(store_id);
@@ -639,7 +594,7 @@ CREATE INDEX idx_physical_cameras_active     ON physical_cameras(store_id, is_ac
 CREATE INDEX idx_physical_cameras_health     ON physical_cameras(health_status);
 CREATE INDEX idx_camera_configs_version_id   ON camera_configs(version_id);
 CREATE INDEX idx_camera_configs_physical_id  ON camera_configs(physical_camera_id);
-CREATE INDEX idx_camera_configs_section_id   ON camera_configs(section_id);
+CREATE INDEX idx_camera_configs_store_id     ON camera_configs(store_id);
 CREATE INDEX idx_camera_configs_status       ON camera_configs(version_id, status);
 CREATE INDEX idx_camera_zone_coverage_camera ON camera_zone_coverage(camera_config_id);
 CREATE INDEX idx_camera_zone_coverage_zone   ON camera_zone_coverage(zone_id);
@@ -648,8 +603,7 @@ CREATE INDEX idx_camera_zone_coverage_zone   ON camera_zone_coverage(zone_id);
 CREATE INDEX idx_employees_store_id       ON employees(store_id);
 CREATE INDEX idx_employees_active         ON employees(store_id, is_active);
 CREATE INDEX idx_employees_on_shift       ON employees(store_id, is_on_shift) WHERE is_on_shift = TRUE;
-CREATE INDEX idx_employee_sections_emp    ON employee_sections(employee_id);
-CREATE INDEX idx_employee_sections_sec    ON employee_sections(section_id);
+CREATE INDEX idx_employees_last_zone      ON employees(last_seen_zone_id) WHERE last_seen_zone_id IS NOT NULL;
 CREATE INDEX idx_embeddings_employee      ON employee_embeddings(employee_id);
 CREATE INDEX idx_embeddings_active        ON employee_embeddings(employee_id, is_active) WHERE is_active = TRUE;
 CREATE INDEX idx_embeddings_source        ON employee_embeddings(source, captured_at DESC);
@@ -671,7 +625,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_current_per_camera_config
 CREATE INDEX idx_calibrations_current       ON calibrations(camera_config_id, is_current) WHERE is_current = TRUE;
 CREATE INDEX idx_calibrations_status        ON calibrations(status);
 CREATE INDEX idx_calibrations_method        ON calibrations(method, status);
-CREATE INDEX idx_coordinate_frames_section  ON coordinate_frames(section_id, version_id);
+CREATE INDEX idx_coordinate_frames_version  ON coordinate_frames(version_id, store_id);
 
 -- Domain 7
 CREATE INDEX idx_version_sync_store     ON version_sync_events(store_id, status);

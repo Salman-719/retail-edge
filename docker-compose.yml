@@ -12,7 +12,11 @@ services:
   # ─── Infrastructure ───────────────────────────────────────────────────────────
 
   postgres:
-    image: postgres:16-alpine
+    # TimescaleDB drop-in replacement for postgres:16-alpine (SPEC-000).
+    # Same PG16 engine; bundles the timescaledb shared library and sets
+    # shared_preload_libraries on first init. Pinned — never use :latest or
+    # the -ha (HA clustering) variant. Requires a fresh data volume.
+    image: timescale/timescaledb:2.14.2-pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-retailvision}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-retailvision_dev}

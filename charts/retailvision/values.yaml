@@ -48,6 +48,18 @@ redis:
   tls: true
   maxmemory: "512mb"
 
+# SPEC-000: TimescaleDB is a hard dependency of the analytics pipeline.
+# When the Kubernetes/Postgres migration begins, the Postgres image MUST be
+# the TimescaleDB build (drop-in for postgres:16), not stock postgres:16:
+#   postgres:
+#     image:
+#       repository: timescale/timescaledb
+#       tag: "2.14.2-pg16"   # pinned; never :latest, never the -ha variant
+# The community TimescaleDB Helm chart
+# (https://github.com/timescale/timescaledb-kubernetes) is an alternative.
+# `CREATE EXTENSION timescaledb CASCADE` is bootstrapped by Alembic 0001, so
+# no chart-level extension hook is required once the image is correct.
+
 secrets:
   # Injected by external-secrets from secrets manager.
   # Values are secret manager paths, not plaintext secrets.

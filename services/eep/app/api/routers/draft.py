@@ -20,7 +20,6 @@ from app.models.camera_config import CameraConfig
 from app.models.floor_plan import FloorPlan
 from app.models.obstacle import Obstacle
 from app.models.physical_camera import PhysicalCamera
-from app.models.section import Section
 from app.models.version import StoreConfigVersion
 from app.models.version_sync_event import VersionSyncEvent
 from app.models.zone import Zone
@@ -31,7 +30,6 @@ from app.schemas.draft import (
     CameraIntrinsicsResponse,
     CreateCameraRequest,
     CreateDraftRequest,
-    CreateSectionRequest,
     DraftVersionResponse,
     FloorPlanDetailResponse,
     FloorPlanUploadResponse,
@@ -46,11 +44,9 @@ from app.schemas.draft import (
     PnpRequest,
     ProjectPointRequest,
     ProjectPointResponse,
-    PatchSectionRequest,
     PhysicalCameraResponse,
     PlaceCameraConfigRequest,
     ScaleRequest,
-    SectionResponse,
     SyncEventResponse,
     TpsCalibrationResponse,
     TpsRequest,
@@ -79,17 +75,17 @@ _logger = _log.getLogger(__name__)
 
 async def _get_floor_plan_scale(
     version_id: uuid.UUID,
-    section_id: uuid.UUID,
+    store_id: uuid.UUID,
     db: AsyncSession,
 ) -> FloorPlan:
-    """Load the floor plan for (version_id, section_id) and assert scale_defined.
+    """Load the floor plan for (version_id, store_id) and assert scale_defined.
 
     Raises HTTP 422 if the floor plan is missing or scale is not yet defined.
     """
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == version_id,
-            FloorPlan.section_id == section_id,
+            FloorPlan.store_id == store_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -176,7 +172,7 @@ async def _camera_config_response(
         version_id=cc.version_id,
         physical_camera_id=cc.physical_camera_id,
         physical_camera_name=pc.name,
-        section_id=cc.section_id,
+        store_id=cc.store_id,
         position_x=pos_x,
         position_y=pos_y,
         height_meters=cc.height_meters,
@@ -223,162 +219,157 @@ async def _clone_active_into_draft(draft_id: uuid.UUID, store_id: uuid.UUID, db:
     if not active:
         return
 
-    sections_result = await db.execute(
-        select(Section).where(Section.store_id == store_id, Section.status == "active")
+    # SPEC-00A: flattened — clone the single floor plan, then all zones,
+    # obstacles, and camera configs (with calibrations) directly. No section loop.
+    fp_result = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == active.id,
+            FloorPlan.store_id == store_id,
+        )
     )
-    sections = sections_result.scalars().all()
+    fp = fp_result.scalar_one_or_none()
+    if fp:
+        new_display_key = None
+        new_original_key = None
+        if fp.display_s3_key:
+            ext = fp.display_s3_key.rsplit(".", 1)[-1]
+            new_display_key = f"floor-plans/{store_id}/{uuid.uuid4()}.{ext}"
+            try:
+                s3_client.copy_object(fp.display_s3_key, new_display_key)
+            except Exception:
+                new_display_key = fp.display_s3_key
+        if fp.original_s3_key and fp.original_s3_key != fp.display_s3_key:
+            ext = fp.original_s3_key.rsplit(".", 1)[-1]
+            new_original_key = f"floor-plans/{store_id}/{uuid.uuid4()}.{ext}"
+            try:
+                s3_client.copy_object(fp.original_s3_key, new_original_key)
+            except Exception:
+                new_original_key = fp.original_s3_key
+        else:
+            new_original_key = new_display_key
+        db.add(FloorPlan(
+            version_id=draft_id,
+            store_id=store_id,
+            onboarding_method=fp.onboarding_method,
+            original_s3_key=new_original_key,
+            display_s3_key=new_display_key,
+            width_px=fp.width_px,
+            height_px=fp.height_px,
+            origin_x=fp.origin_x,
+            origin_y=fp.origin_y,
+            pixels_per_meter=fp.pixels_per_meter,
+            world_x_min=fp.world_x_min,
+            world_x_max=fp.world_x_max,
+            world_y_min=fp.world_y_min,
+            world_y_max=fp.world_y_max,
+            image_uploaded=fp.image_uploaded,
+            scale_defined=fp.scale_defined,
+        ))
 
-    for section in sections:
-        fp_result = await db.execute(
-            select(FloorPlan).where(
-                FloorPlan.version_id == active.id,
-                FloorPlan.section_id == section.id,
-            )
+    zones_result = await db.execute(
+        select(Zone).where(Zone.version_id == active.id)
+    )
+    for zone in zones_result.scalars().all():
+        db.add(Zone(
+            version_id=draft_id,
+            store_id=store_id,
+            name=zone.name,
+            type=zone.type,
+            points=zone.points,
+            queue_threshold_people=zone.queue_threshold_people,
+            queue_threshold_minutes=zone.queue_threshold_minutes,
+            staff_absence_minutes=zone.staff_absence_minutes,
+        ))
+
+    obstacles_result = await db.execute(
+        select(Obstacle).where(Obstacle.version_id == active.id)
+    )
+    for obs in obstacles_result.scalars().all():
+        db.add(Obstacle(
+            version_id=draft_id,
+            store_id=store_id,
+            name=obs.name,
+            points=obs.points,
+        ))
+
+    ccs_result = await db.execute(
+        select(CameraConfig).where(
+            CameraConfig.version_id == active.id,
+        ).order_by(CameraConfig.created_at.asc())
+    )
+    for cc in ccs_result.scalars().all():
+        new_frame_key = None
+        if cc.frame_s3_key:
+            ext = cc.frame_s3_key.rsplit(".", 1)[-1]
+            new_frame_key = f"camera-frames/{store_id}/{uuid.uuid4()}/{uuid.uuid4()}.{ext}"
+            try:
+                s3_client.copy_object(cc.frame_s3_key, new_frame_key)
+            except Exception:
+                new_frame_key = cc.frame_s3_key
+        new_cc = CameraConfig(
+            version_id=draft_id,
+            physical_camera_id=cc.physical_camera_id,
+            store_id=store_id,
+            position_x=cc.position_x,
+            position_y=cc.position_y,
+            height_meters=cc.height_meters,
+            fov_deg=cc.fov_deg,
+            frame_s3_key=new_frame_key,
+            frame_captured_at=cc.frame_captured_at,
+            frame_source=cc.frame_source,
+            status=cc.status,
         )
-        fp = fp_result.scalar_one_or_none()
-        if fp:
-            new_display_key = None
-            new_original_key = None
-            if fp.display_s3_key:
-                ext = fp.display_s3_key.rsplit(".", 1)[-1]
-                new_display_key = f"floor-plans/{store_id}/{section.id}/{uuid.uuid4()}.{ext}"
+        db.add(new_cc)
+        await db.flush()
+
+        cals_result = await db.execute(
+            select(Calibration)
+            .where(Calibration.camera_config_id == cc.id)
+            .order_by(Calibration.created_at.asc())
+        )
+        for cal in cals_result.scalars().all():
+            new_intrinsic_key = None
+            new_extrinsic_key = None
+            if cal.intrinsic_file_s3_key:
+                new_intrinsic_key = f"calibration-files/{store_id}/{new_cc.id}/intrinsic.xml"
                 try:
-                    s3_client.copy_object(fp.display_s3_key, new_display_key)
+                    s3_client.copy_object(cal.intrinsic_file_s3_key, new_intrinsic_key)
                 except Exception:
-                    new_display_key = fp.display_s3_key
-            if fp.original_s3_key and fp.original_s3_key != fp.display_s3_key:
-                ext = fp.original_s3_key.rsplit(".", 1)[-1]
-                new_original_key = f"floor-plans/{store_id}/{section.id}/{uuid.uuid4()}.{ext}"
+                    new_intrinsic_key = cal.intrinsic_file_s3_key
+            if cal.extrinsic_file_s3_key:
+                new_extrinsic_key = f"calibration-files/{store_id}/{new_cc.id}/extrinsic.xml"
                 try:
-                    s3_client.copy_object(fp.original_s3_key, new_original_key)
+                    s3_client.copy_object(cal.extrinsic_file_s3_key, new_extrinsic_key)
                 except Exception:
-                    new_original_key = fp.original_s3_key
-            else:
-                new_original_key = new_display_key
-            db.add(FloorPlan(
-                version_id=draft_id,
-                section_id=section.id,
-                onboarding_method=fp.onboarding_method,
-                original_s3_key=new_original_key,
-                display_s3_key=new_display_key,
-                width_px=fp.width_px,
-                height_px=fp.height_px,
-                origin_x=fp.origin_x,
-                origin_y=fp.origin_y,
-                pixels_per_meter=fp.pixels_per_meter,
-                world_x_min=fp.world_x_min,
-                world_x_max=fp.world_x_max,
-                world_y_min=fp.world_y_min,
-                world_y_max=fp.world_y_max,
-                image_uploaded=fp.image_uploaded,
-                scale_defined=fp.scale_defined,
+                    new_extrinsic_key = cal.extrinsic_file_s3_key
+            db.add(Calibration(
+                camera_config_id=new_cc.id,
+                method=cal.method,
+                status=cal.status,
+                is_current=cal.is_current,
+                correspondences=cal.correspondences,
+                homography_matrix=cal.homography_matrix,
+                rms_reprojection_error=cal.rms_reprojection_error,
+                max_reprojection_error=cal.max_reprojection_error,
+                point_count=cal.point_count,
+                coverage_score=cal.coverage_score,
+                condition_number=cal.condition_number,
+                intrinsic_file_s3_key=new_intrinsic_key,
+                extrinsic_file_s3_key=new_extrinsic_key,
+                intrinsic_matrix=cal.intrinsic_matrix,
+                dist_coeffs=cal.dist_coeffs,
+                rotation_vector=cal.rotation_vector,
+                rotation_matrix=cal.rotation_matrix,
+                translation_vector=cal.translation_vector,
+                camera_world_x=cal.camera_world_x,
+                camera_world_y=cal.camera_world_y,
+                camera_world_z=cal.camera_world_z,
+                image_width=cal.image_width,
+                image_height=cal.image_height,
+                computed_at=cal.computed_at,
+                verified_at=cal.verified_at,
+                verified_by=cal.verified_by,
             ))
-
-        zones_result = await db.execute(
-            select(Zone).where(Zone.version_id == active.id, Zone.section_id == section.id)
-        )
-        for zone in zones_result.scalars().all():
-            db.add(Zone(
-                version_id=draft_id,
-                section_id=section.id,
-                name=zone.name,
-                type=zone.type,
-                points=zone.points,
-                queue_threshold_people=zone.queue_threshold_people,
-                queue_threshold_minutes=zone.queue_threshold_minutes,
-                staff_absence_minutes=zone.staff_absence_minutes,
-            ))
-
-        obstacles_result = await db.execute(
-            select(Obstacle).where(Obstacle.version_id == active.id, Obstacle.section_id == section.id)
-        )
-        for obs in obstacles_result.scalars().all():
-            db.add(Obstacle(
-                version_id=draft_id,
-                section_id=section.id,
-                name=obs.name,
-                points=obs.points,
-            ))
-
-        ccs_result = await db.execute(
-            select(CameraConfig).where(
-                CameraConfig.version_id == active.id,
-                CameraConfig.section_id == section.id,
-            ).order_by(CameraConfig.created_at.asc())
-        )
-        for cc in ccs_result.scalars().all():
-            new_frame_key = None
-            if cc.frame_s3_key:
-                ext = cc.frame_s3_key.rsplit(".", 1)[-1]
-                new_frame_key = f"camera-frames/{store_id}/{uuid.uuid4()}/{uuid.uuid4()}.{ext}"
-                try:
-                    s3_client.copy_object(cc.frame_s3_key, new_frame_key)
-                except Exception:
-                    new_frame_key = cc.frame_s3_key
-            new_cc = CameraConfig(
-                version_id=draft_id,
-                physical_camera_id=cc.physical_camera_id,
-                section_id=section.id,
-                position_x=cc.position_x,
-                position_y=cc.position_y,
-                height_meters=cc.height_meters,
-                fov_deg=cc.fov_deg,
-                frame_s3_key=new_frame_key,
-                frame_captured_at=cc.frame_captured_at,
-                frame_source=cc.frame_source,
-                status=cc.status,
-            )
-            db.add(new_cc)
-            await db.flush()
-
-            cals_result = await db.execute(
-                select(Calibration)
-                .where(Calibration.camera_config_id == cc.id)
-                .order_by(Calibration.created_at.asc())
-            )
-            for cal in cals_result.scalars().all():
-                new_intrinsic_key = None
-                new_extrinsic_key = None
-                if cal.intrinsic_file_s3_key:
-                    new_intrinsic_key = f"calibration-files/{store_id}/{new_cc.id}/intrinsic.xml"
-                    try:
-                        s3_client.copy_object(cal.intrinsic_file_s3_key, new_intrinsic_key)
-                    except Exception:
-                        new_intrinsic_key = cal.intrinsic_file_s3_key
-                if cal.extrinsic_file_s3_key:
-                    new_extrinsic_key = f"calibration-files/{store_id}/{new_cc.id}/extrinsic.xml"
-                    try:
-                        s3_client.copy_object(cal.extrinsic_file_s3_key, new_extrinsic_key)
-                    except Exception:
-                        new_extrinsic_key = cal.extrinsic_file_s3_key
-                db.add(Calibration(
-                    camera_config_id=new_cc.id,
-                    method=cal.method,
-                    status=cal.status,
-                    is_current=cal.is_current,
-                    correspondences=cal.correspondences,
-                    homography_matrix=cal.homography_matrix,
-                    rms_reprojection_error=cal.rms_reprojection_error,
-                    max_reprojection_error=cal.max_reprojection_error,
-                    point_count=cal.point_count,
-                    coverage_score=cal.coverage_score,
-                    condition_number=cal.condition_number,
-                    intrinsic_file_s3_key=new_intrinsic_key,
-                    extrinsic_file_s3_key=new_extrinsic_key,
-                    intrinsic_matrix=cal.intrinsic_matrix,
-                    dist_coeffs=cal.dist_coeffs,
-                    rotation_vector=cal.rotation_vector,
-                    rotation_matrix=cal.rotation_matrix,
-                    translation_vector=cal.translation_vector,
-                    camera_world_x=cal.camera_world_x,
-                    camera_world_y=cal.camera_world_y,
-                    camera_world_z=cal.camera_world_z,
-                    image_width=cal.image_width,
-                    image_height=cal.image_height,
-                    computed_at=cal.computed_at,
-                    verified_at=cal.verified_at,
-                    verified_by=cal.verified_by,
-                ))
 
 
 @router.post("/store/{slug}/versions/draft", response_model=DraftVersionResponse, status_code=201)
@@ -486,12 +477,11 @@ async def _cleanup_draft_s3(version_id: uuid.UUID, store_id: uuid.UUID, db: Asyn
 # ─── Floor Plan ───────────────────────────────────────────────────────────────
 
 @router.post(
-    "/store/{slug}/draft/sections/{section_id}/floor-plan/upload",
+    "/store/{slug}/draft/floor-plan/upload",
     response_model=FloorPlanUploadResponse,
 )
 async def upload_floor_plan(
     slug: str,
-    section_id: uuid.UUID,
     file: UploadFile = File(...),
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -505,7 +495,7 @@ async def upload_floor_plan(
     ext = (file.filename or "image.jpg").rsplit(".", 1)[-1].lower()
     if ext not in {"jpg", "jpeg", "png", "webp"}:
         ext = "jpg"
-    s3_key = f"floor-plans/{ctx.store_id}/{section_id}/{uuid.uuid4()}.{ext}"
+    s3_key = f"floor-plans/{ctx.store_id}/{uuid.uuid4()}.{ext}"
     content_type = file.content_type or "image/jpeg"
     s3_client.upload_bytes(content, s3_key, content_type)
 
@@ -513,7 +503,6 @@ async def upload_floor_plan(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -525,13 +514,12 @@ async def upload_floor_plan(
                 s3_client.delete_object(fp.display_s3_key)
             except Exception:
                 pass
-        # Cascade wipe: zones, obstacles, camera configs for this section/version
-        await db.execute(delete(Zone).where(Zone.version_id == draft.id, Zone.section_id == section_id))
-        await db.execute(delete(Obstacle).where(Obstacle.version_id == draft.id, Obstacle.section_id == section_id))
+        # Cascade wipe: zones, obstacles, camera configs for this version
+        await db.execute(delete(Zone).where(Zone.version_id == draft.id))
+        await db.execute(delete(Obstacle).where(Obstacle.version_id == draft.id))
         cc_result = await db.execute(
             select(CameraConfig).where(
                 CameraConfig.version_id == draft.id,
-                CameraConfig.section_id == section_id,
             )
         )
         for cc in cc_result.scalars().all():
@@ -543,7 +531,6 @@ async def upload_floor_plan(
         await db.execute(
             delete(CameraConfig).where(
                 CameraConfig.version_id == draft.id,
-                CameraConfig.section_id == section_id,
             )
         )
         fp.original_s3_key = s3_key
@@ -563,7 +550,7 @@ async def upload_floor_plan(
     else:
         fp = FloorPlan(
             version_id=draft.id,
-            section_id=section_id,
+            store_id=ctx.store_id,
             onboarding_method="standard",
             original_s3_key=s3_key,
             display_s3_key=s3_key,
@@ -581,7 +568,7 @@ async def upload_floor_plan(
     return FloorPlanUploadResponse(
         id=fp.id,
         version_id=fp.version_id,
-        section_id=fp.section_id,
+        store_id=fp.store_id,
         onboarding_method=fp.onboarding_method,
         display_url=display_url,
         width_px=fp.width_px,
@@ -592,12 +579,11 @@ async def upload_floor_plan(
 
 
 @router.get(
-    "/store/{slug}/draft/sections/{section_id}/floor-plan",
+    "/store/{slug}/draft/floor-plan",
     response_model=FloorPlanDetailResponse,
 )
 async def get_draft_floor_plan(
     slug: str,
-    section_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):
@@ -605,7 +591,6 @@ async def get_draft_floor_plan(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -616,7 +601,7 @@ async def get_draft_floor_plan(
     return FloorPlanDetailResponse(
         id=fp.id,
         version_id=fp.version_id,
-        section_id=fp.section_id,
+        store_id=fp.store_id,
         onboarding_method=fp.onboarding_method,
         display_url=display_url,
         width_px=fp.width_px,
@@ -635,12 +620,11 @@ async def get_draft_floor_plan(
 
 
 @router.put(
-    "/store/{slug}/draft/sections/{section_id}/floor-plan/scale",
+    "/store/{slug}/draft/floor-plan/scale",
     response_model=FloorPlanDetailResponse,
 )
 async def set_floor_plan_scale(
     slug: str,
-    section_id: uuid.UUID,
     body: ScaleRequest,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -651,7 +635,6 @@ async def set_floor_plan_scale(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -687,7 +670,7 @@ async def set_floor_plan_scale(
 
     display_url = s3_client.generate_presigned_url_public(fp.display_s3_key) if fp.display_s3_key else None
     return FloorPlanDetailResponse(
-        id=fp.id, version_id=fp.version_id, section_id=fp.section_id,
+        id=fp.id, version_id=fp.version_id, store_id=fp.store_id,
         onboarding_method=fp.onboarding_method, display_url=display_url,
         width_px=fp.width_px, height_px=fp.height_px,
         origin_x=fp.origin_x, origin_y=fp.origin_y,
@@ -700,12 +683,11 @@ async def set_floor_plan_scale(
 
 
 @router.put(
-    "/store/{slug}/draft/sections/{section_id}/floor-plan/world-bounds",
+    "/store/{slug}/draft/floor-plan/world-bounds",
     response_model=FloorPlanDetailResponse,
 )
 async def set_floor_plan_boundary_polygon(
     slug: str,
-    section_id: uuid.UUID,
     body: WorldBoundsRequest,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -716,7 +698,6 @@ async def set_floor_plan_boundary_polygon(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -734,7 +715,7 @@ async def set_floor_plan_boundary_polygon(
 
     display_url = s3_client.generate_presigned_url_public(fp.display_s3_key) if fp.display_s3_key else None
     return FloorPlanDetailResponse(
-        id=fp.id, version_id=fp.version_id, section_id=fp.section_id,
+        id=fp.id, version_id=fp.version_id, store_id=fp.store_id,
         onboarding_method=fp.onboarding_method, display_url=display_url,
         width_px=fp.width_px, height_px=fp.height_px,
         origin_x=fp.origin_x, origin_y=fp.origin_y,
@@ -756,7 +737,7 @@ def _zone_to_response(zone: Zone, fp: FloorPlan | None) -> dict:
     return {
         "id": zone.id,
         "version_id": zone.version_id,
-        "section_id": zone.section_id,
+        "store_id": zone.store_id,
         "name": zone.name,
         "type": zone.type,
         "points": points,
@@ -768,22 +749,20 @@ def _zone_to_response(zone: Zone, fp: FloorPlan | None) -> dict:
     }
 
 
-@router.get("/store/{slug}/draft/sections/{section_id}/zones", response_model=list[ZoneResponse])
+@router.get("/store/{slug}/draft/zones", response_model=list[ZoneResponse])
 async def list_draft_zones(
     slug: str,
-    section_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):
     draft = await _require_draft(ctx.store_id, db)
     result = await db.execute(
-        select(Zone).where(Zone.version_id == draft.id, Zone.section_id == section_id)
+        select(Zone).where(Zone.version_id == draft.id)
     )
     zones = result.scalars().all()
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -791,13 +770,12 @@ async def list_draft_zones(
 
 
 @router.post(
-    "/store/{slug}/draft/sections/{section_id}/zones",
+    "/store/{slug}/draft/zones",
     response_model=ZoneResponse,
     status_code=201,
 )
 async def create_zone(
     slug: str,
-    section_id: uuid.UUID,
     body: ZoneCreate,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -809,7 +787,6 @@ async def create_zone(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -827,11 +804,10 @@ async def create_zone(
                 detail={"error": f"Point {point} is outside floor plan bounds ({fp.width_px}x{fp.height_px})", "code": "POINT_OUT_OF_BOUNDS"},
             )
 
-    # Check for name uniqueness within this section/version
+    # Check for name uniqueness within this version
     existing_name = await db.execute(
         select(Zone).where(
             Zone.version_id == draft.id,
-            Zone.section_id == section_id,
             Zone.name == body.name,
         )
     )
@@ -843,7 +819,7 @@ async def create_zone(
 
     # Check polygon overlap with existing zones (comparison in world metres — consistent).
     existing_zones = await db.execute(
-        select(Zone).where(Zone.version_id == draft.id, Zone.section_id == section_id)
+        select(Zone).where(Zone.version_id == draft.id)
     )
     for existing in existing_zones.scalars().all():
         if polygons_overlap(world_points, existing.points):
@@ -854,7 +830,7 @@ async def create_zone(
 
     zone = Zone(
         version_id=draft.id,
-        section_id=section_id,
+        store_id=ctx.store_id,
         name=body.name,
         type=body.type,
         points=world_points,
@@ -869,12 +845,11 @@ async def create_zone(
 
 
 @router.put(
-    "/store/{slug}/draft/sections/{section_id}/zones/{zone_id}",
+    "/store/{slug}/draft/zones/{zone_id}",
     response_model=ZoneResponse,
 )
 async def update_zone(
     slug: str,
-    section_id: uuid.UUID,
     zone_id: uuid.UUID,
     body: ZoneUpdate,
     ctx: StoreContext = Depends(get_store_context),
@@ -887,7 +862,6 @@ async def update_zone(
         select(Zone).where(
             Zone.id == zone_id,
             Zone.version_id == draft.id,
-            Zone.section_id == section_id,
         )
     )
     zone = result.scalar_one_or_none()
@@ -901,7 +875,6 @@ async def update_zone(
         fp_result = await db.execute(
             select(FloorPlan).where(
                 FloorPlan.version_id == draft.id,
-                FloorPlan.section_id == section_id,
             )
         )
         fp = fp_result.scalar_one_or_none()
@@ -920,7 +893,6 @@ async def update_zone(
         existing_zones = await db.execute(
             select(Zone).where(
                 Zone.version_id == draft.id,
-                Zone.section_id == section_id,
                 Zone.id != zone_id,
             )
         )
@@ -950,10 +922,9 @@ async def update_zone(
     return _zone_to_response(zone, fp)
 
 
-@router.delete("/store/{slug}/draft/sections/{section_id}/zones/{zone_id}", status_code=204)
+@router.delete("/store/{slug}/draft/zones/{zone_id}", status_code=204)
 async def delete_zone(
     slug: str,
-    section_id: uuid.UUID,
     zone_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -964,7 +935,6 @@ async def delete_zone(
         delete(Zone).where(
             Zone.id == zone_id,
             Zone.version_id == draft.id,
-            Zone.section_id == section_id,
         )
     )
     await db.commit()
@@ -972,28 +942,26 @@ async def delete_zone(
 
 # ─── Obstacles ────────────────────────────────────────────────────────────────
 
-@router.get("/store/{slug}/draft/sections/{section_id}/obstacles", response_model=list[ObstacleResponse])
+@router.get("/store/{slug}/draft/obstacles", response_model=list[ObstacleResponse])
 async def list_draft_obstacles(
     slug: str,
-    section_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):
     draft = await _require_draft(ctx.store_id, db)
     result = await db.execute(
-        select(Obstacle).where(Obstacle.version_id == draft.id, Obstacle.section_id == section_id)
+        select(Obstacle).where(Obstacle.version_id == draft.id)
     )
     return result.scalars().all()
 
 
 @router.post(
-    "/store/{slug}/draft/sections/{section_id}/obstacles",
+    "/store/{slug}/draft/obstacles",
     response_model=ObstacleResponse,
     status_code=201,
 )
 async def create_obstacle(
     slug: str,
-    section_id: uuid.UUID,
     body: ObstacleCreate,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -1002,7 +970,7 @@ async def create_obstacle(
     _require_draft_access(draft, ctx)
     obstacle = Obstacle(
         version_id=draft.id,
-        section_id=section_id,
+        store_id=ctx.store_id,
         name=body.name,
         points=body.points,
     )
@@ -1013,12 +981,11 @@ async def create_obstacle(
 
 
 @router.put(
-    "/store/{slug}/draft/sections/{section_id}/obstacles/{obstacle_id}",
+    "/store/{slug}/draft/obstacles/{obstacle_id}",
     response_model=ObstacleResponse,
 )
 async def update_obstacle(
     slug: str,
-    section_id: uuid.UUID,
     obstacle_id: uuid.UUID,
     body: ObstacleUpdate,
     ctx: StoreContext = Depends(get_store_context),
@@ -1031,7 +998,6 @@ async def update_obstacle(
         select(Obstacle).where(
             Obstacle.id == obstacle_id,
             Obstacle.version_id == draft.id,
-            Obstacle.section_id == section_id,
         )
     )
     obstacle = result.scalar_one_or_none()
@@ -1049,10 +1015,9 @@ async def update_obstacle(
     return obstacle
 
 
-@router.delete("/store/{slug}/draft/sections/{section_id}/obstacles/{obstacle_id}", status_code=204)
+@router.delete("/store/{slug}/draft/obstacles/{obstacle_id}", status_code=204)
 async def delete_obstacle(
     slug: str,
-    section_id: uuid.UUID,
     obstacle_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -1063,7 +1028,6 @@ async def delete_obstacle(
         delete(Obstacle).where(
             Obstacle.id == obstacle_id,
             Obstacle.version_id == draft.id,
-            Obstacle.section_id == section_id,
         )
     )
     await db.commit()
@@ -1235,12 +1199,11 @@ async def delete_camera(
 # ─── Camera Configs ───────────────────────────────────────────────────────────
 
 @router.get(
-    "/store/{slug}/draft/sections/{section_id}/camera-configs",
+    "/store/{slug}/draft/camera-configs",
     response_model=list[CameraConfigResponse],
 )
 async def list_draft_camera_configs(
     slug: str,
-    section_id: uuid.UUID,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1248,7 +1211,6 @@ async def list_draft_camera_configs(
     result = await db.execute(
         select(CameraConfig).where(
             CameraConfig.version_id == draft.id,
-            CameraConfig.section_id == section_id,
         ).order_by(CameraConfig.created_at.asc())
     )
     configs = result.scalars().all()
@@ -1256,7 +1218,6 @@ async def list_draft_camera_configs(
     fp_result = await db.execute(
         select(FloorPlan).where(
             FloorPlan.version_id == draft.id,
-            FloorPlan.section_id == section_id,
         )
     )
     fp = fp_result.scalar_one_or_none()
@@ -1264,13 +1225,12 @@ async def list_draft_camera_configs(
 
 
 @router.post(
-    "/store/{slug}/draft/sections/{section_id}/camera-configs",
+    "/store/{slug}/draft/camera-configs",
     response_model=CameraConfigResponse,
     status_code=201,
 )
 async def place_camera_config(
     slug: str,
-    section_id: uuid.UUID,
     body: PlaceCameraConfigRequest,
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
@@ -1303,11 +1263,11 @@ async def place_camera_config(
         )
 
     # Convert canvas pixels to world metres before storing.
-    fp = await _get_floor_plan_scale(draft.id, section_id, db)
+    fp = await _get_floor_plan_scale(draft.id, ctx.store_id, db)
     cc = CameraConfig(
         version_id=draft.id,
         physical_camera_id=body.physical_camera_id,
-        section_id=section_id,
+        store_id=ctx.store_id,
         position_x=(body.position_x - fp.origin_x) / fp.pixels_per_meter,
         position_y=(body.position_y - fp.origin_y) / fp.pixels_per_meter,
         height_meters=body.height_meters,
@@ -1348,7 +1308,7 @@ async def update_camera_config(
     # If position is being updated, convert canvas pixels → world metres.
     fp: FloorPlan | None = None
     if "position_x" in updates or "position_y" in updates:
-        fp = await _get_floor_plan_scale(draft.id, cc.section_id, db)
+        fp = await _get_floor_plan_scale(draft.id, ctx.store_id, db)
         if "position_x" in updates:
             updates["position_x"] = (updates["position_x"] - fp.origin_x) / fp.pixels_per_meter
         if "position_y" in updates:
@@ -1766,7 +1726,7 @@ async def compute_tps_calibration(
         seen.add(key)
 
     # Load floor plan scale for map_px → world metres conversion.
-    fp = await _get_floor_plan_scale(draft.id, cc.section_id, db)
+    fp = await _get_floor_plan_scale(draft.id, ctx.store_id, db)
 
     # Build corr_list with both pixel and world-metre values.
     corr_list = []
@@ -1937,7 +1897,6 @@ async def project_point(
         fp_result = await db.execute(
             select(FloorPlan).where(
                 FloorPlan.version_id == draft.id,
-                FloorPlan.section_id == cc.section_id,
             )
         )
         fp_row = fp_result.scalar_one_or_none()
@@ -2083,80 +2042,6 @@ async def verify_calibration(
     return cal
 
 
-# ─── Sections ─────────────────────────────────────────────────────────────────
-
-@router.post("/store/{slug}/sections", response_model=SectionResponse, status_code=201)
-async def create_section(
-    slug: str,
-    body: CreateSectionRequest,
-    ctx: StoreContext = Depends(get_store_context),
-    db: AsyncSession = Depends(get_db),
-):
-    require_owner_or_manager(ctx)
-    section = Section(
-        store_id=ctx.store_id,
-        name=body.name,
-        type=body.type,
-        display_order=body.display_order,
-        is_default=False,
-    )
-    db.add(section)
-    await db.commit()
-    await db.refresh(section)
-    return section
-
-
-@router.patch("/store/{slug}/sections/{section_id}", response_model=SectionResponse)
-async def patch_section(
-    slug: str,
-    section_id: uuid.UUID,
-    body: PatchSectionRequest,
-    ctx: StoreContext = Depends(get_store_context),
-    db: AsyncSession = Depends(get_db),
-):
-    require_owner_or_manager(ctx)
-    result = await db.execute(
-        select(Section).where(Section.id == section_id, Section.store_id == ctx.store_id)
-    )
-    section = result.scalar_one_or_none()
-    if not section:
-        raise HTTPException(status_code=404, detail={"error": "Section not found", "code": "NOT_FOUND"})
-
-    for field, value in body.model_dump(exclude_none=True).items():
-        setattr(section, field, value)
-    section.updated_at = datetime.now(timezone.utc)
-
-    await db.commit()
-    await db.refresh(section)
-    return section
-
-
-@router.delete("/store/{slug}/sections/{section_id}", status_code=204)
-async def delete_section(
-    slug: str,
-    section_id: uuid.UUID,
-    ctx: StoreContext = Depends(get_store_context),
-    db: AsyncSession = Depends(get_db),
-):
-    require_owner_or_manager(ctx)
-    result = await db.execute(
-        select(Section).where(
-            Section.id == section_id,
-            Section.store_id == ctx.store_id,
-            Section.is_default == False,
-        )
-    )
-    section = result.scalar_one_or_none()
-    if not section:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": "Section not found or is the default section", "code": "NOT_FOUND"},
-        )
-    section.status = "inactive"
-    section.updated_at = datetime.now(timezone.utc)
-    await db.commit()
-
-
 # ─── Activation ───────────────────────────────────────────────────────────────
 
 @router.post("/store/{slug}/versions/draft/activate", response_model=VersionActivateResponse, status_code=202)
@@ -2170,28 +2055,18 @@ async def activate_draft(
     draft = await _require_draft(ctx.store_id, db)
     _require_draft_access(draft, ctx)
 
-    # Pre-activation checklist: at least one section must have a floor plan uploaded.
-    sections_result = await db.execute(
-        select(Section).where(Section.store_id == ctx.store_id, Section.status == "active")
+    # Pre-activation checklist: the store's floor plan must be uploaded.
+    fp_r = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == draft.id,
+            FloorPlan.store_id == ctx.store_id,
+            FloorPlan.image_uploaded == True,
+        ).limit(1)
     )
-    sections = sections_result.scalars().all()
-    has_floor_plan = False
-    for section in sections:
-        fp_r = await db.execute(
-            select(FloorPlan).where(
-                FloorPlan.version_id == draft.id,
-                FloorPlan.section_id == section.id,
-                FloorPlan.image_uploaded == True,
-            ).limit(1)
-        )
-        if fp_r.scalars().first():
-            has_floor_plan = True
-            break
-
-    if not has_floor_plan:
+    if not fp_r.scalars().first():
         raise HTTPException(
             status_code=422,
-            detail={"error": "At least one floor plan must be uploaded", "code": "NO_FLOOR_PLAN"},
+            detail={"error": "A floor plan must be uploaded", "code": "NO_FLOOR_PLAN"},
         )
 
     # Checklist: at least one camera config must be verified.

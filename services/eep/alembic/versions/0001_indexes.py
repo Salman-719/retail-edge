@@ -25,6 +25,15 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # SPEC-000: TimescaleDB extension bootstrap. Must run before any spec that
+    # creates hypertables. IF NOT EXISTS keeps this idempotent across replays.
+    # CASCADE pulls in any required dependencies. Runs first so it precedes the
+    # CONCURRENTLY index ops below; safe under AUTOCOMMIT (each statement is its
+    # own transaction, satisfying TimescaleDB's "first statement" guidance).
+    # The image sets shared_preload_libraries; retailvision is a bootstrap
+    # superuser, so no privilege escalation is needed.
+    op.execute(sa.text("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE"))
+
     # Drop non-partial versions that schema.sql may have created.
     # CONCURRENTLY + IF EXISTS is safe under AUTOCOMMIT.
     op.execute(sa.text(

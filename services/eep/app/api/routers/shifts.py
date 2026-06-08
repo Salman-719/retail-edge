@@ -10,7 +10,6 @@ from app.core.audit import write_audit_log
 from app.core.database import get_db
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
 from app.models.employee import Employee
-from app.models.section import Section
 from app.models.shift_pattern import ShiftPattern
 from app.models.shift_instance import BreakRecord, ShiftAssignment, ShiftInstance
 from app.schemas.shifts import (
@@ -42,16 +41,6 @@ async def _get_employee_or_404(employee_id: uuid.UUID, store_id: uuid.UUID, db: 
     if not emp:
         raise HTTPException(status_code=404, detail={"error": "Employee not found in this store", "code": "EMPLOYEE_NOT_FOUND"})
     return emp
-
-
-async def _get_section_or_404(section_id: uuid.UUID, store_id: uuid.UUID, db: AsyncSession) -> Section:
-    result = await db.execute(
-        select(Section).where(Section.id == section_id, Section.store_id == store_id)
-    )
-    s = result.scalar_one_or_none()
-    if not s:
-        raise HTTPException(status_code=404, detail={"error": "Section not found in this store", "code": "SECTION_NOT_FOUND"})
-    return s
 
 
 async def _get_pattern_or_404(pattern_id: uuid.UUID, store_id: uuid.UUID, db: AsyncSession) -> ShiftPattern:
@@ -137,7 +126,6 @@ async def create_shift_pattern(
 ):
     require_owner_or_manager(ctx)
     await _get_employee_or_404(body.employee_id, ctx.store_id, db)
-    await _get_section_or_404(body.section_id, ctx.store_id, db)
 
     # Check for overlapping active pattern on the same employee + day
     existing_result = await db.execute(
@@ -162,7 +150,6 @@ async def create_shift_pattern(
 
     pattern = ShiftPattern(
         employee_id=body.employee_id,
-        section_id=body.section_id,
         day_of_week=body.day_of_week,
         start_time=body.start_time,
         end_time=body.end_time,
@@ -279,14 +266,12 @@ async def create_shift(
 ):
     require_owner_or_manager(ctx)
     await _get_employee_or_404(body.employee_id, ctx.store_id, db)
-    await _get_section_or_404(body.section_id, ctx.store_id, db)
 
     if body.shift_pattern_id is not None:
         await _get_pattern_or_404(body.shift_pattern_id, ctx.store_id, db)
 
     shift = ShiftInstance(
         employee_id=body.employee_id,
-        section_id=body.section_id,
         shift_pattern_id=body.shift_pattern_id,
         scheduled_start=body.scheduled_start,
         scheduled_end=body.scheduled_end,
@@ -644,7 +629,6 @@ async def generate_shifts_from_patterns(
 
             shift = ShiftInstance(
                 employee_id=pattern.employee_id,
-                section_id=pattern.section_id,
                 shift_pattern_id=pattern.id,
                 scheduled_start=scheduled_start,
                 scheduled_end=scheduled_end,

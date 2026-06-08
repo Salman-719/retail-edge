@@ -11,8 +11,8 @@ class CoordinateFrame(Base):
     __tablename__ = "coordinate_frames"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    section_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("sections.id", ondelete="CASCADE"), nullable=False
+    store_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False
     )
     version_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("store_config_versions.id", ondelete="CASCADE"), nullable=False

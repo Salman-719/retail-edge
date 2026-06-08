@@ -31,7 +31,6 @@ class StoreListItem(BaseModel):
     slug: str
     status: str
     active_version_label: str | None = None
-    section_count: int = 0
     camera_count: int = 0
 
 

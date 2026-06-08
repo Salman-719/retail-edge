@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
@@ -11,7 +11,6 @@ from app.core.auth import get_current_user_payload
 from app.core.database import get_db
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
 from app.models.alert_config import AlertConfig
-from app.models.section import Section
 from app.models.store import Store
 from app.models.store_settings import StoreSettings
 from app.schemas.store import CreateStoreRequest, PatchStoreRequest, StoreDetail, StoreListItem
@@ -33,10 +32,6 @@ async def list_stores(
 
     items = []
     for s in stores:
-        sec_count_result = await db.execute(
-            select(func.count()).select_from(Section).where(Section.store_id == s.id, Section.status == "active")
-        )
-        sec_count = sec_count_result.scalar() or 0
         items.append(
             StoreListItem(
                 id=s.id,
@@ -44,7 +39,6 @@ async def list_stores(
                 slug=s.slug,
                 status=s.status,
                 active_version_label=None,  # populated in Phase 2
-                section_count=sec_count,
                 camera_count=0,  # populated in Phase 2
             )
         )
@@ -75,10 +69,6 @@ async def create_store(
     )
     db.add(store)
     await db.flush()
-
-    # Auto-create default section
-    section = Section(store_id=store.id, name="Main Floor", type="floor", is_default=True, display_order=0)
-    db.add(section)
 
     # Auto-create store_settings with defaults
     db.add(StoreSettings(store_id=store.id))

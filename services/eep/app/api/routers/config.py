@@ -14,7 +14,6 @@ from app.models.camera_config import CameraConfig
 from app.models.floor_plan import FloorPlan
 from app.models.obstacle import Obstacle
 from app.models.physical_camera import PhysicalCamera
-from app.models.section import Section
 from app.models.version import StoreConfigVersion
 from app.models.version_sync_event import VersionSyncEvent
 from app.models.zone import Zone
@@ -24,26 +23,11 @@ from app.schemas.config import (
     FloorPlanResponse,
     ObstacleResponse,
     PhysicalCameraResponse,
-    SectionResponse,
-    SectionWithConfig,
     VersionListItem,
     ZoneResponse,
 )
 
 router = APIRouter(tags=["config"])
-
-
-@router.get("/store/{slug}/sections", response_model=list[SectionResponse])
-async def list_sections(
-    ctx: StoreContext = Depends(get_store_context),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
-        select(Section)
-        .where(Section.store_id == ctx.store_id, Section.status == "active")
-        .order_by(Section.display_order)
-    )
-    return result.scalars().all()
 
 
 @router.get("/store/{slug}/versions", response_model=list[VersionListItem])
@@ -102,85 +86,66 @@ async def get_active_version(
     if not version:
         raise HTTPException(status_code=404, detail={"error": "No active version", "code": "NO_ACTIVE_VERSION"})
 
-    sections_result = await db.execute(
-        select(Section)
-        .where(Section.store_id == ctx.store_id, Section.status == "active")
-        .order_by(Section.display_order)
+    # SPEC-00A: flattened — a store has exactly one floor plan, one set of
+    # zones/obstacles, and one set of camera configs per version. No section loop.
+    fp_result = await db.execute(
+        select(FloorPlan).where(
+            FloorPlan.version_id == version.id,
+            FloorPlan.store_id == ctx.store_id,
+        )
     )
-    sections = sections_result.scalars().all()
-
-    section_configs: list[SectionWithConfig] = []
-    for section in sections:
-        fp_result = await db.execute(
-            select(FloorPlan).where(
-                FloorPlan.version_id == version.id,
-                FloorPlan.section_id == section.id,
-            )
+    fp = fp_result.scalar_one_or_none()
+    fp_response = None
+    if fp:
+        display_url = generate_presigned_url_public(fp.display_s3_key) if fp.display_s3_key else None
+        fp_response = FloorPlanResponse(
+            id=fp.id,
+            version_id=fp.version_id,
+            store_id=fp.store_id,
+            onboarding_method=fp.onboarding_method,
+            display_url=display_url,
+            width_px=fp.width_px,
+            height_px=fp.height_px,
+            origin_x=fp.origin_x,
+            origin_y=fp.origin_y,
+            pixels_per_meter=fp.pixels_per_meter,
+            world_x_min=fp.world_x_min,
+            world_x_max=fp.world_x_max,
+            world_y_min=fp.world_y_min,
+            world_y_max=fp.world_y_max,
+            image_uploaded=fp.image_uploaded,
+            scale_defined=fp.scale_defined,
         )
-        fp = fp_result.scalar_one_or_none()
-        fp_response = None
-        if fp:
-            display_url = generate_presigned_url_public(fp.display_s3_key) if fp.display_s3_key else None
-            fp_response = FloorPlanResponse(
-                id=fp.id,
-                version_id=fp.version_id,
-                section_id=fp.section_id,
-                onboarding_method=fp.onboarding_method,
-                display_url=display_url,
-                width_px=fp.width_px,
-                height_px=fp.height_px,
-                origin_x=fp.origin_x,
-                origin_y=fp.origin_y,
-                pixels_per_meter=fp.pixels_per_meter,
-                world_x_min=fp.world_x_min,
-                world_x_max=fp.world_x_max,
-                world_y_min=fp.world_y_min,
-                world_y_max=fp.world_y_max,
-                image_uploaded=fp.image_uploaded,
-                scale_defined=fp.scale_defined,
-            )
 
-        zones_result = await db.execute(
-            select(Zone).where(Zone.version_id == version.id, Zone.section_id == section.id)
-        )
-        zones = [ZoneResponse.model_validate(z) for z in zones_result.scalars().all()]
+    zones_result = await db.execute(
+        select(Zone).where(Zone.version_id == version.id)
+    )
+    zones = [ZoneResponse.model_validate(z) for z in zones_result.scalars().all()]
 
-        obstacles_result = await db.execute(
-            select(Obstacle).where(Obstacle.version_id == version.id, Obstacle.section_id == section.id)
-        )
-        obstacles = [ObstacleResponse.model_validate(o) for o in obstacles_result.scalars().all()]
+    obstacles_result = await db.execute(
+        select(Obstacle).where(Obstacle.version_id == version.id)
+    )
+    obstacles = [ObstacleResponse.model_validate(o) for o in obstacles_result.scalars().all()]
 
-        configs_result = await db.execute(
-            select(CameraConfig, PhysicalCamera)
-            .join(PhysicalCamera, CameraConfig.physical_camera_id == PhysicalCamera.id)
-            .where(CameraConfig.version_id == version.id, CameraConfig.section_id == section.id)
-        )
-        camera_configs = []
-        for cc, pc in configs_result.all():
-            frame_url = generate_presigned_url_public(cc.frame_s3_key) if cc.frame_s3_key else None
-            camera_configs.append(CameraConfigSummary(
-                id=cc.id,
-                physical_camera_id=cc.physical_camera_id,
-                physical_camera_name=pc.name,
-                section_id=cc.section_id,
-                position_x=cc.position_x,
-                position_y=cc.position_y,
-                height_meters=cc.height_meters,
-                fov_deg=cc.fov_deg,
-                status=cc.status,
-                frame_url=frame_url,
-            ))
-
-        section_configs.append(SectionWithConfig(
-            id=section.id,
-            name=section.name,
-            type=section.type,
-            display_order=section.display_order,
-            is_default=section.is_default,
-            floor_plan=fp_response,
-            zones=zones,
-            obstacles=obstacles,
-            camera_configs=camera_configs,
+    configs_result = await db.execute(
+        select(CameraConfig, PhysicalCamera)
+        .join(PhysicalCamera, CameraConfig.physical_camera_id == PhysicalCamera.id)
+        .where(CameraConfig.version_id == version.id)
+    )
+    camera_configs = []
+    for cc, pc in configs_result.all():
+        frame_url = generate_presigned_url_public(cc.frame_s3_key) if cc.frame_s3_key else None
+        camera_configs.append(CameraConfigSummary(
+            id=cc.id,
+            physical_camera_id=cc.physical_camera_id,
+            physical_camera_name=pc.name,
+            store_id=cc.store_id,
+            position_x=cc.position_x,
+            position_y=cc.position_y,
+            height_meters=cc.height_meters,
+            fov_deg=cc.fov_deg,
+            status=cc.status,
+            frame_url=frame_url,
         ))
 
     return ActiveVersionResponse(
@@ -188,7 +153,10 @@ async def get_active_version(
         label=version.label,
         status=version.status,
         active_from=version.active_from,
-        sections=section_configs,
+        floor_plan=fp_response,
+        zones=zones,
+        obstacles=obstacles,
+        camera_configs=camera_configs,
     )
 
 

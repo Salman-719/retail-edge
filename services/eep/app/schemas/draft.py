@@ -31,7 +31,7 @@ class DraftVersionResponse(BaseModel):
 class FloorPlanUploadResponse(BaseModel):
     id: uuid.UUID
     version_id: uuid.UUID
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     onboarding_method: str
     display_url: str | None = None
     width_px: int | None = None
@@ -123,7 +123,7 @@ class ZoneUpdate(BaseModel):
 class ZoneResponse(BaseModel):
     id: uuid.UUID
     version_id: uuid.UUID
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     name: str
     type: str
     points: list[list[float]]
@@ -165,7 +165,7 @@ class ObstacleUpdate(BaseModel):
 class ObstacleResponse(BaseModel):
     id: uuid.UUID
     version_id: uuid.UUID
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     name: str | None = None
     points: list[list[float]]
 
@@ -270,7 +270,7 @@ class CameraConfigResponse(BaseModel):
     version_id: uuid.UUID
     physical_camera_id: uuid.UUID
     physical_camera_name: str
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     position_x: float
     position_y: float
     height_meters: float | None = None
@@ -403,32 +403,6 @@ class CalibrationResponse(BaseModel):
     intrinsic_matrix: list | None = None
     computed_at: datetime | None = None
     verified_at: datetime | None = None
-
-    model_config = {"from_attributes": True}
-
-
-# ─── Sections (draft CRUD) ────────────────────────────────────────────────────
-
-class CreateSectionRequest(BaseModel):
-    name: str
-    type: str = "floor"
-    display_order: int = 0
-
-
-class PatchSectionRequest(BaseModel):
-    name: str | None = None
-    type: str | None = None
-    display_order: int | None = None
-
-
-class SectionResponse(BaseModel):
-    id: uuid.UUID
-    store_id: uuid.UUID
-    name: str
-    type: str
-    display_order: int
-    is_default: bool
-    status: str
 
     model_config = {"from_attributes": True}
 

@@ -16,7 +16,7 @@ from app.core.redis_client import get_redis
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner, require_owner_or_manager
 from app.models.store import Store
 from app.models.invitation import Invitation
-from app.models.store_member import StoreMember, StoreMemberPermission, StoreMemberSection
+from app.models.store_member import StoreMember, StoreMemberPermission
 from app.models.user import User
 from app.core.auth import hash_password
 from app.schemas.member import (
@@ -58,7 +58,6 @@ async def list_members(
                 name=user.name,
                 email=user.email,
                 role=member.role,
-                access_scope=member.access_scope,
                 permissions=perms,
                 last_active_at=user.last_active_at,
                 created_at=member.created_at,
@@ -77,8 +76,6 @@ async def invite_member(
 
     if body.role not in ("manager", "viewer"):
         raise HTTPException(status_code=422, detail={"error": "Role must be manager or viewer", "code": "INVALID_ROLE"})
-    if body.access_scope not in ("full_store", "section_scoped"):
-        raise HTTPException(status_code=422, detail={"error": "Invalid access_scope", "code": "INVALID_SCOPE"})
 
     token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=3)
@@ -87,8 +84,6 @@ async def invite_member(
         store_id=ctx.store_id,
         invited_email=str(body.email),
         role=body.role,
-        access_scope=body.access_scope,
-        section_ids=[str(sid) for sid in body.section_ids],
         permissions={k: v for k, v in body.permissions.items()},
         token=token,
         invited_by=ctx.user_id,
@@ -129,7 +124,6 @@ async def list_invitations(
             id=inv.id,
             invited_email=inv.invited_email,
             role=inv.role,
-            access_scope=inv.access_scope,
             expires_at=inv.expires_at,
             accepted_at=inv.accepted_at,
             created_at=inv.created_at,
@@ -176,13 +170,6 @@ async def patch_member(
 
     if body.role is not None:
         member.role = body.role
-    if body.access_scope is not None:
-        member.access_scope = body.access_scope
-
-    if body.section_ids is not None:
-        await db.execute(delete(StoreMemberSection).where(StoreMemberSection.store_member_id == member.id))
-        for sid in body.section_ids:
-            db.add(StoreMemberSection(store_member_id=member.id, section_id=sid))
 
     if body.permissions is not None:
         await db.execute(delete(StoreMemberPermission).where(StoreMemberPermission.store_member_id == member.id))
