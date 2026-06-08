@@ -16,62 +16,109 @@ variable "vpc_cidr" {
   default     = "10.20.0.0/16"
 }
 
-variable "server_instance_type" {
-  description = "EC2 type for the k3s server. Graviton (t4g) is cheapest; images are arm64. t4g.xlarge (4 vCPU/16GB) fits the full tier (EEP, Postgres/TimescaleDB, Redis, IEP3/4/5, IEP6, monitoring, MLflow) on one node; drop to t4g.large for a lean install."
+# ── EKS cluster ──────────────────────────────────────────────────────────────
+variable "cluster_version" {
+  description = "EKS Kubernetes version."
   type        = string
-  default     = "t4g.xlarge"
+  default     = "1.30"
 }
 
-variable "agent_instance_type" {
-  description = "EC2 type for k3s agent nodes (scale-out for more stores)."
+variable "eks_public_access_cidrs" {
+  description = "CIDRs allowed to reach the public EKS API endpoint. Lock down for production."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+# ── Stable on-demand node group (stateful + system tier) ─────────────────────
+variable "stable_instance_type" {
+  description = "Instance type for the stable on-demand node group (Graviton/arm64)."
   type        = string
   default     = "t4g.large"
 }
 
-variable "agent_count" {
-  description = "Number of k3s agent nodes to join the server. 0 = single-node cluster."
+variable "stable_node_count" {
+  description = "Fixed size of the stable node group (hosts TimescaleDB/Redis/monitoring/MLflow/controllers). 2 = HA across 2 AZs."
   type        = number
-  default     = 0
+  default     = 2
 }
 
-variable "server_root_volume_gb" {
-  description = "Root EBS volume size (GB) for each node. 60+ recommended once monitoring + MLflow + TimescaleDB are enabled."
+variable "stable_node_max_count" {
+  description = "Maximum stable on-demand nodes for controlled manual expansion of the stateful/system tier."
+  type        = number
+  default     = 4
+}
+
+variable "node_root_volume_gb" {
+  description = "Root EBS volume size (GB) for nodes (stable group + Karpenter)."
   type        = number
   default     = 60
 }
 
-variable "ssh_key_name" {
-  description = "Existing EC2 key pair name for SSH. Empty = SSM-only access."
+# ── Karpenter (elastic worker capacity) ──────────────────────────────────────
+variable "karpenter_version" {
+  description = "Karpenter Helm chart version (OCI public.ecr.aws/karpenter)."
   type        = string
-  default     = ""
+  default     = "1.0.6"
 }
 
-variable "ssh_ingress_cidr" {
-  description = "CIDR allowed to SSH (22). Lock this down; default is none."
+variable "karpenter_cpu_limit" {
+  description = "Max total vCPUs Karpenter may provision across the elastic NodePool."
   type        = string
-  default     = "127.0.0.1/32"
+  default     = "200"
 }
 
-variable "git_repo_url" {
-  description = "Git URL of this repo, cloned by user-data to run the bootstrap script."
+# ── Add-on chart versions ────────────────────────────────────────────────────
+variable "lb_controller_version" {
+  description = "aws-load-balancer-controller Helm chart version."
   type        = string
-  default     = "https://github.com/your-org/retail-edge.git"
+  default     = "1.8.2"
 }
 
-variable "git_branch" {
-  description = "Branch to check out on the node."
+variable "ingress_nginx_version" {
+  description = "ingress-nginx Helm chart version."
   type        = string
-  default     = "deploy/aws-k3s"
+  default     = "4.11.2"
 }
 
+variable "cert_manager_version" {
+  description = "cert-manager Helm chart version."
+  type        = string
+  default     = "v1.15.3"
+}
+
+variable "external_secrets_version" {
+  description = "external-secrets Helm chart version."
+  type        = string
+  default     = "0.10.4"
+}
+
+variable "metrics_server_version" {
+  description = "metrics-server Helm chart version."
+  type        = string
+  default     = "3.12.1"
+}
+
+# ── DNS / hostnames ──────────────────────────────────────────────────────────
 variable "app_host" {
-  description = "Public hostname for the SPA/API. Leave empty to derive app.<eip>.nip.io."
+  description = "Public hostname for the SPA/API. Leave empty to derive app.<ingress-eip>.nip.io."
   type        = string
   default     = ""
 }
 
 variable "eep_host" {
-  description = "Public hostname edge devices dial for gRPC. Leave empty to derive eep.<eip>.nip.io."
+  description = "Public hostname edge devices dial for gRPC. Leave empty to derive eep.<grpc-eip>.nip.io."
+  type        = string
+  default     = ""
+}
+
+variable "create_dns_records" {
+  description = "Create Route53 A records for app_host -> ingress EIP and eep_host -> gRPC EIP."
+  type        = bool
+  default     = false
+}
+
+variable "route53_zone_id" {
+  description = "Route53 hosted zone ID (required when create_dns_records = true)."
   type        = string
   default     = ""
 }
@@ -82,20 +129,8 @@ variable "letsencrypt_email" {
 }
 
 variable "s3_bucket_name" {
-  description = "Globally-unique S3 bucket name for object storage (frames/uploads)."
+  description = "Globally-unique S3 bucket name for object storage (frames/uploads/mlflow)."
   type        = string
-}
-
-variable "create_dns_records" {
-  description = "Create Route53 A records for app_host/eep_host -> the server EIP."
-  type        = bool
-  default     = false
-}
-
-variable "route53_zone_id" {
-  description = "Route53 hosted zone ID (required when create_dns_records = true)."
-  type        = string
-  default     = ""
 }
 
 variable "secret_names" {

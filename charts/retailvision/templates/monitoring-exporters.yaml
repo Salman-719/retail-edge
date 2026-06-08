@@ -17,12 +17,18 @@ spec:
     metadata:
       labels: { app: redis-exporter }
     spec:
+      {{- with .Values.stablePool.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.stablePool.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: redis-exporter
           image: {{ .Values.monitoring.exporters.redis.image | quote }}
           env:
             - name: REDIS_ADDR
-              value: "rediss://redis:6379"
+              value: "rediss://redis-server:6380"
             - name: REDIS_EXPORTER_SKIP_TLS_VERIFICATION
               value: "true"
             - name: REDIS_PASSWORD
@@ -67,6 +73,12 @@ spec:
     metadata:
       labels: { app: postgres-exporter }
     spec:
+      {{- with .Values.stablePool.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.stablePool.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: postgres-exporter
           image: {{ .Values.monitoring.exporters.postgres.image | quote }}

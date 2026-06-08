@@ -5,25 +5,25 @@ to run it, the **exact command**, and the **expected result**. Follow top to
 bottom; do not skip.
 
 ### Where commands run
-- **[LOCAL]** your workstation/laptop (has the `aws` CLI + the git repo).
-- **[SERVER]** the cloud EC2 box, reached via SSM (k3s control plane).
+- **[LOCAL]** your workstation/laptop (has `aws`, `terraform`, `kubectl`, `helm`,
+  and the git repo).
+- **[CLOUD]** Amazon EKS, reached from local after `aws eks update-kubeconfig`.
 - **[EDGE]** an in-store Jetson device.
 
 ### Architecture (what you are building)
-- **Cloud**: AWS-native **k3s on one EC2 instance** (Graviton, no EKS) running:
-  - **EEP** (API/gRPC) — also the control plane that **dynamically provisions** the
-    per-store workers via the k8s API: **IEP3** (reconciliation StatefulSet),
-    **IEP4** (alert daemon StatefulSet), and **IEP5** (end-of-shift analytics Job).
-  - **IEP6** (AI analytics agent, OpenAI), the **frontend**, in-cluster
-    **PostgreSQL = TimescaleDB** (hypertables for analytics) + **Redis**.
-  - **Observability**: Prometheus + Grafana + redis/postgres/node exporters.
-  - **MLflow** tracking server + model registry (MLOps), artifacts in S3.
-  - One Elastic IP fronts everything via k3s ServiceLB. Object storage = S3.
-    Secrets = AWS Secrets Manager. TLS = cert-manager.
+- **Cloud**: autoscaling **Amazon EKS** running:
+  - **EEP** REST/gRPC control plane, **frontend**, **IEP6**, in-cluster
+    **TimescaleDB/PostgreSQL**, **Redis**, Prometheus, Grafana, and MLflow.
+  - **EEP** dynamically provisions per-store **IEP3** StatefulSets, **IEP4**
+    StatefulSets, and **IEP5** Jobs through the Kubernetes API.
+  - A tainted stable on-demand node pool hosts stateful/system workloads.
+    Karpenter launches elastic Graviton worker nodes for stateless/per-store work.
+  - Two public NLBs with fixed EIPs: HTTPS app/API ingress and edge gRPC `:50051`.
+    Object storage = S3. Secrets = AWS Secrets Manager. TLS = cert-manager.
 - **Edge**: k3s on a Jetson per store (IEP1 ingest + YOLO/ReID GPU + per-camera
   IEP2), talking to the cloud EEP over TLS gRPC.
-- **No domain needed**: public hostnames are `app.<EIP>.nip.io` and
-  `eep.<EIP>.nip.io` (nip.io resolves any `*.<ip>.nip.io` to that IP).
+- **No domain needed**: public hostnames are `app.<INGRESS_EIP>.nip.io` and
+  `eep.<GRPC_EIP>.nip.io`.
 - **Images**: GitHub Container Registry, `ghcr.io/<owner>/retailvision/<svc>`.
 
 ### Reference values used below (substitute your own)
@@ -33,34 +33,35 @@ bottom; do not skip.
 | `<region>` | `eu-west-1` |
 | `<owner>` (GitHub org/user, lowercase) | `salman-719` |
 | `<account>` | `692461731658` |
-| `<EIP>` (filled in after step 2) | `34.248.161.113` |
+| `<INGRESS_EIP>` / `<GRPC_EIP>` | filled from Terraform outputs |
 
 > **Rule 1:** paste **one line at a time**. Multi-line commands joined with `\`
 > get corrupted by zsh on paste.
 >
-> **Rule 2:** never paste literal angle-bracket placeholders like `<EIP>` into a
-> shell — `<` and `>` are redirection operators (`cannot open EIP`). Instead, set
-> shell variables once and use `$EIP` etc. The commands below already use
-> variables; set them at the start of each shell session (workstation, server,
+> **Rule 2:** never paste literal angle-bracket placeholders like `<INGRESS_EIP>` or
+> `<GRPC_EIP>` into a shell — `<` and `>` are redirection operators. Instead, set
+> shell variables once and use `$INGRESS_EIP`, `$GRPC_EIP`, `$APP_HOST`, `$EEP_HOST`, etc. The commands below already use
+> variables; set them at the start of each shell session (workstation, cloud,
 > edge):
 > ```bash
-> export EIP=34.248.161.113                                  # from: terraform output server_public_ip
+> export INGRESS_EIP=<from terraform output ingress_eip>
+> export GRPC_EIP=<from terraform output grpc_eip>
 > export OWNER=salman-719                                    # your GitHub owner (lowercase)
 > export REGION=eu-west-1
 > export BUCKET=retailvision-prod-objects-692461731658
 > ```
 > Optional observability/MLOps hostnames (also `*.nip.io`): Grafana at
-> `grafana.$EIP.nip.io`, MLflow at `mlflow.$EIP.nip.io` (set at Helm install, A7).
+> `grafana.$INGRESS_EIP.nip.io`, MLflow at `mlflow.$INGRESS_EIP.nip.io`.
 
 ---
 
-## PART A — Cloud deployment (from scratch)
+## PART A — Cloud deployment on EKS (from scratch)
 
 ### A1. [LOCAL] Install tools & fix the AWS profile
 
 ```bash
 brew install awscli terraform
-brew install --cask session-manager-plugin
+brew install kubectl helm jq
 ```
 Verify credentials. If you get `InvalidClientTokenId`, your profile points at a
 non-enabled opt-in region — set it to `eu-west-1`:
@@ -70,12 +71,18 @@ aws sts get-caller-identity --profile adsal
 ```
 **Expect:** JSON with `"Account": "692461731658"`. Do not continue until this works.
 
+> If `terraform init` fails locally because `releases.hashicorp.com` returns
+> `x-amzn-waf-reason: geo`, run Part A from **AWS CloudShell** instead. CloudShell
+> runs inside AWS and avoids the local geo-blocked provider download path. Because
+> CloudShell clones from GitHub, commit and push the current `deploy/aws-eks`
+> branch before using it.
+
 ### A2. [LOCAL] Get the code
 
 ```bash
 git clone https://github.com/Salman-719/retail-edge.git
 cd retail-edge
-git checkout deploy/aws-k3s
+git checkout deploy/aws-eks
 ```
 
 ### A3. [LOCAL] Build & publish the images (GHCR)
@@ -95,38 +102,118 @@ Then make the cloud images pullable without credentials:
   Public**. (EEP provisions `iep3`/`iep4`/`iep5` at runtime, so those images must
   be pullable too.)
 
-### A4. [LOCAL] Provision infrastructure (Terraform)
+### A4. [LOCAL] Provision EKS infrastructure (Terraform)
 
 ```bash
 cd infra/aws
 cp terraform.tfvars.example terraform.tfvars
 ```
-Open `terraform.tfvars` and set exactly these (leave `app_host`/`eep_host` empty):
+Open `terraform.tfvars` and set these. Leave `app_host`/`eep_host` empty for
+`nip.io`, or set real hostnames and Route53 values.
 ```hcl
-aws_region        = "eu-west-1"
-environment       = "production"
-# Real email YOU control — Let's Encrypt sends cert expiry/renewal notices here.
-# Not public, need not match any domain. e.g. ali.salman@edgebot.com
-letsencrypt_email = "you@example.com"
-s3_bucket_name    = "retailvision-prod-objects-692461731658"   # must be globally unique
-git_repo_url      = "https://github.com/Salman-719/retail-edge.git"   # must be PUBLIC
-git_branch        = "deploy/aws-k3s"
-server_instance_type = "t4g.xlarge"   # 4 vCPU/16GB — fits the full tier incl. monitoring + MLflow + TimescaleDB. Use t4g.large for a lean install.
-server_root_volume_gb = 60
-agent_count       = 0
+aws_region            = "eu-west-1"
+environment           = "production"
+letsencrypt_email     = "you@example.com"
+s3_bucket_name        = "retailvision-prod-objects-692461731658"
+cluster_version       = "1.30"
+stable_instance_type  = "t4g.large"
+stable_node_count     = 2
+stable_node_max_count = 4
+node_root_volume_gb   = 60
+karpenter_cpu_limit   = "200"
 ```
 Apply:
 ```bash
 export AWS_PROFILE=adsal
-terraform init
-terraform apply        # review, then type:  yes
+terraform init -upgrade -reconfigure
+terraform fmt -check -recursive
+terraform validate
+terraform plan -out eks.tfplan
+terraform apply eks.tfplan
 ```
-**Expect:** ~2–3 min; ends with `Apply complete!` and an Outputs block. Record:
+**Expect:** an EKS cluster, two stable on-demand nodes, Karpenter, AWS Load
+Balancer Controller, ingress-nginx, cert-manager, External Secrets,
+metrics-server, gp3 StorageClass, Secrets Manager entries, and an S3 bucket.
+
+### A4a. [AWS CloudShell] Alternative when local provider downloads are geo-blocked
+
+Use this path if local `curl -I https://releases.hashicorp.com/...` returns
+`x-amzn-waf-reason: geo`.
+
+First push the deployment branch from your laptop:
 ```bash
-terraform output server_public_ip        # this is <EIP>
-terraform output app_host                # app.<EIP>.nip.io
-terraform output eep_host                # eep.<EIP>.nip.io
-terraform output -raw agent_secret       # save for edge devices (secret)
+cd /Users/alisalman/Desktop/projects/aub/retail-edge
+git checkout deploy/aws-eks
+git add -A
+git commit -m "Migrate cloud deployment to EKS"
+git push origin deploy/aws-eks
+```
+
+Then open **AWS Console → CloudShell** in `eu-west-1` and install the deploy
+tools for that CloudShell session:
+```bash
+mkdir -p "$HOME/bin"
+sudo yum install -y unzip tar gzip git jq
+curl -fsSL https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip -o /tmp/terraform.zip
+unzip -o /tmp/terraform.zip -d "$HOME/bin"
+curl -fsSL https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz -o /tmp/helm.tgz
+tar -xzf /tmp/helm.tgz -C /tmp
+mv /tmp/linux-amd64/helm "$HOME/bin/helm"
+curl -fsSL https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-05-12/bin/linux/amd64/kubectl -o "$HOME/bin/kubectl"
+chmod +x "$HOME/bin/terraform" "$HOME/bin/helm" "$HOME/bin/kubectl"
+export PATH="$HOME/bin:$PATH"
+terraform version
+helm version
+kubectl version --client
+```
+
+Clone the repo:
+```bash
+git clone https://github.com/Salman-719/retail-edge.git
+cd retail-edge
+git checkout deploy/aws-eks
+cd infra/aws
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Edit `terraform.tfvars` in CloudShell:
+```bash
+nano terraform.tfvars
+```
+
+Use at least:
+```hcl
+aws_region            = "eu-west-1"
+environment           = "production"
+letsencrypt_email     = "ali.salman@edgebot.com"
+s3_bucket_name        = "retailvision-prod-objects-692461731658"
+cluster_version       = "1.30"
+stable_instance_type  = "t4g.large"
+stable_node_count     = 2
+stable_node_max_count = 4
+node_root_volume_gb   = 60
+karpenter_cpu_limit   = "200"
+```
+
+Deploy:
+```bash
+terraform init -upgrade -reconfigure
+terraform fmt -check -recursive
+terraform validate
+terraform plan -out eks.tfplan
+terraform apply eks.tfplan
+```
+
+Configure kubectl and record outputs:
+```bash
+aws eks update-kubeconfig --name "$(terraform output -raw cluster_name)" --region eu-west-1
+export INGRESS_EIP="$(terraform output -raw ingress_eip)"
+export GRPC_EIP="$(terraform output -raw grpc_eip)"
+export APP_HOST="$(terraform output -raw app_host)"
+export EEP_HOST="$(terraform output -raw eep_host)"
+export AGENT_SECRET="$(terraform output -raw agent_secret)"
+export GRPC_EIP_ALLOCATIONS="$(terraform output -json grpc_eip_allocation_ids | jq -r 'join("\\,")')"
+export PUBLIC_SUBNET_IDS="$(terraform output -json public_subnet_ids | jq -r 'join("\\,")')"
 ```
 
 ### A4b. [LOCAL] Set the OpenAI API key (IEP6 agent)
@@ -141,110 +228,89 @@ aws secretsmanager put-secret-value --profile adsal --region eu-west-1 \
 > raw-SQL and EEP-action tools are off by default (`iep6.enableRawSql`,
 > `iep6.enableEepActions`).
 
-### A5. [LOCAL → SERVER] Wait for the server to finish bootstrapping
+### A5. [LOCAL] Verify cluster add-ons
 
 ```bash
-aws ssm start-session --target $(terraform output -raw server_instance_id)
+kubectl get nodes -L workload
+kubectl get pods -A
+kubectl get sc
+kubectl -n kube-system get deploy aws-load-balancer-controller metrics-server karpenter
+kubectl -n cert-manager get pods
+kubectl -n external-secrets get pods
 ```
-You are now **[SERVER]** (prompt `root@ip-...`). The instance auto-runs
-`scripts/bootstrap-cloud-k3s.sh`. Watch it finish:
+**Expect:** two `workload=stable` nodes, add-ons Running, and `gp3` as the default
+StorageClass.
+
+### A6. [LOCAL] Install the application (Helm)
+
+Terraform prints `helm_install_hint`; use it, or run the equivalent command:
 ```bash
-sudo tail -n 20 /var/log/cloud-init-output.log
+cd ../..
+helm upgrade --install retailvision ./charts/retailvision \
+  -f charts/retailvision/values.production.yaml \
+  --set global.imageRegistry=ghcr.io/$OWNER/retailvision \
+  --set ingress.appHost="$APP_HOST" \
+  --set eep.grpcHost="$EEP_HOST" \
+  --set eep.grpc.serviceType=LoadBalancer \
+  --set-string 'eep.grpc.serviceAnnotations.service\.beta\.kubernetes\.io/aws-load-balancer-type=external' \
+  --set-string 'eep.grpc.serviceAnnotations.service\.beta\.kubernetes\.io/aws-load-balancer-nlb-target-type=ip' \
+  --set-string 'eep.grpc.serviceAnnotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internet-facing' \
+  --set-string "eep.grpc.serviceAnnotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-eip-allocations=$GRPC_EIP_ALLOCATIONS" \
+  --set-string "eep.grpc.serviceAnnotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-subnets=$PUBLIC_SUBNET_IDS" \
+  --set s3.bucket="$BUCKET" \
+  --set s3.region="$REGION" \
+  --set monitoring.grafana.host="grafana.$INGRESS_EIP.nip.io" \
+  --set mlflow.host="mlflow.$INGRESS_EIP.nip.io" \
+  -n retailvision --create-namespace
 ```
-**Expect:** the last lines include `=== cloud k3s bootstrap complete ===`.
-If it's still running, wait and re-run the tail. Then:
-```bash
-sudo k3s kubectl get pods -A
-```
-**Expect:** pods in `kube-system`, `ingress-nginx`, `cert-manager`,
-`external-secrets` all `Running` (ebs-csi too). Do not proceed until they are.
+**Expect:** `STATUS: deployed`. EEP runs Alembic at startup, building the schema
+through revision **0013** including TimescaleDB hypertables.
 
-> On k3s use `k3s kubectl` (there is no standalone `kubectl`). Run as root.
+For later `helm upgrade` commands, either re-run this full command or include
+`--reuse-values`; otherwise Helm will drop the gRPC NLB service annotations that
+were supplied by `--set-string`.
 
-### A6. [SERVER] Confirm the images pull
-
-```bash
-sudo k3s crictl pull ghcr.io/salman-719/retailvision/eep:1.0.0
-```
-**Expect:** `Image is up to date` / a digest line. If you get `not found` or
-`401`, finish A3 (build green + packages Public) before continuing.
-
-### A7. [SERVER] Install the application (Helm)
-
-First set the variables for this server session (use **your** EIP):
-```bash
-export EIP=34.248.161.113 OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-cd /opt/retail-edge
-```
-Then install — this is **one line** (monitoring + MLflow are enabled by
-`values.production.yaml`; the `--set …host=` flags expose Grafana/MLflow via
-ingress — omit them to keep those internal and reach them by port-forward):
-```bash
-helm upgrade --install retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set monitoring.grafana.host=grafana.$EIP.nip.io --set mlflow.host=mlflow.$EIP.nip.io -n retailvision --create-namespace
-```
-**Expect:** `STATUS: deployed` within ~30s (no migrate hook to wait on). EEP runs
-Alembic at startup, building the schema through revision **0013** (incl. the
-TimescaleDB hypertables from 0010).
-
-### A8. [SERVER] Verify the platform is live
+### A7. [LOCAL] Verify the platform is live
 
 ```bash
-k3s kubectl -n retailvision get pods
+kubectl -n retailvision get pods -o wide
+kubectl -n retailvision get hpa
+kubectl -n retailvision get svc eep-grpc
+kubectl -n retailvision logs deploy/eep --tail=30
 ```
-**Expect** all `Running` / `1/1`: `postgres-0`, `redis-server-0`, `eep-…`,
-`frontend-…`, `iep6-agent-…`, plus the observability/MLOps pods `prometheus-…`,
-`grafana-…`, `redis-exporter-…`, `postgres-exporter-…`, `node-exporter-…`,
-`mlflow-…`. (No `iep3`/`iep4` yet — those are provisioned per-store when you
-activate a store version, Part B.)
+**Expect:** Postgres/Redis/Prometheus/Grafana/MLflow on stable nodes; EEP,
+frontend, IEP6, and per-store workers schedulable on Karpenter nodes. No `iep3`
+or `iep4` exists yet unless a store version has been activated.
 
+Confirm **TimescaleDB** is active:
 ```bash
-k3s kubectl -n retailvision logs deploy/eep --tail=20
-# IEP6 agent — confirm it started and picked up the OpenAI key:
-k3s kubectl -n retailvision exec deploy/iep6-agent -- wget -qO- localhost:8006/health   # {"status":"ok"}
-# end-to-end (use a REAL store UUID, not 'test' — store_id is a uuid):
-# curl -sk "https://app.<EIP>.nip.io/api/agent/insights?store_id=<store-uuid>"
-```
-**Expect:** EEP log shows `alembic … Running upgrade … 0013`, `iep3_manager: using
-in-cluster k8s config` (and iep4/iep5 the same), `Application startup complete`,
-`Uvicorn running on http://0.0.0.0:8000`, `GET /health 200 OK` — **no**
-Postgres/Redis errors.
-
-Confirm **TimescaleDB** is active and the analytics hypertables exist:
-```bash
-k3s kubectl -n retailvision exec postgres-0 -- psql -U retailvision -d retailvision -c "\dx" | grep timescaledb
-k3s kubectl -n retailvision exec postgres-0 -- psql -U retailvision -d retailvision -c "SELECT hypertable_name FROM timescaledb_information.hypertables;"
-```
-**Expect:** the `timescaledb` extension is listed and hypertables such as
-`global_tracking_history` appear.
-
-**Observability + MLflow** (no public host needed — port-forward):
-```bash
-# Grafana (admin / the grafana-admin-password secret value):
-k3s kubectl -n retailvision get secret retailvision-secrets -o jsonpath='{.data.grafana-admin-password}' | base64 -d; echo
-# If you set monitoring.grafana.host: browse https://grafana.$EIP.nip.io
-# Prometheus targets all UP:
-k3s kubectl -n retailvision exec deploy/prometheus -- wget -qO- 'localhost:9090/api/v1/targets?state=active' | head -c 400; echo
-# MLflow UI (or https://mlflow.$EIP.nip.io if a host was set):
-k3s kubectl -n retailvision exec deploy/mlflow -- wget -qO- localhost:5000/health   # OK
+kubectl -n retailvision exec postgres-0 -- psql -U retailvision -d retailvision -c "\dx" | grep timescaledb
+kubectl -n retailvision exec postgres-0 -- psql -U retailvision -d retailvision -c "SELECT hypertable_name FROM timescaledb_information.hypertables;"
 ```
 
+Confirm public app/API:
 ```bash
-curl -sk -o /dev/null -w "%{http_code}\n" "https://app.$EIP.nip.io/api/stores"
+curl -sk -o /dev/null -w "%{http_code}\n" "https://$APP_HOST/api/stores"
 ```
-**Expect:** `401` (API is live and requires auth). `404` would mean the proxy
-chain is wrong; `000` means the cert/ingress isn't ready yet.
+**Expect:** `401` because the API is live and requires auth.
+
+### A8. [LOCAL] Verify autoscaling
+
+```bash
+kubectl -n retailvision scale deploy/frontend --replicas=20
+kubectl get pods -n retailvision -o wide
+kubectl get nodes -w
+```
+**Expect:** extra frontend pods go Pending, Karpenter launches worker capacity,
+pods become Running, and idle nodes consolidate later. Restore:
+```bash
+kubectl -n retailvision scale deploy/frontend --replicas=2
+```
 
 ### A9. [LOCAL] Open the app
 
-Browse to **`http://app.<your-EIP>.nip.io`** (type your real IP, e.g.
-`http://app.34.248.161.113.nip.io`) — the RetailVision UI loads. Register the
-first user. **Cloud is done.**
-
-> HTTPS: if the browser warns or `curl` needs `-k`, the Let's Encrypt cert for
-> nip.io may be rate-limited. Switch to the internal CA (re-run A7 adding
-> `--set ingress.clusterIssuer=retailvision-ca-issuer`) — functional, but the
-> browser will show an untrusted-cert warning.
+Browse to **`https://$APP_HOST`**. Use **`$EEP_HOST:50051`** for the Jetson edge
+bootstrap in Part C. **Cloud is done.**
 
 ---
 
@@ -258,9 +324,9 @@ Do this once per store.
 also assigns a URL **slug**, e.g. `ali-salman`). The UI does **not** show the
 UUID, so retrieve it one of these ways:
 
-**Method 1 — query the database (definitive). [SERVER]:**
+**Method 1 — query the database (definitive). [LOCAL]:**
 ```bash
-k3s kubectl -n retailvision exec -it postgres-0 -- psql -U retailvision -d retailvision -c "SELECT id, name, slug, created_at FROM stores ORDER BY created_at DESC;"
+kubectl -n retailvision exec -it postgres-0 -- psql -U retailvision -d retailvision -c "SELECT id, name, slug, created_at FROM stores ORDER BY created_at DESC;"
 ```
 The **`id`** column is the UUID (e.g. `3f2a…-…`). The newest row is at the top.
 
@@ -282,11 +348,10 @@ workers via the k8s API — no Helm change needed:
 (This is why the `eep` ServiceAccount has the `eep-pipeline-manager` Role, and why
 the `iep3`/`iep4`/`iep5` images must be Public — see A3.)
 
-**[SERVER]** Verify after activation:
+**[LOCAL]** Verify after activation:
 ```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-k3s kubectl -n retailvision get statefulset,pods -l 'app in (iep3,iep4)'
-k3s kubectl -n retailvision logs deploy/eep --tail=30 | grep -Ei "iep3_manager|iep4_manager"
+kubectl -n retailvision get statefulset,pods -l 'app in (iep3,iep4)'
+kubectl -n retailvision logs deploy/eep --tail=30 | grep -Ei "iep3_manager|iep4_manager"
 ```
 **Expect:** `iep3-<short>` and `iep4-<short>` each `1/1 Running`; EEP log shows
 `created StatefulSet iep3-… (store=…)` and the same for iep4.
@@ -294,7 +359,7 @@ k3s kubectl -n retailvision logs deploy/eep --tail=30 | grep -Ei "iep3_manager|i
 **IEP5** (end-of-shift analytics) is **not** long-running — EEP launches it as a
 `batch/v1` Job when a shift closes (`shift_closer.py`). After a shift close:
 ```bash
-k3s kubectl -n retailvision get jobs -l app=iep5
+kubectl -n retailvision get jobs -l app=iep5
 ```
 **Expect:** a `iep5-<short>-<YYYY-MM-DD>` Job that reaches `Completed` (auto-cleaned
 after 24h via `ttlSecondsAfterFinished`).
@@ -305,21 +370,21 @@ after 24h via `ttlSecondsAfterFinished`).
 > `iep3.stores` list is the COMPLETE set (Helm makes the workers match it exactly).
 > Leave `staticProvisioning=false` (default) for normal operation.
 
-> Capacity: each active store adds an IEP3 + IEP4 pod. For several stores, add
-> nodes (`agent_count` in `terraform.tfvars` → `terraform apply`) or a bigger
-> `server_instance_type`.
+> Capacity: each active store adds an IEP3 + IEP4 pod. If pods go Pending,
+> Karpenter should add worker nodes automatically. Check `kubectl get nodes -w`,
+> Karpenter logs, and AWS capacity limits before changing node-pool limits.
 
 ### B3. Per new store — what changes (and what doesn't)
 
 | Step | What changes per store | What stays the same |
 |---|---|---|
 | Create store (UI) | new name → new **UUID** + slug | — |
-| Cloud IEP3 (B2) | the **`iep3.stores` list** — pass **all** UUIDs cumulatively | `EIP`, `OWNER`, `REGION`, `BUCKET`, the rest of the command |
-| Edge device (Part C) | **`STORE`** = that store's UUID; runs on **that store's** Jetson | `EIP`, `AGENT_SECRET`, GHCR creds — identical for every store |
+| Cloud IEP3/IEP4 (B2) | EEP creates per-store workers when the config version is activated | `$APP_HOST`, `$EEP_HOST`, `$OWNER`, `$REGION`, `$BUCKET` |
+| Edge device (Part C) | **`STORE`** = that store's UUID; runs on **that store's** Jetson | `$EEP_HOST`, `$AGENT_SECRET`, GHCR creds — identical for every store |
 
-So onboarding store N is: (1) create it → get UUID, (2) `helm upgrade` with the
-**full** `iep3.stores` set including the new UUID, (3) on that store's Jetson run
-Part C with only `STORE` changed.
+So onboarding store N is: (1) create it → get UUID, (2) activate its camera/zone
+config version in EEP, (3) on that store's Jetson run Part C with only `STORE`
+changed.
 
 ---
 
@@ -344,14 +409,14 @@ The bootstrap **detects the device** and applies the matching kustomize overlay
 
 **On the [LOCAL] workstation** (to fetch the agent secret + CA — same tools as Part A):
 - `aws` CLI v2 (`aws configure set region eu-west-1 --profile adsal`)
-- `terraform`; AWS Session Manager plugin; this repo cloned.
+- `terraform`, `kubectl`, `helm`, and this repo cloned.
 
 **On the [EDGE] device:**
 - Ubuntu; `git` + `curl`: `sudo apt-get update && sudo apt-get install -y git curl`.
 - **jetson**: JetPack/NVIDIA drivers installed (ships `nvidia-container-toolkit`).
   **cuda**: NVIDIA driver + `nvidia-smi` working (bootstrap installs the toolkit).
   **cpu**: nothing extra.
-- Network egress to: `eep.<your-EIP>.nip.io:50051` + `:6380`, `ghcr.io`, `get.k3s.io`.
+- Network egress to: `$EEP_HOST:50051` + `:6380`, `ghcr.io`, `get.k3s.io`.
 - Root/sudo. The bootstrap installs k3s itself.
 - GHCR images public (or `GHCR_USER`/`GHCR_TOKEN`): `iep1`, `iep2`, `edge-agent`
   (all profiles); **`yolo`/`reid`** `:1.0.0-cpu` & `:1.0.0-cuda` from CI for those
@@ -363,19 +428,15 @@ The bootstrap **detects the device** and applies the matching kustomize overlay
 cd ~/path/to/retail-edge/infra/aws
 export AWS_PROFILE=adsal AWS_DEFAULT_REGION=eu-west-1
 terraform output -raw agent_secret        # copy this — the shared secret
-terraform output -raw server_public_ip    # this is your <EIP>
+terraform output -raw eep_host            # copy this — edge gRPC hostname
 ```
-Get the gRPC CA so the edge trusts EEP — connect to the server and print it:
+Get the gRPC CA so the edge trusts EEP:
 ```bash
-aws ssm start-session --target "$(terraform output -raw server_instance_id)"
-```
-**[SERVER]:**
-```bash
-sudo k3s kubectl -n cert-manager get secret retailvision-ca -o jsonpath='{.data.tls\.crt}' | base64 -d
+kubectl -n cert-manager get secret retailvision-ca -o jsonpath='{.data.tls\.crt}' | base64 -d
 ```
 Copy the entire `-----BEGIN CERTIFICATE----- … -----END CERTIFICATE-----` block;
-you'll save it as `ca.crt` on the edge in C2. Type `exit` to leave the server.
-Also have the store **UUID** ready (from Part B / the `psql` query).
+you'll save it as `ca.crt` on the edge in C2. Also have the store **UUID** ready
+(from Part B / the `psql` query).
 
 ### C2. [EDGE] Get the code and bootstrap
 
@@ -383,7 +444,7 @@ Clone the repo on the device:
 ```bash
 git clone https://github.com/Salman-719/retail-edge.git
 cd retail-edge
-git checkout deploy/aws-k3s
+git checkout deploy/aws-eks
 ```
 Save the CA you copied in C1:
 ```bash
@@ -392,7 +453,7 @@ sudo tee /etc/retailvision/certs/ca.crt >/dev/null   # paste the PEM block, then
 ```
 Set variables:
 ```bash
-export EIP=34.248.161.113                            # server Elastic IP (terraform output server_public_ip)
+export EEP_HOST=eep.34.248.161.113.nip.io            # terraform output eep_host
 export STORE=70ed5b0c-6c56-43ac-a9e0-a3a81d0db52f   # the store UUID from Part B
 
 # AGENT_SECRET = shared token the Edge Agent sends to authenticate to EEP.
@@ -408,7 +469,7 @@ made them Public in Part A (A3), skip this. Otherwise uncomment and fill in:
 Run the bootstrap (installs k3s + NVIDIA plugin + edge manifests + the Edge Agent
 systemd service):
 ```bash
-sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.0.0 "eep.$EIP.nip.io" "$AGENT_SECRET"
+sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.0.0 "$EEP_HOST" "$AGENT_SECRET"
 ```
 Restart the agent so it picks up the CA:
 ```bash
@@ -418,12 +479,12 @@ sudo systemctl restart retailvision-edge-agent
 ### C3. [EDGE] Verify
 
 ```bash
-sudo k3s kubectl get pods -n retailvision
+sudo kubectl get pods -n retailvision
 journalctl -u retailvision-edge-agent -f
 ```
 **Expect:** `iep1-daemon` `Running` and the journal prints
-`heartbeat sent store_id=<UUID>` every 30s (edge ↔ cloud connected). On the
-**[SERVER]**, `k3s kubectl -n retailvision logs deploy/eep | grep <STORE-UUID>`
+`heartbeat sent store_id=<UUID>` every 30s (edge ↔ cloud connected). From
+**[LOCAL]**, `kubectl -n retailvision logs deploy/eep | grep <STORE-UUID>`
 shows it connect. `yolo`/`reid` stay `Pending` until C4 + C5 below.
 
 ### C4. [EDGE] Build the GPU images (`yolo`/`reid`) — **`jetson` profile only**, one-time
@@ -472,12 +533,12 @@ sudo sed -i 's/default_runtime_name = "runc"/default_runtime_name = "nvidia"/' \
         /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
 sudo systemctl restart k3s
 # device plugin should now advertise the GPU:
-sudo k3s kubectl get node -o jsonpath='{.items[0].status.allocatable}'; echo
+sudo kubectl get node -o jsonpath='{.items[0].status.allocatable}'; echo
 ```
 **Expect:** `nvidia.com/gpu` appears → `yolo`/`reid` schedule and pull. If it's
 still absent, the Jetson integrated GPU may need NVIDIA's Jetson-specific device
 plugin config — check the device-plugin pod logs
-(`k3s kubectl -n kube-system logs ds/nvidia-device-plugin-daemonset`).
+(`kubectl -n kube-system logs ds/nvidia-device-plugin-daemonset`).
 
 ---
 
@@ -490,7 +551,7 @@ The canonical sequence to ship **any** change — new upstream code (e.g. a
 
 **1. [LOCAL] Bring in changes + reconcile the deploy layer**
 ```bash
-git checkout deploy/aws-k3s && git pull
+git checkout deploy/aws-eks && git pull
 git fetch origin && git merge origin/reconfig-edge      # only if integrating branch updates
 ```
 - Resolve conflicts keeping **our** deploy logic (bootstrap, `infra/edge/*`, the
@@ -520,13 +581,25 @@ git fetch origin && git merge origin/reconfig-edge      # only if integrating br
   > **Packages**, and set any **newly-created** packages (e.g. `yolo`/`reid`
   > `-cpu`/`-cuda`) to **Public** — new GHCR packages default to **private**.
 
-**3. [SERVER] Roll out the cloud** (EEP self-applies new Alembic migrations)
+**3. [LOCAL] Roll out the cloud** (EEP self-applies new Alembic migrations)
 ```bash
-export EIP=34.248.161.113 OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-cd /opt/retail-edge && git pull
-helm upgrade retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set monitoring.grafana.host=grafana.$EIP.nip.io --set mlflow.host=mlflow.$EIP.nip.io -n retailvision
-k3s kubectl -n retailvision rollout status deploy/eep && k3s kubectl -n retailvision get pods
+export OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
+export APP_HOST="$(terraform -chdir=infra/aws output -raw app_host)"
+export EEP_HOST="$(terraform -chdir=infra/aws output -raw eep_host)"
+export INGRESS_EIP="$(terraform -chdir=infra/aws output -raw ingress_eip)"
+git pull
+helm upgrade retailvision ./charts/retailvision \
+  -f charts/retailvision/values.production.yaml \
+  --reuse-values \
+  --set global.imageRegistry=ghcr.io/$OWNER/retailvision \
+  --set ingress.appHost="$APP_HOST" \
+  --set eep.grpcHost="$EEP_HOST" \
+  --set s3.bucket="$BUCKET" \
+  --set s3.region="$REGION" \
+  --set monitoring.grafana.host="grafana.$INGRESS_EIP.nip.io" \
+  --set mlflow.host="mlflow.$INGRESS_EIP.nip.io" \
+  -n retailvision
+kubectl -n retailvision rollout status deploy/eep && kubectl -n retailvision get pods
 ```
 > Tags now come from `values.yaml` (step 2), so no per-image `--set …tag` needed.
 > IEP3/IEP4 are re-provisioned by EEP per active store — no `iep3.stores` flag in
@@ -541,7 +614,7 @@ k3s kubectl -n retailvision rollout status deploy/eep && k3s kubectl -n retailvi
   and pulls the new `-cpu`/`-cuda` images:
   ```bash
   cd ~/path/to/retail-edge && git pull
-  sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.1.0 "eep.$EIP.nip.io" "$AGENT_SECRET"
+  sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.1.0 "$EEP_HOST" "$AGENT_SECRET"
   ```
 - **jetson**: rebuild `yolo`/`reid` on the device at the new tag (C4), then re-run
   the bootstrap.
@@ -549,33 +622,34 @@ k3s kubectl -n retailvision rollout status deploy/eep && k3s kubectl -n retailvi
   bootstrap rewrites it to the version you pass — the next `StartCamera` uses it.
 
 **5. Verify**: `kubectl -n retailvision get pods` (cloud + each edge) all `Running`;
-hit `https://app.$EIP.nip.io`.
+hit `https://$APP_HOST`.
 
 The granular variants (D1–D5) below cover individual cases.
 
 ### D1. Update the application (new code → new image version)
 
-1. **[LOCAL]** merge your changes into `deploy/aws-k3s`, then tag & push:
+1. **[LOCAL]** merge your changes into `deploy/aws-eks`, then tag & push:
    ```bash
    git tag v1.0.1
    git push origin v1.0.1
    ```
    Wait for **Actions** to go green (images pushed as `:1.0.1`).
-2. **[SERVER]** set variables, then roll out the new tag:
+2. **[LOCAL]** set variables, then roll out the new tag:
    ```bash
-   export EIP=34.248.161.113 OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
-   export STORE=00000000-0000-0000-0000-000000000001 TAG=1.0.1
-   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-   cd /opt/retail-edge && git pull
+   export OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658 TAG=1.0.1
+   export APP_HOST="$(terraform -chdir=infra/aws output -raw app_host)"
+   export EEP_HOST="$(terraform -chdir=infra/aws output -raw eep_host)"
+   export INGRESS_EIP="$(terraform -chdir=infra/aws output -raw ingress_eip)"
+   git pull
    ```
    Then (one line):
    ```bash
-   helm upgrade retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost=app.$EIP.nip.io --set eep.grpcHost=eep.$EIP.nip.io --set s3.bucket=$BUCKET --set s3.region=$REGION --set "iep3.stores={$STORE}" --set eep.image.tag=$TAG --set iep3.image.tag=$TAG --set frontend.image.tag=$TAG -n retailvision
+   helm upgrade retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --reuse-values --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost="$APP_HOST" --set eep.grpcHost="$EEP_HOST" --set s3.bucket="$BUCKET" --set s3.region="$REGION" --set monitoring.grafana.host="grafana.$INGRESS_EIP.nip.io" --set mlflow.host="mlflow.$INGRESS_EIP.nip.io" --set eep.image.tag=$TAG --set iep3.image.tag=$TAG --set iep4.image.tag=$TAG --set iep5.image.tag=$TAG --set iep6.image.tag=$TAG --set frontend.image.tag=$TAG --set mlflow.image.tag=$TAG -n retailvision
    ```
-3. **[SERVER]** watch the rollout:
+3. **[LOCAL]** watch the rollout:
    ```bash
-   k3s kubectl -n retailvision rollout status deploy/eep
-   k3s kubectl -n retailvision get pods
+   kubectl -n retailvision rollout status deploy/eep
+   kubectl -n retailvision get pods
    ```
    **Expect:** new pods replace old ones, all `Running`. EEP re-runs Alembic on
    start (idempotent).
@@ -587,7 +661,7 @@ The granular variants (D1–D5) below cover individual cases.
 ### D2. Update chart/config only (no new image)
 
 1. **[LOCAL]** edit the chart or `values.production.yaml`, commit & push.
-2. **[SERVER]** `git pull` then re-run the **A7** helm command (without
+2. **[LOCAL]** `git pull` then re-run the **A6** helm command (without
    `--create-namespace`). Helm applies only what changed.
 
 ### D3. Update infrastructure (Terraform)
@@ -598,24 +672,24 @@ The granular variants (D1–D5) below cover individual cases.
    terraform plan      # review carefully — see what will change/replace
    terraform apply
    ```
-   **Caution:** changing `server_instance_type` or the AMI **replaces the EC2
-   instance** (re-bootstraps k3s and wipes in-cluster state). Adding
-   `agent_count` only adds nodes (safe). Read the plan before approving.
+   **Caution:** read the plan before approving. EKS control-plane changes,
+   node-group changes, and Karpenter limits can replace or churn capacity. Stateful
+   data lives on gp3 PVCs; back up before destructive storage changes.
 
 ### D4. Restart a service (no change, just bounce it)
 
 ```bash
-k3s kubectl -n retailvision rollout restart deploy/eep
-k3s kubectl -n retailvision rollout restart deploy/frontend
-k3s kubectl -n retailvision rollout restart statefulset/redis-server
+kubectl -n retailvision rollout restart deploy/eep
+kubectl -n retailvision rollout restart deploy/frontend
+kubectl -n retailvision rollout restart statefulset/redis-server
 ```
 
 ### D5. Update an edge device
 
 ```bash
 # [EDGE] update inference services to a new image tag:
-k3s kubectl -n retailvision set image deployment/yolo-service yolo-service=ghcr.io/salman-719/retailvision/yolo:1.0.1
-k3s kubectl -n retailvision set image deployment/reid-service reid-service=ghcr.io/salman-719/retailvision/reid:1.0.1
+kubectl -n retailvision set image deployment/yolo-service yolo-service=ghcr.io/salman-719/retailvision/yolo:1.0.1
+kubectl -n retailvision set image deployment/reid-service reid-service=ghcr.io/salman-719/retailvision/reid:1.0.1
 # IEP2 (per-camera) uses IEP2_IMAGE from the agent env; bump it then:
 sudo sed -i 's#retailvision/iep2:.*#retailvision/iep2:1.0.1#' /etc/retailvision/edge-agent.env
 sudo systemctl restart retailvision-edge-agent
@@ -632,11 +706,11 @@ sudo systemctl restart retailvision-edge-agent
 | zsh `command not found: --flag` | multi-line paste mangled | paste **one line** at a time |
 | `helm ... namespaces "retailvision" not found` on first try | namespace race | include `--create-namespace` (step A7) |
 | Pod `ImagePullBackOff` | build not green or package private | A3: build green + set `eep`/`iep3`/`frontend` **Public**; verify `k3s crictl pull` |
-| `ImagePullBackOff` on a **freshly-tagged** image (e.g. `eep:1.1.0`) right after a release | that service's CI job hasn't finished (or failed); other images already pushed | wait for **all** matrix jobs green (check per-image tag in Packages); then `k3s kubectl -n retailvision delete pod -l app=<svc>` to retry. Confirm which tags exist: `curl -s "https://ghcr.io/token?scope=repository:<owner>/retailvision/<svc>:pull&service=ghcr.io"` then query `/v2/.../tags/list` |
-| Pod `Pending` "Insufficient cpu" | node too small | add `agent_count` or bigger `server_instance_type` (D3) |
+| `ImagePullBackOff` on a **freshly-tagged** image (e.g. `eep:1.1.0`) right after a release | that service's CI job hasn't finished (or failed); other images already pushed | wait for **all** matrix jobs green (check per-image tag in Packages); then `kubectl -n retailvision delete pod -l app=<svc>` to retry. Confirm which tags exist: `curl -s "https://ghcr.io/token?scope=repository:<owner>/retailvision/<svc>:pull&service=ghcr.io"` then query `/v2/.../tags/list` |
+| Pod `Pending` "Insufficient cpu" | Karpenter cannot launch enough capacity or limits are too low | check `kubectl -n kube-system logs deploy/karpenter`, AWS quotas, and `karpenter_cpu_limit`; raise limits or allow larger instance families (D3) |
 | `relation "tracking_history" does not exist` | Postgres volume not freshly seeded | clean reinstall below (needs an **empty** PVC) |
 | `password authentication failed` | stale Postgres volume from an earlier password | clean reinstall below |
-| `redis-server-0` stuck `ContainerCreating` | cert not issued yet | wait ~1 min; check `k3s kubectl -n retailvision get certificate` |
+| `redis-server-0` stuck `ContainerCreating` | cert not issued yet | wait ~1 min; check `kubectl -n retailvision get certificate` |
 | EEP log `Error 111 ... redis-server:6380` | Redis still starting | transient; clears once `redis-server-0` is `Running` |
 | `curl /api/...` → `404` | wrong path; real routes are `/api/auth`, `/api/stores`, … | test `/api/stores` (expect `401`) |
 | `certificate retailvision-app-tls` not Ready | Let's Encrypt rate-limited nip.io | re-run A7 with `--set ingress.clusterIssuer=retailvision-ca-issuer` |
@@ -653,13 +727,13 @@ sudo systemctl restart retailvision-edge-agent
 ### Clean reinstall (fresh database)
 
 Postgres seeds `schema.sql` **only on an empty volume**, so a true reset (including
-the **first switch to TimescaleDB**) must drop the PVC. **[SERVER]:**
+the **first switch to TimescaleDB**) must drop the PVC. **[LOCAL]:**
 ```bash
 helm uninstall retailvision -n retailvision 2>/dev/null
-k3s kubectl delete namespace retailvision --ignore-not-found --wait=true
+kubectl delete namespace retailvision --ignore-not-found --wait=true
 # Belt-and-braces: ensure the Postgres PVC is gone (PVCs can outlive a namespace
 # if finalizers hang). Confirm none remain:
-k3s kubectl get pvc -A | grep retailvision || echo "no retailvision PVCs (good)"
+kubectl get pvc -A | grep retailvision || echo "no retailvision PVCs (good)"
 ```
 Then re-run **A7**. EEP rebuilds the schema via Alembic (0001→0013) on the fresh
 TimescaleDB volume, then you re-create the store (Part B).
@@ -670,10 +744,10 @@ The node can only **read** secrets, so update from **[LOCAL]**:
 ```bash
 aws secretsmanager put-secret-value --profile adsal --region eu-west-1 --secret-id retailvision/<name> --secret-string '<new-value>'
 ```
-Then **[SERVER]** force a re-sync and restart consumers:
+Then **[LOCAL]** force a re-sync and restart consumers:
 ```bash
-k3s kubectl -n retailvision annotate externalsecret retailvision-secrets force-sync="$(date +%s)" --overwrite
-k3s kubectl -n retailvision rollout restart deploy/eep
+kubectl -n retailvision annotate externalsecret retailvision-secrets force-sync="$(date +%s)" --overwrite
+kubectl -n retailvision rollout restart deploy/eep
 ```
 
 ---
@@ -682,11 +756,11 @@ k3s kubectl -n retailvision rollout restart deploy/eep
 
 **[LOCAL]:**
 ```bash
-# app:
-aws ssm start-session --target $(terraform -chdir=infra/aws output -raw server_instance_id)
-#   [SERVER]: helm uninstall retailvision -n retailvision ; exit
-# infra:
-cd infra/aws && export AWS_PROFILE=adsal && terraform destroy
+helm uninstall retailvision -n retailvision 2>/dev/null || true
+kubectl delete namespace retailvision --ignore-not-found --wait=true
+cd infra/aws
+export AWS_PROFILE=adsal
+terraform destroy
 ```
 > S3 buckets and gp3 volumes use Retain/versioning — empty/delete them in the
 > console if you want them fully gone (otherwise they keep costing).

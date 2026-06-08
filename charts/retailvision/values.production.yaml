@@ -1,10 +1,17 @@
-# Production overrides — full replica count, production-grade resources.
-# Populate iep3.stores with actual store UUIDs before deploying.
-
-# Lean single-node profile (fits a 2-vCPU t4g.large): direct-to-Postgres (no
-# pgbouncer), single replicas, HPA off. Scale up on a bigger node / more nodes.
+# Production overrides for EKS: HA control plane, stable stateful pool, and HPA
+# on stateless APIs. Populate iep3.stores only for static emergency provisioning.
 database:
   host: postgres
+
+# Pin the stateful tier to the EKS on-demand stable node group.
+stablePool:
+  nodeSelector:
+    workload: stable
+  tolerations:
+    - key: stable
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
 
 pgbouncer:
   enabled: false
@@ -15,18 +22,28 @@ migrations:
   enabled: false
 
 eep:
-  replicas: 1
+  replicas: 2
   grpcHost: eep.retailvision.example.com   # set the real gRPC hostname before deploy
   hpa:
-    enabled: false
-    minReplicas: 1
+    enabled: true
+    minReplicas: 2
     maxReplicas: 4
 
 iep3:
   stores: []   # set at deploy time: --set iep3.stores={uuid1,uuid2,...}
 
 frontend:
-  replicas: 1
+  replicas: 2
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+
+iep6:
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 4
 
 postgres:
   storage: 50Gi
@@ -43,15 +60,16 @@ s3:
   bucket: retailvision-prod
   region: eu-west-1
 
-# Observability + MLOps on the cloud node. Hosts use nip.io against the EIP;
+# Observability + MLOps on the stable EKS node pool. Hosts use nip.io against
+# the ingress EIP;
 # override at deploy time, e.g.:
-#   --set monitoring.grafana.host=grafana.<EIP>.nip.io
-#   --set mlflow.host=mlflow.<EIP>.nip.io
+#   --set monitoring.grafana.host=grafana.<INGRESS_EIP>.nip.io
+#   --set mlflow.host=mlflow.<INGRESS_EIP>.nip.io
 monitoring:
   enabled: true
   grafana:
-    host: ""   # set to grafana.<EIP>.nip.io to expose via ingress
+    host: ""   # set to grafana.<INGRESS_EIP>.nip.io to expose via ingress
 
 mlflow:
   enabled: true
-  host: ""     # set to mlflow.<EIP>.nip.io to expose via ingress
+  host: ""     # set to mlflow.<INGRESS_EIP>.nip.io to expose via ingress

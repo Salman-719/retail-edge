@@ -1,29 +1,31 @@
-# Copy to terraform.tfvars and fill in. Run: terraform init && terraform plan
+# Copy to terraform.tfvars and fill in. Run: terraform init && terraform apply
 
 aws_region  = "eu-west-1"
 environment = "production"
-
-# Public hostnames (must match Helm values: ingress.appHost and eep.grpcHost).
-app_host = "app.retailvision.example.com"
-eep_host = "eep.retailvision.example.com"
 
 letsencrypt_email = "ops@retailvision.example.com"
 
 # Globally-unique bucket name (must match Helm values: s3.bucket).
 s3_bucket_name = "retailvision-prod-objects-CHANGEME"
 
-# Cost-efficient Graviton defaults; single-node to start.
-server_instance_type = "t4g.large"
-agent_count          = 0
+# ── EKS ──
+cluster_version = "1.30"
+# Lock the public API endpoint to your IP/office CIDR for production:
+# eks_public_access_cidrs = ["203.0.113.4/32"]
 
-# Repo the nodes clone to run the bootstrap script.
-git_repo_url = "https://github.com/your-org/retail-edge.git"
-git_branch   = "deploy/aws-k3s"
+# ── Stable on-demand node group (stateful + system tier) ──
+stable_instance_type = "t4g.large"
+stable_node_count    = 2
+stable_node_max_count = 4
+node_root_volume_gb  = 60
 
-# Lock SSH to your IP, or leave default and use SSM Session Manager instead.
-# ssh_key_name     = "my-keypair"
-# ssh_ingress_cidr = "203.0.113.4/32"
+# ── Karpenter elastic capacity (workers, per-store IEP3/IEP4, IEP5 jobs) ──
+karpenter_cpu_limit = "200"   # max total vCPUs Karpenter may provision
 
-# Optional: let Terraform create the Route53 records.
+# Hostnames: leave empty to derive app.<ingress-eip>.nip.io / eep.<...>.nip.io.
+# app_host = "app.retailvision.example.com"
+# eep_host = "eep.retailvision.example.com"
+
+# Optional: let Terraform create the Route53 records (needs a real domain).
 # create_dns_records = true
 # route53_zone_id    = "Z0123456789ABCDEFGHIJ"

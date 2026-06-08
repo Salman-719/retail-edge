@@ -34,6 +34,12 @@ spec:
       labels:
         app: mlflow
     spec:
+      {{- with .Values.stablePool.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.stablePool.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: mlflow
           image: "{{ .Values.global.imageRegistry }}/mlflow:{{ .Values.mlflow.image.tag }}"

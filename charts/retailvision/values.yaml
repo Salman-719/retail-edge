@@ -4,11 +4,19 @@ global:
   # as ghcr.io/<owner>/retailvision/<service>:<tag>.
   imageRegistry: ghcr.io/your-org/retailvision
   imagePullPolicy: IfNotPresent
-  # StorageClass for all PVCs (Postgres, Redis). Provisioned by the
-  # aws-ebs-csi-driver in bootstrap-cloud-k3s.sh.
+  # StorageClass for all PVCs (Postgres, Redis). On EKS, Terraform installs the
+  # aws-ebs-csi-driver and a default gp3 StorageClass.
   storageClass: gp3
 
 windowSeconds: "60"
+
+# Node placement for the stateful + heavy add-on tier (Postgres/TimescaleDB, Redis,
+# Prometheus, Grafana, MLflow). On EKS these are pinned to the on-demand "stable"
+# managed node group so Spot/Karpenter reclaim never disrupts data. Empty (default)
+# = schedule anywhere (k3s/dev). values.production sets {workload: stable}.
+stablePool:
+  nodeSelector: {}
+  tolerations: []
 
 # Database connection host for EEP/IEP3. Default routes through pgbouncer; set to
 # "postgres" (and pgbouncer.enabled=false) to connect directly (lower footprint).
@@ -21,6 +29,11 @@ eep:
   replicas: 2
   grpcPort: 50051
   httpPort: 8000
+  # gRPC exposure. EKS production sets LoadBalancer + AWS NLB annotations from
+  # Terraform outputs. ClusterIP is useful for dev or shared-ingress experiments.
+  grpc:
+    serviceType: ClusterIP
+    serviceAnnotations: {}
   # Public hostname edge devices dial for gRPC; must match the cert SAN and the
   # EEP_HOST passed to bootstrap-edge-k3s.sh. Override per environment.
   grpcHost: eep.retailvision.example.com
@@ -84,6 +97,11 @@ frontend:
     limits:
       cpu: "250m"
       memory: "128Mi"
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
 
 # IEP6 — AI analytics agent (OpenAI). Needs the openai-api-key secret seeded.
 iep6:
@@ -101,6 +119,11 @@ iep6:
     limits:
       cpu: "500m"
       memory: "512Mi"
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
 
 # In-cluster PostgreSQL (cheapest option). For managed RDS instead, set
 # postgres.enabled=false and point pgbouncer POSTGRESQL_HOST at the RDS endpoint.
@@ -154,7 +177,7 @@ monitoring:
       limits:   { cpu: "500m", memory: "1Gi" }
   grafana:
     image: "grafana/grafana:10.4.1"
-    host: ""        # e.g. grafana.<EIP>.nip.io ; blank = no ingress (port-forward)
+    host: ""        # e.g. grafana.<INGRESS_EIP>.nip.io ; blank = no ingress (port-forward)
     adminUser: "admin"
     storage: 2Gi
     resources:
@@ -173,7 +196,7 @@ mlflow:
   enabled: false   # production overlay enables it
   image:
     tag: "1.2.0"
-  host: ""          # e.g. mlflow.<EIP>.nip.io ; blank = no ingress (port-forward)
+  host: ""          # e.g. mlflow.<INGRESS_EIP>.nip.io ; blank = no ingress (port-forward)
   artifactPrefix: "mlflow"   # S3 key prefix inside s3.bucket
   storage: 5Gi      # PVC for the SQLite backend store
   resources:
@@ -181,7 +204,7 @@ mlflow:
     limits:   { cpu: "500m", memory: "1Gi" }
 
 # Public HTTPS ingress for the SPA + API (via the frontend pod's /api proxy).
-# Requires ingress-nginx + cert-manager (installed by bootstrap-cloud-k3s.sh).
+# Requires ingress-nginx + cert-manager (installed by the EKS Terraform add-ons).
 ingress:
   enabled: true
   className: nginx

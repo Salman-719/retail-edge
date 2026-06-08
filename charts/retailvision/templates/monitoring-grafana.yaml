@@ -67,6 +67,12 @@ spec:
       labels:
         app: grafana
     spec:
+      {{- with .Values.stablePool.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.stablePool.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         fsGroup: 472
         runAsUser: 472

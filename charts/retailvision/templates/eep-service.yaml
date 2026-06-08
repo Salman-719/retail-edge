@@ -17,7 +17,9 @@ spec:
       targetPort: {{ .Values.eep.httpPort }}
       protocol: TCP
 ---
-# gRPC — LoadBalancer, edge-reachable (TLS terminated at pod)
+# gRPC — edge-reachable (TLS terminated at the EEP pod). EKS production sets this
+# to LoadBalancer with AWS NLB annotations and fixed EIPs from Terraform outputs.
+# Dev may keep it ClusterIP or use k3s/klipper LoadBalancer.
 apiVersion: v1
 kind: Service
 metadata:
@@ -25,8 +27,11 @@ metadata:
   namespace: retailvision
   labels:
     app: eep
+  {{- with .Values.eep.grpc.serviceAnnotations }}
+  annotations: {{ toYaml . | nindent 4 }}
+  {{- end }}
 spec:
-  type: LoadBalancer
+  type: {{ .Values.eep.grpc.serviceType }}
   selector:
     app: eep
   ports:

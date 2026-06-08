@@ -1,96 +1,43 @@
+# VPC for the EKS cluster. Public subnets only across 2 AZs — nodes get public IPs
+# and egress via the Internet Gateway (NO NAT gateway: reliable + cost-saving, the
+# same egress model the prior k3s setup used). A free S3 gateway endpoint keeps S3
+# traffic off the public path. LB + Karpenter discovery via subnet/VPC tags.
 data "aws_availability_zones" "available" {
   state = "available"
 }
 
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags                 = { Name = "retailvision-${var.environment}" }
-}
+module "vpc" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.21.0"
 
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-  tags   = { Name = "retailvision-${var.environment}" }
-}
+  name = "retailvision-${var.environment}"
+  cidr = var.vpc_cidr
+  azs  = slice(data.aws_availability_zones.available.names, 0, 2)
 
-# Public subnets across two AZs. Nodes get public IPs; the server holds an EIP.
-resource "aws_subnet" "public" {
-  count                   = 2
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  # Public subnets only; nodes launch here with public IPs.
+  public_subnets          = [for i in range(2) : cidrsubnet(var.vpc_cidr, 8, i)]
   map_public_ip_on_launch = true
-  tags                    = { Name = "retailvision-${var.environment}-public-${count.index}" }
+
+  enable_nat_gateway   = false
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    "karpenter.sh/discovery" = local.cluster_name
+  }
+  # The AWS LB Controller places internet-facing LBs in subnets tagged role/elb;
+  # Karpenter discovers subnets by the discovery tag; EKS needs the cluster tag.
+  public_subnet_tags = {
+    "kubernetes.io/role/elb"                      = "1"
+    "kubernetes.io/cluster/${local.cluster_name}" = "shared"
+    "karpenter.sh/discovery"                      = local.cluster_name
+  }
 }
 
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
-  }
-  tags = { Name = "retailvision-${var.environment}-public" }
-}
-
-resource "aws_route_table_association" "public" {
-  count          = length(aws_subnet.public)
-  subnet_id      = aws_subnet.public[count.index].id
-  route_table_id = aws_route_table.public.id
-}
-
-# Public-facing traffic: HTTP/HTTPS (ingress) + gRPC 50051 (edge agents).
-resource "aws_security_group" "node" {
-  name        = "retailvision-${var.environment}-node"
-  description = "RetailVision k3s nodes"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description = "HTTP (ACME http-01 + redirect)"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    description = "HTTPS (SPA/API)"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    description = "EEP gRPC (edge devices, TLS/mTLS)"
-    from_port   = 50051
-    to_port     = 50051
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    description = "SSH (locked down)"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.ssh_ingress_cidr]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = { Name = "retailvision-${var.environment}-node" }
-}
-
-# Intra-cluster traffic (k3s API 6443, flannel VXLAN 8472/udp, kubelet 10250).
-resource "aws_security_group_rule" "node_intra" {
-  type                     = "ingress"
-  from_port                = 0
-  to_port                  = 0
-  protocol                 = "-1"
-  security_group_id        = aws_security_group.node.id
-  source_security_group_id = aws_security_group.node.id
-  description              = "All intra-cluster traffic between k3s nodes"
+# S3 gateway endpoint (free) — routes S3 traffic privately via the public route table.
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = module.vpc.vpc_id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = module.vpc.public_route_table_ids
+  tags              = { Name = "retailvision-${var.environment}-s3" }
 }

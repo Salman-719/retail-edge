@@ -23,3 +23,53 @@ spec:
           type: Utilization
           averageUtilization: {{ .Values.eep.hpa.targetCPUUtilizationPercentage }}
 {{- end }}
+{{- if and .Values.frontend.enabled .Values.frontend.hpa.enabled }}
+---
+# Horizontal autoscaling for the frontend nginx/SPA proxy.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: retailvision
+  labels:
+    app: frontend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: {{ .Values.frontend.hpa.minReplicas }}
+  maxReplicas: {{ .Values.frontend.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.frontend.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- if and .Values.iep6.enabled .Values.iep6.hpa.enabled }}
+---
+# Horizontal autoscaling for IEP6 agent API.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: iep6-agent
+  namespace: retailvision
+  labels:
+    app: iep6-agent
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: iep6-agent
+  minReplicas: {{ .Values.iep6.hpa.minReplicas }}
+  maxReplicas: {{ .Values.iep6.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.iep6.hpa.targetCPUUtilizationPercentage }}
+{{- end }}

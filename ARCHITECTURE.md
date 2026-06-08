@@ -114,22 +114,19 @@ IEP4/5/6             alerts (IEP4) · end-of-shift analytics (IEP5) · AI agent 
 ## 3. End-to-End Architecture
 
 ```
-CLOUD (Kubernetes / Docker Compose)
+CLOUD (Amazon EKS)
 ┌──────────────────────────────────────────────────────────────────────┐
-│  React Frontend  :3000 (prod build)  /  :5173 (Vite dev + dev screens) │
-│         │ HTTP REST (/api → :8000)        │ WebSocket (live → :8010)   │
-│         ▼                                  ▼                            │
-│  EEP  :8000 REST  +  :50051 gRPC (TLS)   Live Bridge :8010             │
-│  FastAPI · SQLAlchemy async · APScheduler · grpc.aio                   │
-│   • Auth, stores, cameras, zones, calibrations, members, employees,    │
-│     shifts, schedules, audit, settings                                 │
-│   • Pushes StartCamera/StopCamera down the gRPC stream to edge         │
+│  Ingress NLB(EIP) → ingress-nginx → React Frontend → /api → EEP      │
+│  gRPC NLB(EIP) :50051 → eep-grpc Service → EEP pod TLS/mTLS          │
 │                                                                        │
-│  IEP3 Reconciliation (daemon, no port)                                 │
-│   consumes stream:iep2:batch_complete → cross-camera ReID →            │
-│   global_identities / global_tracking_history                          │
+│  Stable on-demand node pool (tainted workload=stable)                 │
+│    TimescaleDB/Postgres · Redis · Prometheus · Grafana · MLflow       │
+│    cert-manager · External Secrets · AWS LB Controller · Karpenter    │
 │                                                                        │
-│  PostgreSQL + PgBouncer · Server Redis · MinIO (S3)                    │
+│  Karpenter elastic worker pool (Graviton Spot + on-demand fallback)   │
+│    EEP/frontend/IEP6 · per-store IEP3/IEP4 · IEP5 Jobs                │
+│                                                                        │
+│  S3 objects + MLflow artifacts · AWS Secrets Manager · gp3 PVCs       │
 └──────────────────────┬─────────────────────────────────────────────────┘
                        │ gRPC TLS :50051  (edge dials OUT; stream stays open)
 ┌──────────────────────▼─────────────────────────────────────────────────┐
