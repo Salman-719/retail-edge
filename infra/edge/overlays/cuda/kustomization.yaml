@@ -11,13 +11,13 @@ resources:
 images:
   - name: ghcr.io/your-org/retailvision/iep1
     newName: ghcr.io/salman-719/retailvision/iep1
-    newTag: "1.1.0"
+    newTag: "1.1.3"
   - name: ghcr.io/your-org/retailvision/yolo
     newName: ghcr.io/salman-719/retailvision/yolo
-    newTag: "1.1.0-cuda"
+    newTag: "1.1.3-cuda"
   - name: ghcr.io/your-org/retailvision/reid
     newName: ghcr.io/salman-719/retailvision/reid
-    newTag: "1.1.0-cuda"
+    newTag: "1.1.3-cuda"
 
 patches:
   - target: { kind: Deployment, name: yolo-service }
