@@ -163,9 +163,12 @@ git push origin deploy/aws-eks
 ```
 
 Then open **AWS Console → CloudShell** in `eu-west-1`. If your prompt is root
-(`#`) because you ran `sudo -i`, either type `exit` to return to the normal
-CloudShell user or keep going; the commands below install tools into
-`/usr/local/bin` so both users can find them.
+(`#`) because you ran `sudo -i`, type `exit` to return to the normal CloudShell
+user before cloning or running Terraform. CloudShell persists the normal user's
+home directory, but `/root` belongs to the replaceable backing machine. Keeping a
+local Terraform state under `/root` can lose the state when CloudShell restarts.
+The commands below install tools into `/usr/local/bin`, but the repository and
+state must remain under `$HOME`.
 
 Install the deploy tools:
 ```bash
@@ -190,8 +193,9 @@ kubectl version --client
 
 Clone the repo:
 ```bash
+cd "$HOME"
 git clone https://github.com/Salman-719/retail-edge.git
-cd retail-edge
+cd "$HOME/retail-edge"
 git checkout deploy/aws-eks
 cd infra/aws
 cp terraform.tfvars.example terraform.tfvars
@@ -760,7 +764,7 @@ Terraform state:
 ```bash
 export PATH="/usr/local/bin:$PATH"
 export AWS_REGION=eu-west-1
-cd /root/retail-edge
+cd "$HOME/retail-edge"
 git pull --ff-only origin deploy/aws-eks
 cd infra/aws
 terraform init -reconfigure
@@ -771,6 +775,27 @@ curl -I https://app.52.17.97.51.nip.io
 
 The plan should add the node security-group self-ingress rule. Review the plan and
 do not apply it if it proposes unrelated destructive changes.
+
+If that checkout or its `terraform.tfstate` no longer exists, do **not** run
+Terraform from a fresh clone. Apply the narrowly scoped live repair instead:
+
+```bash
+export AWS_REGION=eu-west-1
+NODE_SG="$(aws ec2 describe-security-groups \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:karpenter.sh/discovery,Values=retailvision-production" \
+  --query "SecurityGroups[?contains(GroupName, 'node')].GroupId | [0]" \
+  --output text)"
+test -n "$NODE_SG" && test "$NODE_SG" != "None" && echo "Node SG: $NODE_SG"
+aws ec2 authorize-security-group-ingress \
+  --region "$AWS_REGION" \
+  --group-id "$NODE_SG" \
+  --ip-permissions "[{\"IpProtocol\":\"-1\",\"UserIdGroupPairs\":[{\"GroupId\":\"$NODE_SG\",\"Description\":\"Allow all pod and node traffic between EKS nodes\"}]}]"
+curl -I https://app.52.17.97.51.nip.io
+```
+
+After service is restored, recover or rebuild the Terraform state and migrate it
+to an S3 backend before making further infrastructure changes.
 
 ### Recover a Partial EKS Apply
 
