@@ -314,6 +314,19 @@ async def activate_version_now(
                 {"id": uuid.UUID(new_version_id), "now": now},
             )
 
+    # Step 3.6 — recompute camera→zone coverage for the now-active version so
+    # IEP3 can build its cross-camera overlap graph. Non-fatal: a coverage
+    # failure must not block activation; IEP3 degrades to no cross-camera links
+    # for uncovered cameras rather than crashing.
+    try:
+        from app.core.coverage import populate_camera_zone_coverage
+        await populate_camera_zone_coverage(new_version_id)
+    except Exception:
+        logger.exception(
+            "activate_version_now: camera_zone_coverage population failed for "
+            "version %s — IEP3 overlap graph may be incomplete", new_version_id,
+        )
+
     # Step 3.5 — ensure IEP3 + IEP4 exist for this store (idempotent).
     # Skip in DEBUG_MODE: their lifecycle is managed by the dev pipeline controls.
     if not settings.DEBUG_MODE:

@@ -1,20 +1,27 @@
-"""EmbeddingGallery — bounded, self-managing embedding store per person.
+"""EmbeddingGallery — bounded top-quality embedding store per person.
 
-Handles two phases:
-  init    — placeholder embeddings collected on track birth, centroid via EMA
-  sampled — quality embeddings; phase switch clears all init, diversity kept
-             via novelty-based replacement at capacity
+Maintains a min-heap of up to MAX_EMBEDDINGS ``(quality_score, embedding)``
+pairs. The lowest-quality embedding sits at the heap root and is evicted first
+when a higher-quality one arrives at capacity. Two consumers:
 
-No ReID logic, no pool logic — pure math.
+  * ``snapshot_centroid()`` — L2-normalized mean of the retained embeddings,
+    computed on demand for IEP2's *internal* occlusion-recovery ReID
+    (LocalIdentityManager._resolve_pending). Never persisted.
+  * ``export_packed()`` — the raw embeddings + their quality scores, written to
+    ``local_centroids`` at batch end for IEP3 cross-camera matching.
+
+This replaces the previous EMA-centroid gallery: IEP3 now matches against the
+raw top-quality embeddings (median cosine), so IEP2 keeps them instead of
+smearing them into a single running mean. No ReID logic, no pool logic — pure
+storage + math.
 """
-import os
+import heapq
+import itertools
 
 import numpy as np
 
-DEFAULT_MAX_SIZE  = 8
-# R7 (M2-S4): EMA alpha 0.3 — responsive to appearance change while retaining history.
-# Configurable via CENTROID_EMA_ALPHA env var; override for calibration in specific environments.
-DEFAULT_EMA_ALPHA = float(os.environ.get("CENTROID_EMA_ALPHA", "0.3"))
+EMBEDDING_DIM  = 2048   # resnet50_msmt17 output
+MAX_EMBEDDINGS = 10     # heap capacity per local_id (matches IEP3 MAX_EMBEDDINGS)
 
 
 def _l2_normalize(v: np.ndarray) -> np.ndarray:
@@ -23,78 +30,100 @@ def _l2_normalize(v: np.ndarray) -> np.ndarray:
 
 
 class EmbeddingGallery:
-    def __init__(self, max_size: int = DEFAULT_MAX_SIZE, ema_alpha: float = DEFAULT_EMA_ALPHA):
+    def __init__(self, max_size: int = MAX_EMBEDDINGS):
         self._max_size = max_size
-        self._ema_alpha = ema_alpha
-        self._embeddings: list[np.ndarray] = []
-        self._centroid: np.ndarray | None = None
+        # Min-heap of (quality_score, seq, embedding). `seq` is a strictly
+        # increasing tiebreaker so two equal quality scores never fall through
+        # to comparing numpy arrays (which raises ValueError).
+        self._heap: list[tuple[float, int, np.ndarray]] = []
+        self._seq = itertools.count()
         self._is_init_phase: bool = True
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
-    def add(self, embedding: np.ndarray, is_init: bool) -> None:
-        """Add an already-L2-normalized embedding to the gallery.
+    def add(self, embedding: np.ndarray, quality_score: float, is_init: bool = False) -> None:
+        """Insert an already-L2-normalized embedding with its quality score.
 
-        is_init=True  → init-phase embedding (e.g. from track birth frame)
-        is_init=False → quality sampled embedding
+        ``is_init`` only tracks the init→sampled phase transition that the
+        manager reads to gate buffering vs sampling; both phases feed the same
+        quality heap (unlike the old gallery, init embeddings are not discarded
+        on phase switch — they compete on quality like any other).
         """
-        if is_init and self._is_init_phase:
-            self._embeddings.append(embedding)
-            self._ema_update_centroid(embedding)
-            return
-
         if not is_init and self._is_init_phase:
-            # Phase switch: discard all init embeddings, reset centroid.
-            self._embeddings.clear()
-            self._centroid = None
             self._is_init_phase = False
-            # Fall through to add as first sampled embedding.
+        self._push(float(quality_score), embedding)
 
-        # Sampled phase — below capacity: append + EMA update.
-        if len(self._embeddings) < self._max_size:
-            self._embeddings.append(embedding)
-            self._ema_update_centroid(embedding)
-            return
-
-        # Sampled phase — at capacity: novelty-based replacement.
-        most_redundant_idx = int(np.argmax(
-            [float(np.dot(e, self._centroid)) for e in self._embeddings]
-        ))
-        redundant_sim = float(np.dot(self._embeddings[most_redundant_idx], self._centroid))
-        newcomer_sim = float(np.dot(embedding, self._centroid))
-
-        if newcomer_sim < redundant_sim:
-            self._embeddings[most_redundant_idx] = embedding
-            self._recompute_centroid()
-        # Otherwise discard silently.
+    def _push(self, quality_score: float, embedding: np.ndarray) -> None:
+        item = (quality_score, next(self._seq), embedding)
+        if len(self._heap) < self._max_size:
+            heapq.heappush(self._heap, item)
+        elif quality_score > self._heap[0][0]:
+            heapq.heapreplace(self._heap, item)
+        # else: lower quality than every retained embedding — discard.
 
     @property
     def is_init_phase(self) -> bool:
         return self._is_init_phase
 
+    def __len__(self) -> int:
+        return len(self._heap)
+
     def snapshot_centroid(self) -> np.ndarray | None:
-        """Return the current L2-normalized centroid, or None if gallery is empty."""
-        return self._centroid
+        """L2-normalized mean of retained embeddings, or None if empty.
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+        Read-only — never mutates heap state. Used only for IEP2-internal
+        occlusion-recovery ReID, never stored.
+        """
+        if not self._heap:
+            return None
+        mean = np.mean([e for _, _, e in self._heap], axis=0)
+        norm = np.linalg.norm(mean)
+        if norm == 0:
+            return None
+        return (mean / norm).astype(np.float32)
 
-    def _ema_update_centroid(self, new_vec: np.ndarray) -> None:
-        if self._centroid is None:
-            self._centroid = new_vec.copy()
-        else:
-            blended = self._ema_alpha * new_vec + (1.0 - self._ema_alpha) * self._centroid
-            self._centroid = _l2_normalize(blended)
+    def export_packed(self) -> tuple[bytes, int, bytes] | None:
+        """Pack the heap for local_centroids.
 
-    def _recompute_centroid(self) -> None:
-        if not self._embeddings:
-            self._centroid = None
+        Returns ``(embeddings_bytes, embedding_count, quality_scores_bytes)``
+        ordered by descending quality, where embeddings_bytes is
+        ``count * EMBEDDING_DIM`` float32 and quality_scores_bytes is ``count``
+        float32. Returns None when the heap is empty (caller skips the upsert).
+        """
+        if not self._heap:
+            return None
+        ordered = sorted(self._heap, key=lambda t: t[0], reverse=True)
+        embs   = np.array([e for _, _, e in ordered], dtype=np.float32)
+        scores = np.array([q for q, _, _ in ordered], dtype=np.float32)
+        return embs.tobytes(), len(ordered), scores.tobytes()
+
+    def load_packed(
+        self,
+        embeddings_bytes: bytes,
+        embedding_count: int,
+        quality_scores_bytes: bytes,
+    ) -> None:
+        """Rebuild the heap from a persisted local_centroids row (restart recovery).
+
+        Unpacks ``embeddings_bytes`` into (count, EMBEDDING_DIM) and pairs each
+        row with its quality score. Replaces any current heap contents.
+        """
+        if embedding_count <= 0 or not embeddings_bytes:
             return
-        mean = np.mean(self._embeddings, axis=0)
-        self._centroid = _l2_normalize(mean)
+        embs = (
+            np.frombuffer(embeddings_bytes, dtype=np.float32)
+            .reshape(embedding_count, EMBEDDING_DIM)
+            .copy()
+        )
+        scores = np.frombuffer(quality_scores_bytes, dtype=np.float32)
+        self._heap = [
+            (float(scores[i]) if i < len(scores) else 0.0, next(self._seq), embs[i])
+            for i in range(embedding_count)
+        ]
+        heapq.heapify(self._heap)
+        self._is_init_phase = False  # a restored gallery is past its init phase
 
 
 # ---------------------------------------------------------------------------
@@ -104,47 +133,51 @@ if __name__ == "__main__":
     rng = np.random.default_rng(42)
 
     def fake_emb():
-        v = rng.standard_normal(2048).astype(np.float32)
+        v = rng.standard_normal(EMBEDDING_DIM).astype(np.float32)
         return v / np.linalg.norm(v)
 
     g = EmbeddingGallery()
 
-    # Add 3 init embeddings.
-    for _ in range(3):
-        g.add(fake_emb(), is_init=True)
-    assert g._is_init_phase, "should still be in init phase"
-    assert len(g._embeddings) == 3
+    # Fill to capacity with ascending quality.
+    for i in range(MAX_EMBEDDINGS):
+        g.add(fake_emb(), quality_score=0.1 * (i + 1), is_init=(i < 3))
+    assert len(g) == MAX_EMBEDDINGS, "heap should be at capacity"
+    assert not g.is_init_phase, "any non-init add flips the phase"
 
-    # Add 1 sampled embedding — triggers phase switch.
-    g.add(fake_emb(), is_init=False)
-    assert not g._is_init_phase, "should have switched to sampled phase"
-    assert len(g._embeddings) == 1, "init embeddings should have been cleared"
+    # A higher-quality embedding evicts the lowest (root).
+    low_root = g._heap[0][0]
+    g.add(fake_emb(), quality_score=0.95)
+    assert g._heap[0][0] > low_root, "root should rise after eviction"
+    assert len(g) == MAX_EMBEDDINGS, "size stays capped"
 
+    # A lower-quality embedding is discarded.
+    g.add(fake_emb(), quality_score=0.001)
+    assert len(g) == MAX_EMBEDDINGS
+
+    # Centroid is L2-normalized.
     c = g.snapshot_centroid()
-    assert c is not None
-    assert c.shape == (2048,), f"expected (2048,), got {c.shape}"
-    norm = float(np.linalg.norm(c))
-    assert abs(norm - 1.0) < 1e-5, f"centroid norm should be ~1.0, got {norm:.6f}"
+    assert c is not None and c.shape == (EMBEDDING_DIM,)
+    assert abs(float(np.linalg.norm(c)) - 1.0) < 1e-5
 
-    print(f"centroid shape: {c.shape}")
-    print(f"centroid norm:  {norm:.6f}")
+    # export → load round-trips identically.
+    embs_b, count, scores_b = g.export_packed()
+    assert count == MAX_EMBEDDINGS
+    assert len(embs_b) == count * EMBEDDING_DIM * 4
+    assert len(scores_b) == count * 4
+    g2 = EmbeddingGallery()
+    g2.load_packed(embs_b, count, scores_b)
+    e2, c2, s2 = g2.export_packed()
+    assert e2 == embs_b and c2 == count and s2 == scores_b, "round-trip mismatch"
 
-    # Fill to capacity and test novelty replacement.
-    for _ in range(DEFAULT_MAX_SIZE - 1):
-        g.add(fake_emb(), is_init=False)
-    assert len(g._embeddings) == DEFAULT_MAX_SIZE
+    # Equal quality scores must not raise (tiebreaker works).
+    g3 = EmbeddingGallery()
+    for _ in range(MAX_EMBEDDINGS + 2):
+        g3.add(fake_emb(), quality_score=0.5)
+    assert len(g3) == MAX_EMBEDDINGS
 
-    before = g.snapshot_centroid().copy()
-    g.add(fake_emb(), is_init=False)  # at capacity — should replace or discard
-    assert len(g._embeddings) == DEFAULT_MAX_SIZE, "size must stay at max_size"
-
-    # snapshot_centroid must be read-only — call twice and compare.
-    c1 = g.snapshot_centroid()
-    c2 = g.snapshot_centroid()
-    assert np.array_equal(c1, c2), "snapshot_centroid must not mutate state"
-
-    # Empty gallery returns None.
+    # Empty gallery.
     empty = EmbeddingGallery()
     assert empty.snapshot_centroid() is None
+    assert empty.export_packed() is None
 
     print("smoke test passed")

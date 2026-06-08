@@ -16,42 +16,40 @@ logger = logging.getLogger(__name__)
 _QUERY_TIMEOUT   = 120.0   # transactional queries — inside batch transaction
 _STANDALONE_TIMEOUT = 30.0 # standalone queries — acquire own connection
 
+EMBEDDING_DIM = 2048       # resnet50_msmt17 — must match IEP2
+
+
+def merge_top_quality(
+    existing: list[tuple[float, np.ndarray]],
+    incoming: list[tuple[float, np.ndarray]],
+    max_n: int,
+) -> list[tuple[float, np.ndarray]]:
+    """Merge two (quality_score, embedding) lists, keeping the top `max_n`.
+
+    Used by Stage 8 to fold a matched local_centroids heap into the global
+    embedding store. Deterministic: sorted by descending quality.
+    """
+    combined = list(existing) + list(incoming)
+    combined.sort(key=lambda t: t[0], reverse=True)
+    return combined[:max_n]
+
+
+def _unpack_embeddings(raw: bytes | None, count: int) -> np.ndarray:
+    """Unpack a packed embeddings BYTEA into a (count, EMBEDDING_DIM) float32 array."""
+    if not raw or count <= 0:
+        return np.empty((0, EMBEDDING_DIM), dtype=np.float32)
+    return np.frombuffer(raw, dtype=np.float32).reshape(count, EMBEDDING_DIM).copy()
+
+
+def _unpack_scores(raw: bytes | None, count: int) -> np.ndarray:
+    if not raw or count <= 0:
+        return np.zeros(max(count, 0), dtype=np.float32)
+    return np.frombuffer(raw, dtype=np.float32).copy()
+
 
 # =============================================================================
 # Data structures — imported by all IEP3 components
 # =============================================================================
-
-@dataclass
-class LocalObservation:
-    local_id:        uuid.UUID
-    camera_id:       str
-    last_floor_x:    float
-    last_floor_y:    float
-    last_seen_ts:    int    # epoch ms from tracking_history
-    first_seen_ts:   int    # epoch ms, used for ordering in ReID loop
-    best_confidence: float
-    best_bbox_area:  float
-
-
-@dataclass
-class MappingRow:
-    id:           int
-    global_id:    uuid.UUID
-    camera_id:    str
-    local_id:     uuid.UUID
-    is_active:    bool
-    last_seen_ts: int
-
-
-@dataclass
-class GlobalCandidate:
-    global_id:         uuid.UUID
-    state:             str        # 'active' or 'lost'
-    last_floor_x:      float | None
-    last_floor_y:      float | None
-    last_seen_ts:      int
-    active_camera_ids: set        # set[str] — cameras with active links
-
 
 @dataclass
 class PositionRow:
@@ -99,6 +97,21 @@ class ResolutionResult:
 class CameraBatchInfo:
     camera_config_id: str        # UUID as str — resolution cache key
     version_id:       str | None  # UUID as str — written to global_tracking_history
+
+
+@dataclass
+class DetectionRow:
+    """One raw tracking_history detection in a batch window (Stage 1).
+
+    Floor coords are metres; camera_id is the physical-camera UUID string.
+    """
+    camera_id:       str
+    local_id:        uuid.UUID
+    timestamp_ms:    int
+    floor_x:         float
+    floor_y:         float
+    bbox_confidence: float
+    bbox_area:       float
 
 
 # =============================================================================
@@ -315,191 +328,6 @@ class Iep3Repository:
     # TRANSACTION — caller passes asyncpg Connection
     # =========================================================================
 
-    async def read_batch_observations(
-        self,
-        conn: asyncpg.Connection,
-        window_start_ms: int,
-        window_end_ms: int,
-    ) -> list[LocalObservation]:
-        """Read all LocalIDs active in this batch window.
-
-        Excludes rows with NULL floor coordinates (calibration canary guard).
-        Ordered by first_seen_ts ASC for deterministic ReID processing.
-        """
-        rows = await conn.fetch(
-            """
-            SELECT
-                local_id,
-                camera_id,
-                MAX(timestamp_ms)    AS last_seen_ts,
-                MIN(timestamp_ms)    AS first_seen_ts,
-                MAX(bbox_confidence) AS best_confidence,
-                MAX(bbox_area)       AS best_bbox_area,
-                (ARRAY_AGG(floor_x ORDER BY timestamp_ms DESC))[1] AS last_floor_x,
-                (ARRAY_AGG(floor_y ORDER BY timestamp_ms DESC))[1] AS last_floor_y
-            FROM tracking_history
-            WHERE timestamp_ms >= $1
-              AND timestamp_ms <  $2
-              AND floor_x IS NOT NULL
-              AND floor_y IS NOT NULL
-            GROUP BY local_id, camera_id
-            ORDER BY MIN(timestamp_ms) ASC
-            """,
-            window_start_ms,
-            window_end_ms,
-            timeout=_QUERY_TIMEOUT,
-        )
-        if not rows:
-            return []
-
-        result = []
-        for r in rows:
-            if r["last_floor_x"] is None or r["last_floor_y"] is None:
-                logger.warning(
-                    "Canary: NULL floor_x/y for local_id=%s camera=%s "
-                    "— skipping (check calibration)",
-                    r["local_id"], r["camera_id"],
-                )
-                continue
-            result.append(LocalObservation(
-                local_id=r["local_id"],
-                camera_id=r["camera_id"],
-                last_floor_x=float(r["last_floor_x"]),
-                last_floor_y=float(r["last_floor_y"]),
-                last_seen_ts=int(r["last_seen_ts"]),
-                first_seen_ts=int(r["first_seen_ts"]),
-                best_confidence=float(r["best_confidence"] or 0.0),
-                best_bbox_area=float(r["best_bbox_area"] or 0.0),
-            ))
-        return result
-
-    async def get_active_mapping(
-        self,
-        conn: asyncpg.Connection,
-        local_id: uuid.UUID,
-    ) -> MappingRow | None:
-        row = await conn.fetchrow(
-            """
-            SELECT id, global_id, camera_id, local_id, is_active, last_seen_ts
-            FROM global_local_mapping
-            WHERE local_id = $1 AND is_active = TRUE
-            """,
-            local_id,
-            timeout=_QUERY_TIMEOUT,
-        )
-        if row is None:
-            return None
-        return MappingRow(
-            id=row["id"],
-            global_id=row["global_id"],
-            camera_id=row["camera_id"],
-            local_id=row["local_id"],
-            is_active=row["is_active"],
-            last_seen_ts=int(row["last_seen_ts"]),
-        )
-
-    async def touch_link(
-        self,
-        conn: asyncpg.Connection,
-        local_id: uuid.UUID,
-        last_seen_ts: int,
-    ) -> None:
-        """Update last_seen_ts on the active mapping for a known LocalID."""
-        await conn.execute(
-            """
-            UPDATE global_local_mapping
-            SET last_seen_ts = $1
-            WHERE local_id = $2 AND is_active = TRUE
-            """,
-            last_seen_ts,
-            local_id,
-            timeout=_QUERY_TIMEOUT,
-        )
-
-    async def load_local_centroid(
-        self,
-        conn: asyncpg.Connection,
-        local_id: uuid.UUID,
-    ) -> np.ndarray | None:
-        """Load the IEP2 EMA centroid for a LocalID.
-
-        Returns float32 numpy array of shape (embedding_dim,) or None.
-        .copy() is mandatory — asyncpg returns a memoryview-backed buffer that
-        is freed when the connection is returned to the pool.
-        """
-        row = await conn.fetchrow(
-            "SELECT centroid FROM local_centroids WHERE local_id = $1",
-            local_id,
-            timeout=_QUERY_TIMEOUT,
-        )
-        if row is None or row["centroid"] is None:
-            return None
-        return np.frombuffer(row["centroid"], dtype=np.float32).copy()
-
-    async def get_candidate_globals(
-        self,
-        conn: asyncpg.Connection,
-        store_id: str,
-    ) -> list[GlobalCandidate]:
-        """Load all ACTIVE and LOST GlobalIDs for this store.
-
-        Returns last known position and the set of cameras with active links.
-        Used by the C5 matcher as the candidate pool for ReID.
-        """
-        rows = await conn.fetch(
-            """
-            SELECT
-                gi.global_id,
-                gi.state,
-                gi.last_floor_x,
-                gi.last_floor_y,
-                gi.last_seen_ts,
-                ARRAY_AGG(glm.camera_id)
-                    FILTER (WHERE glm.is_active = TRUE) AS active_cameras
-            FROM global_identities gi
-            LEFT JOIN global_local_mapping glm
-                   ON glm.global_id = gi.global_id
-            WHERE gi.store_id = $1::uuid
-              AND gi.state IN ('active', 'lost')
-            GROUP BY gi.global_id, gi.state,
-                     gi.last_floor_x, gi.last_floor_y, gi.last_seen_ts
-            """,
-            store_id,
-            timeout=_QUERY_TIMEOUT,
-        )
-        return [
-            GlobalCandidate(
-                global_id=r["global_id"],
-                state=r["state"],
-                last_floor_x=float(r["last_floor_x"]) if r["last_floor_x"] is not None else None,
-                last_floor_y=float(r["last_floor_y"]) if r["last_floor_y"] is not None else None,
-                last_seen_ts=int(r["last_seen_ts"]),
-                active_camera_ids=set(r["active_cameras"] or []),
-            )
-            for r in rows
-        ]
-
-    async def get_global_embeddings(
-        self,
-        conn: asyncpg.Connection,
-        global_id: uuid.UUID,
-    ) -> list[tuple[str, np.ndarray]]:
-        """Load all per-camera centroids for a GlobalID.
-
-        Returns list of (camera_id, float32_centroid_array).
-        Representative centroid is computed by the caller — not stored.
-        .copy() is mandatory — see load_local_centroid docstring.
-        """
-        rows = await conn.fetch(
-            "SELECT camera_id, centroid FROM global_embeddings WHERE global_id = $1",
-            global_id,
-            timeout=_QUERY_TIMEOUT,
-        )
-        return [
-            (r["camera_id"], np.frombuffer(r["centroid"], dtype=np.float32).copy())
-            for r in rows
-        ]
-
     async def create_global_identity(
         self,
         conn: asyncpg.Connection,
@@ -528,125 +356,6 @@ class Iep3Repository:
             timeout=_QUERY_TIMEOUT,
         )
         return row["global_id"]
-
-    async def link_local(
-        self,
-        conn: asyncpg.Connection,
-        global_id: uuid.UUID,
-        camera_id: str,
-        local_id: uuid.UUID,
-        linked_at_ts: int,
-    ) -> None:
-        """Insert a new active mapping row.
-
-        If a prior active row exists for this (global_id, camera_id) — same
-        camera, different local_id after IEP2 restart — deactivate it first.
-        The partial unique index enforces one active row per (global_id, camera_id).
-        """
-        await conn.execute(
-            """
-            UPDATE global_local_mapping
-            SET is_active      = FALSE,
-                unlinked_at_ts = $1
-            WHERE global_id = $2
-              AND camera_id  = $3
-              AND is_active  = TRUE
-            """,
-            linked_at_ts,
-            global_id,
-            camera_id,
-            timeout=_QUERY_TIMEOUT,
-        )
-        await conn.execute(
-            """
-            INSERT INTO global_local_mapping
-                (global_id, camera_id, local_id,
-                 is_active, linked_at_ts, last_seen_ts)
-            VALUES ($1, $2, $3, TRUE, $4, $4)
-            """,
-            global_id,
-            camera_id,
-            local_id,
-            linked_at_ts,
-            timeout=_QUERY_TIMEOUT,
-        )
-
-    async def deactivate_mapping(
-        self,
-        conn: asyncpg.Connection,
-        local_id: uuid.UUID,
-        unlinked_at_ts: int,
-    ) -> None:
-        await conn.execute(
-            """
-            UPDATE global_local_mapping
-            SET is_active      = FALSE,
-                unlinked_at_ts = $1
-            WHERE local_id = $2 AND is_active = TRUE
-            """,
-            unlinked_at_ts,
-            local_id,
-            timeout=_QUERY_TIMEOUT,
-        )
-
-    async def upsert_embedding(
-        self,
-        conn: asyncpg.Connection,
-        global_id: uuid.UUID,
-        camera_id: str,
-        centroid_bytes: bytes,
-        updated_at_ts: int,
-    ) -> None:
-        """UPSERT per-camera centroid. PK is (global_id, camera_id)."""
-        await conn.execute(
-            """
-            INSERT INTO global_embeddings
-                (global_id, camera_id, centroid, updated_at_ts)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (global_id, camera_id) DO UPDATE
-                SET centroid      = EXCLUDED.centroid,
-                    updated_at_ts = EXCLUDED.updated_at_ts
-            """,
-            global_id,
-            camera_id,
-            centroid_bytes,
-            updated_at_ts,
-            timeout=_QUERY_TIMEOUT,
-        )
-
-    async def reactivate_global(
-        self,
-        conn: asyncpg.Connection,
-        global_id: uuid.UUID,
-        local_id: uuid.UUID,
-        camera_id: str,
-        linked_at_ts: int,
-        last_seen_ts: int,
-        last_floor_x: float,
-        last_floor_y: float,
-    ) -> None:
-        """Transition a LOST GlobalID back to ACTIVE.
-
-        Resets lost_since_ts to NULL, updates last position, then links the
-        new LocalID that triggered the re-entry.
-        """
-        await conn.execute(
-            """
-            UPDATE global_identities
-            SET state         = 'active',
-                lost_since_ts = NULL,
-                last_seen_ts  = $1,
-                last_floor_x  = $2,
-                last_floor_y  = $3
-            WHERE global_id = $4
-            """,
-            last_seen_ts,
-            last_floor_x,
-            last_floor_y,
-            global_id,
-            timeout=_QUERY_TIMEOUT,
-        )
-        await self.link_local(conn, global_id, camera_id, local_id, linked_at_ts)
 
     async def get_positions_for_selection(
         self,
@@ -926,100 +635,6 @@ class Iep3Repository:
             timeout=_QUERY_TIMEOUT,
         )
 
-    async def get_active_mappings_bulk(
-        self,
-        conn: asyncpg.Connection,
-        local_ids: list[uuid.UUID],
-    ) -> dict[uuid.UUID, "MappingRow"]:
-        """Load active mappings for a set of LocalIDs in one query.
-
-        Returns a dict keyed by local_id for O(1) classification in Python.
-        LocalIDs with no active mapping are absent from the dict.
-        """
-        if not local_ids:
-            return {}
-
-        rows = await conn.fetch(
-            """
-            SELECT id, global_id, camera_id, local_id, is_active, last_seen_ts
-            FROM global_local_mapping
-            WHERE local_id = ANY($1)
-              AND is_active = TRUE
-            """,
-            local_ids,
-            timeout=_QUERY_TIMEOUT,
-        )
-        return {
-            row["local_id"]: MappingRow(
-                id=row["id"],
-                global_id=row["global_id"],
-                camera_id=row["camera_id"],
-                local_id=row["local_id"],
-                is_active=row["is_active"],
-                last_seen_ts=int(row["last_seen_ts"]),
-            )
-            for row in rows
-        }
-
-    async def touch_links_bulk(
-        self,
-        conn: asyncpg.Connection,
-        updates: list[tuple[uuid.UUID, int]],   # (local_id, last_seen_ts)
-    ) -> None:
-        """Update last_seen_ts for all known active LocalIDs in one statement.
-
-        Uses unnest for a true single-round-trip bulk UPDATE.
-        Safe to call with empty list — returns immediately.
-        """
-        if not updates:
-            return
-
-        local_ids  = [u[0] for u in updates]
-        timestamps = [u[1] for u in updates]
-
-        await conn.execute(
-            """
-            UPDATE global_local_mapping AS glm
-            SET last_seen_ts = v.ts
-            FROM unnest($1::uuid[], $2::bigint[]) AS v(lid, ts)
-            WHERE glm.local_id = v.lid
-              AND glm.is_active = TRUE
-            """,
-            local_ids,
-            timestamps,
-            timeout=_QUERY_TIMEOUT,
-        )
-
-    async def get_embeddings_bulk(
-        self,
-        conn: asyncpg.Connection,
-        global_ids: list[uuid.UUID],
-    ) -> dict[uuid.UUID, list[tuple[str, np.ndarray]]]:
-        """Load all per-camera centroids for a set of GlobalIDs in one query.
-
-        Returns dict: {global_id: [(camera_id, centroid_array), ...]}
-        Used by ReidMatcher to build representative centroids without N+1 reads.
-        .copy() is mandatory — asyncpg memoryview is freed on pool return.
-        """
-        if not global_ids:
-            return {}
-
-        rows = await conn.fetch(
-            """
-            SELECT global_id, camera_id, centroid
-            FROM global_embeddings
-            WHERE global_id = ANY($1)
-            """,
-            global_ids,
-            timeout=_QUERY_TIMEOUT,
-        )
-        result: dict = {}
-        for row in rows:
-            gid = row["global_id"]
-            arr = np.frombuffer(row["centroid"], dtype=np.float32).copy()
-            result.setdefault(gid, []).append((row["camera_id"], arr))
-        return result
-
     async def get_camera_batch_info_bulk(
         self,
         camera_ids: list[str],
@@ -1056,3 +671,281 @@ class Iep3Repository:
             )
             for row in rows
         }
+
+    # =========================================================================
+    # SPATIAL-VOTING MATCHER (Stages 0–8) — new pipeline
+    # =========================================================================
+
+    async def get_camera_overlap_edges(self, store_id: str) -> set[tuple[str, str]]:
+        """Stage 0 — camera pairs that share a covered zone in the active version.
+
+        Standalone (own connection). Returns physical-camera-id string pairs
+        (matching tracking_history.camera_id). Empty if camera_zone_coverage is
+        unpopulated — in which case no cross-camera matching occurs.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT
+                    cc1.physical_camera_id::text AS cam_a,
+                    cc2.physical_camera_id::text AS cam_b
+                FROM camera_zone_coverage czc1
+                JOIN camera_zone_coverage czc2
+                     ON czc1.zone_id = czc2.zone_id
+                    AND czc1.camera_config_id <> czc2.camera_config_id
+                JOIN camera_configs cc1 ON czc1.camera_config_id = cc1.id
+                JOIN camera_configs cc2 ON czc2.camera_config_id = cc2.id
+                JOIN store_config_versions scv ON scv.id = cc1.version_id
+                WHERE scv.store_id = $1::uuid
+                  AND scv.status   = 'active'
+                  AND cc2.version_id = cc1.version_id
+                  AND cc1.physical_camera_id <> cc2.physical_camera_id
+                """,
+                store_id,
+                timeout=_STANDALONE_TIMEOUT,
+            )
+        return {(r["cam_a"], r["cam_b"]) for r in rows}
+
+    async def read_window_detections(
+        self,
+        conn: asyncpg.Connection,
+        store_id: str,
+        window_start_ms: int,
+        window_end_ms: int,
+    ) -> list[DetectionRow]:
+        """Stage 1 — all valid-floor detections in the window, ordered by time.
+
+        One query across all cameras (selector groups in Python). NULL floor
+        coords are excluded (uncalibrated). Window is [start, end) to match the
+        bucketed PositionSelector and avoid boundary double-counting.
+        """
+        rows = await conn.fetch(
+            """
+            SELECT camera_id, local_id, timestamp_ms,
+                   floor_x, floor_y, bbox_confidence, bbox_area
+            FROM tracking_history
+            WHERE store_id = $1::uuid
+              AND timestamp_ms >= $2
+              AND timestamp_ms <  $3
+              AND floor_x IS NOT NULL
+              AND floor_y IS NOT NULL
+            ORDER BY timestamp_ms ASC
+            """,
+            store_id, window_start_ms, window_end_ms,
+            timeout=_QUERY_TIMEOUT,
+        )
+        return [
+            DetectionRow(
+                camera_id=r["camera_id"],
+                local_id=r["local_id"],
+                timestamp_ms=int(r["timestamp_ms"]),
+                floor_x=float(r["floor_x"]),
+                floor_y=float(r["floor_y"]),
+                bbox_confidence=float(r["bbox_confidence"] or 0.0),
+                bbox_area=float(r["bbox_area"] or 0.0),
+            )
+            for r in rows
+        ]
+
+    async def get_local_heaps_bulk(
+        self,
+        conn: asyncpg.Connection,
+        local_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, list[tuple[float, np.ndarray]]]:
+        """Load packed embedding heaps for a set of LocalIDs.
+
+        Returns {local_id: [(quality_score, embedding), ...]}. Used by Stage 3
+        (appearance fallback — stack the embeddings) and Stage 8 (merge into the
+        global embedding store). LocalIDs with no row / zero embeddings absent.
+        """
+        if not local_ids:
+            return {}
+        rows = await conn.fetch(
+            """
+            SELECT local_id, embeddings, embedding_count, quality_scores
+            FROM local_centroids
+            WHERE local_id = ANY($1)
+            """,
+            local_ids,
+            timeout=_QUERY_TIMEOUT,
+        )
+        out: dict[uuid.UUID, list[tuple[float, np.ndarray]]] = {}
+        for r in rows:
+            count = int(r["embedding_count"] or 0)
+            embs = _unpack_embeddings(r["embeddings"], count)
+            scores = _unpack_scores(r["quality_scores"], count)
+            if embs.size:
+                out[r["local_id"]] = [(float(scores[i]), embs[i]) for i in range(count)]
+        return out
+
+    async def find_global_ids_for_locals(
+        self,
+        conn: asyncpg.Connection,
+        local_ids: list[uuid.UUID],
+    ) -> list[tuple[uuid.UUID, int]]:
+        """Stage 5 — active GlobalIDs already linked to any of these LocalIDs.
+
+        Returns [(global_id, first_seen_ts), ...] (distinct), used to attach a
+        component to an existing identity and resolve merge conflicts.
+        """
+        if not local_ids:
+            return []
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT gi.global_id, gi.first_seen_ts
+            FROM global_local_mapping glm
+            JOIN global_identities gi ON gi.global_id = glm.global_id
+            WHERE glm.local_id = ANY($1)
+              AND glm.is_active = TRUE
+            """,
+            local_ids,
+            timeout=_QUERY_TIMEOUT,
+        )
+        return [(r["global_id"], int(r["first_seen_ts"])) for r in rows]
+
+    async def link_member(
+        self,
+        conn: asyncpg.Connection,
+        global_id: uuid.UUID,
+        camera_id: str,
+        local_id: uuid.UUID,
+        linked_at_ts: int,
+        last_seen_ts: int,
+    ) -> None:
+        """Stage 5 — upsert one (camera_id, local_id) component member onto a GlobalID.
+
+        Idempotent: if this exact active mapping already exists, only its
+        last_seen_ts advances. Otherwise any prior active mapping for this
+        (global_id, camera_id) is deactivated and a fresh active row inserted —
+        the partial unique index enforces one active local per camera per global.
+        """
+        existing = await conn.fetchval(
+            """
+            SELECT 1 FROM global_local_mapping
+            WHERE global_id = $1 AND camera_id = $2 AND local_id = $3
+              AND is_active = TRUE
+            """,
+            global_id, camera_id, local_id,
+            timeout=_QUERY_TIMEOUT,
+        )
+        if existing:
+            await conn.execute(
+                """
+                UPDATE global_local_mapping
+                SET last_seen_ts = GREATEST(last_seen_ts, $4)
+                WHERE global_id = $1 AND camera_id = $2 AND local_id = $3
+                  AND is_active = TRUE
+                """,
+                global_id, camera_id, local_id, last_seen_ts,
+                timeout=_QUERY_TIMEOUT,
+            )
+            return
+
+        await conn.execute(
+            """
+            UPDATE global_local_mapping
+            SET is_active = FALSE, unlinked_at_ts = $1
+            WHERE global_id = $2 AND camera_id = $3 AND is_active = TRUE
+            """,
+            linked_at_ts, global_id, camera_id,
+            timeout=_QUERY_TIMEOUT,
+        )
+        await conn.execute(
+            """
+            INSERT INTO global_local_mapping
+                (global_id, camera_id, local_id, is_active, linked_at_ts, last_seen_ts)
+            VALUES ($1, $2, $3, TRUE, $4, $5)
+            """,
+            global_id, camera_id, local_id, linked_at_ts, last_seen_ts,
+            timeout=_QUERY_TIMEOUT,
+        )
+
+    async def merge_globals(
+        self,
+        conn: asyncpg.Connection,
+        keep_global_id: uuid.UUID,
+        discard_global_ids: list[uuid.UUID],
+        window_end_ms: int,
+    ) -> None:
+        """Stage 5 merge conflict — exit the losing GlobalIDs of a component.
+
+        Deactivates their active mappings and marks them 'exited'. Component
+        members are then (re)linked to keep_global_id by the caller via
+        link_member. Never raises on an empty discard list.
+        """
+        if not discard_global_ids:
+            return
+        await conn.execute(
+            """
+            UPDATE global_local_mapping
+            SET is_active = FALSE, unlinked_at_ts = $1
+            WHERE global_id = ANY($2) AND is_active = TRUE
+            """,
+            window_end_ms, discard_global_ids,
+            timeout=_QUERY_TIMEOUT,
+        )
+        await conn.execute(
+            """
+            UPDATE global_identities
+            SET state = 'exited'
+            WHERE global_id = ANY($1)
+            """,
+            discard_global_ids,
+            timeout=_QUERY_TIMEOUT,
+        )
+
+    async def get_global_embeddings_packed(
+        self,
+        conn: asyncpg.Connection,
+        global_id: uuid.UUID,
+        camera_id: str,
+    ) -> list[tuple[float, np.ndarray]]:
+        """Stage 8 — load the existing (global_id, camera_id) embedding heap.
+
+        Returns a list of (quality_score, embedding) pairs (possibly empty).
+        """
+        row = await conn.fetchrow(
+            """
+            SELECT embeddings, embedding_count, quality_scores
+            FROM global_embeddings
+            WHERE global_id = $1 AND camera_id = $2
+            """,
+            global_id, camera_id,
+            timeout=_QUERY_TIMEOUT,
+        )
+        if row is None:
+            return []
+        count = int(row["embedding_count"] or 0)
+        embs = _unpack_embeddings(row["embeddings"], count)
+        scores = _unpack_scores(row["quality_scores"], count)
+        return [(float(scores[i]), embs[i]) for i in range(count)]
+
+    async def upsert_global_embedding_packed(
+        self,
+        conn: asyncpg.Connection,
+        global_id: uuid.UUID,
+        camera_id: str,
+        heap: list[tuple[float, np.ndarray]],
+        updated_at_ts: int,
+    ) -> None:
+        """Stage 8 — write a merged embedding heap for (global_id, camera_id)."""
+        if not heap:
+            return
+        embs = np.array([e for _, e in heap], dtype=np.float32)
+        scores = np.array([q for q, _ in heap], dtype=np.float32)
+        await conn.execute(
+            """
+            INSERT INTO global_embeddings
+                (global_id, camera_id, embeddings, embedding_count,
+                 quality_scores, updated_at_ts)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (global_id, camera_id) DO UPDATE
+                SET embeddings      = EXCLUDED.embeddings,
+                    embedding_count = EXCLUDED.embedding_count,
+                    quality_scores  = EXCLUDED.quality_scores,
+                    updated_at_ts   = EXCLUDED.updated_at_ts
+            """,
+            global_id, camera_id, embs.tobytes(), len(heap),
+            scores.tobytes(), updated_at_ts,
+            timeout=_QUERY_TIMEOUT,
+        )

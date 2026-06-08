@@ -226,17 +226,13 @@ class FloorProjector:
                 self._fp_ppm = None
             else:
                 pts = _parse_points(fp_row["boundary_polygon"])
-                ox  = fp_row["origin_x"]
-                oy  = fp_row["origin_y"]
-                ppm = fp_row["pixels_per_meter"]
-                self._fp_origin_x = ox
-                self._fp_origin_y = oy
-                self._fp_ppm      = ppm
-                # Convert boundary polygon from image pixels to meters so
-                # zone_of() and clamp comparisons are consistent with the
-                # projected floor_x/floor_y values (also in meters).
-                if ppm and ppm > 0 and ox is not None and oy is not None:
-                    pts = [((x - ox) / ppm, (y - oy) / ppm) for x, y in pts]
+                self._fp_origin_x = fp_row["origin_x"]
+                self._fp_origin_y = fp_row["origin_y"]
+                self._fp_ppm      = fp_row["pixels_per_meter"]
+                # boundary_polygon is stored in world metres (EEP _px_to_world),
+                # the same space as the projected floor_x/floor_y — use it as-is.
+                # (origin/ppm are still needed below for the homography px→metre
+                # projection, hence they are retained above.)
                 self._boundary = Polygon(pts)
                 self._world_bounds = (
                     fp_row["world_x_min"],
@@ -255,14 +251,10 @@ class FloorProjector:
             self._zones = []
             for r in zone_rows:
                 points = _parse_points(r["points"])
-                # Zone polygons are stored in floor plan image pixels (same space
-                # as the homography output). Convert to meters so zone_of() works
-                # correctly with meter floor_x/floor_y.
-                ox  = self._fp_origin_x
-                oy  = self._fp_origin_y
-                ppm = self._fp_ppm
-                if ppm and ppm > 0 and ox is not None and oy is not None:
-                    points = [((x - ox) / ppm, (y - oy) / ppm) for x, y in points]
+                # zones.points are stored in world metres (EEP _px_to_world), the
+                # same space as the projected floor_x/floor_y — use them as-is.
+                # (Previously these were wrongly divided by ppm as if pixels,
+                # which made zone_of() never match → tracking_history.zone_id NULL.)
                 self._zones.append((r["id"], Polygon(points)))
             log.info(
                 "Zones loaded  count=%d  camera_config_id=%s",

@@ -41,6 +41,7 @@ REQUIRED_TABLES = {
     "global_local_mapping",
     "global_embeddings",
     "global_tracking_history",
+    "camera_zone_coverage",   # Stage 0 overlap graph source (EEP-populated)
 }
 
 

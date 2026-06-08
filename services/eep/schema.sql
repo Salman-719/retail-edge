@@ -770,14 +770,21 @@ CREATE INDEX IF NOT EXISTS idx_crs_physical_open
     ON camera_runtime_sessions(physical_camera_id)
     WHERE stopped_at IS NULL;
 
--- 3. local_centroids — per-camera appearance centroid per local track.
+-- 3. local_centroids — per-camera appearance embedding store per local track.
 --    Written by IEP2 after each batch; read by IEP3 for cross-camera matching.
 --    local_id is the same UUID derived by uuid.UUID(int=local_id) in IEP2.
+--    embeddings holds up to MAX_EMBEDDINGS (10) raw float32[2048] vectors
+--    concatenated (8192 bytes each); embedding_count is how many are present;
+--    quality_scores holds one float32 per embedding (4 bytes each). See
+--    migration 0013_embedding_store. Representative centroid is recomputed on
+--    demand, never stored.
 CREATE TABLE IF NOT EXISTS local_centroids (
     local_id         UUID        PRIMARY KEY,
     camera_id        TEXT        NOT NULL,
     store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    centroid         BYTEA       NOT NULL,
+    embeddings       BYTEA       NOT NULL,
+    embedding_count  SMALLINT    NOT NULL DEFAULT 0,
+    quality_scores   BYTEA       NOT NULL DEFAULT ''::bytea,
     updated_at_batch INT         NOT NULL,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -838,15 +845,19 @@ CREATE INDEX IF NOT EXISTS idx_glm_local_id
 CREATE INDEX IF NOT EXISTS idx_glm_global_active
     ON global_local_mapping(global_id, is_active);
 
--- 6. global_embeddings — per-camera appearance centroid per GlobalID.
---    centroid is a float32[2048] numpy array stored as raw bytes (.tobytes()).
---    Representative centroid is computed at query time, never stored.
+-- 6. global_embeddings — per-camera appearance embedding store per GlobalID.
+--    Same packed layout as local_centroids: up to MAX_EMBEDDINGS (10) raw
+--    float32[2048] vectors (8192 bytes each) in embeddings, embedding_count of
+--    them, and one float32 quality score each in quality_scores. Merged from the
+--    matched local_centroids heaps by IEP3 (Stage 8). See migration 0013.
 CREATE TABLE IF NOT EXISTS global_embeddings (
-    global_id      UUID    NOT NULL
-                   REFERENCES global_identities(global_id) ON DELETE CASCADE,
-    camera_id      TEXT    NOT NULL,
-    centroid       BYTEA   NOT NULL,
-    updated_at_ts  BIGINT  NOT NULL,
+    global_id       UUID     NOT NULL
+                    REFERENCES global_identities(global_id) ON DELETE CASCADE,
+    camera_id       TEXT     NOT NULL,
+    embeddings      BYTEA    NOT NULL,
+    embedding_count SMALLINT NOT NULL DEFAULT 0,
+    quality_scores  BYTEA    NOT NULL DEFAULT ''::bytea,
+    updated_at_ts   BIGINT   NOT NULL,
     PRIMARY KEY (global_id, camera_id)
 );
 

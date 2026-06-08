@@ -1,4 +1,5 @@
 """Read-only store configuration endpoints (Phase 2)."""
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -228,4 +229,15 @@ async def reactivate_version(
     )
     await db.commit()
     await db.refresh(version)
+
+    # Recompute camera→zone coverage for the reactivated version so IEP3's
+    # overlap graph reflects it. Non-fatal — reactivation must still succeed.
+    try:
+        from app.core.coverage import populate_camera_zone_coverage
+        await populate_camera_zone_coverage(str(version_id))
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "reactivate_version: coverage population failed for version %s", version_id,
+        )
+
     return version

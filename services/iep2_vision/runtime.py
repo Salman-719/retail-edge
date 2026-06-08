@@ -232,12 +232,12 @@ class IEP2Runtime:
         persistence: "PostgresPersistence",
         batch_number: int,
     ) -> None:
-        """Collect active centroids and UPSERT to local_centroids.
+        """Collect active embedding heaps and UPSERT to local_centroids.
 
         Called once per batch window after all tracking_history rows are
         written and before XACK fires. Safe to call when no tracks are active.
         """
-        active = manager.get_active_centroids()
+        active = manager.get_active_embeddings_packed()
         if not active:
             return
 
@@ -246,15 +246,17 @@ class IEP2Runtime:
                 "local_id":         str(uuid.UUID(int=local_id_int)),
                 "camera_id":        self.settings.camera_id,
                 "store_id":         self.settings.store_id,
-                "centroid":         centroid_array.astype(np.float32).tobytes(),
+                "embeddings":       embeddings_bytes,
+                "embedding_count":  count,
+                "quality_scores":   quality_bytes,
                 "updated_at_batch": batch_number,
             }
-            for local_id_int, centroid_array in active.items()
+            for local_id_int, (embeddings_bytes, count, quality_bytes) in active.items()
         ]
 
         await persistence.upsert_local_centroids(records)
         log.debug(
-            "Flushed %d centroids for batch %d camera %s",
+            "Flushed %d embedding stores for batch %d camera %s",
             len(records), batch_number, self.settings.camera_id,
         )
 
@@ -762,11 +764,17 @@ async def run_daemon(settings) -> None:
         await reid_client.start()
 
         # ── Pipeline components ───────────────────────────────────────────────
+        # Restart recovery: when a persisted local_id reappears (process restart
+        # or post-TTL BoTSORT reuse), reload its embedding heap from the DB.
+        async def _embedding_loader(local_id_int: int):
+            return await persistence.load_local_embeddings(uuid.UUID(int=local_id_int))
+
         tracker  = create_tracker()
         manager  = LocalIdentityManager(
             reid_client=reid_client,
             camera_id=settings.camera_id,
             redis_local=sync_redis,
+            embedding_loader=_embedding_loader,
         )
         projector = FloorProjector()
         if settings.camera_config_id:
@@ -951,7 +959,7 @@ class _DaemonBatchHelper:
         self.settings = settings
 
     async def _flush_centroids_daemon(self, manager, persistence, batch_number):
-        active = manager.get_active_centroids()
+        active = manager.get_active_embeddings_packed()
         if not active:
             return
         records = [
@@ -959,10 +967,12 @@ class _DaemonBatchHelper:
                 "local_id":         str(uuid.UUID(int=lid)),
                 "camera_id":        self.settings.camera_id,
                 "store_id":         self.settings.store_id,
-                "centroid":         arr.astype("float32").tobytes(),
+                "embeddings":       embeddings_bytes,
+                "embedding_count":  count,
+                "quality_scores":   quality_bytes,
                 "updated_at_batch": batch_number,
             }
-            for lid, arr in active.items()
+            for lid, (embeddings_bytes, count, quality_bytes) in active.items()
         ]
         await persistence.upsert_local_centroids(records)
 
