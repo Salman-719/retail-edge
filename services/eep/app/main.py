@@ -70,8 +70,45 @@ def _run_migrations() -> None:
     command.upgrade(cfg, "head")
 
 
+async def _bootstrap_admin() -> None:
+    """Seed a super-admin from env on first boot (A3). Fail-safe and idempotent.
+
+    Runs only when BOTH ADMIN_BOOTSTRAP_EMAIL and ADMIN_BOOTSTRAP_PASSWORD are set
+    AND no super-admin exists yet. Any error is logged and swallowed — a bootstrap
+    failure must never crash startup (an admin can still be created via the CLI).
+    Never logs the password.
+    """
+    from sqlalchemy import select
+
+    from app.cli import create_or_promote_admin
+    from app.core.config import settings as _settings
+
+    email = _settings.ADMIN_BOOTSTRAP_EMAIL
+    password = _settings.ADMIN_BOOTSTRAP_PASSWORD
+    if not (email and password):
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            existing = await db.execute(
+                select(User).where(User.is_super_admin == True).limit(1)  # noqa: E712
+            )
+            if existing.scalar_one_or_none() is not None:
+                return  # an admin already exists — do nothing, do not reset password
+            user, action = await create_or_promote_admin(db, email=email, password=password)
+            await db.commit()
+            logger.info(
+                "Admin bootstrap: %s super-admin %s (user_id=%s)",
+                action, user.email, user.id,
+            )
+    except Exception:
+        logger.exception(
+            "Admin bootstrap failed; continuing startup (create an admin via the CLI)"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _app = app  # local alias — `import app.models` below rebinds the name `app` to the package
     from app.core.config import settings as _settings
     logger.info(
         "EEP starting  window_seconds=%.1f  db_host=%s  debug_mode=%s",
@@ -91,6 +128,9 @@ async def lifespan(app: FastAPI):
         import app.models  # noqa: F401 — ensures all mappers are registered
         from app.models.base import Base as ModelBase
         await conn.run_sync(ModelBase.metadata.create_all)
+
+    # Step 2.5: optional one-time super-admin bootstrap (fail-safe).
+    await _bootstrap_admin()
 
     # Step 3: rebuild _running_cameras from Redis before serving any traffic.
     from app.grpc_server.camera_status import rebuild_running_cameras_on_startup
@@ -121,7 +161,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    asyncio.create_task(_cleanup_deactivated_users())
+    # Keep strong references to long-lived background tasks. asyncio only holds a
+    # weak reference to tasks, so an unreferenced create_task() result can be GC'd
+    # before it runs (the resolver's startup log never fired without this).
+    from app.core import punch_resolver
+    _app.state.background_tasks = [
+        asyncio.create_task(_cleanup_deactivated_users()),
+        asyncio.create_task(punch_resolver.run_forever()),  # employee-linking
+    ]
+
     await _close_orphan_sessions()
 
     try:
@@ -140,6 +188,11 @@ app.add_middleware(CanaryMiddleware, canary_percentage=settings.CANARY_PERCENTAG
 from prometheus_fastapi_instrumentator import Instrumentator
 Instrumentator().instrument(app).expose(app)
 
+# Prometheus metrics: exposes GET /metrics with request count, latency histogram,
+# and error rate. Scraped by Prometheus (job "eep") — see monitoring/prometheus.yml.
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -149,17 +202,27 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(RequestValidationError)
-async def validation_error_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(
-        status_code=422,
-        content={"error": str(exc.errors()), "code": "VALIDATION_ERROR"},
-    )
+# Canonical error envelope + handlers: every error becomes
+# {"detail": {"error", "code"}}, and no unhandled exception leaks a stack trace.
+from app.core.errors import register_error_handlers
+register_error_handlers(app)
+
+# Rate limiting (slowapi) + request-size limits. Global per-IP default on every
+# route (auth routes add tighter limits via @limiter.limit); Redis-backed +
+# fail-open. 429 and 413 emit the error envelope.
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from app.core.ratelimit import limiter, rate_limit_handler, BodySizeLimitMiddleware
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
+app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(BodySizeLimitMiddleware)
 
 
 register_routers(app)
 
 
 @app.get("/health")
+@limiter.exempt
 async def health():
     return {"service": "eep", "status": "ok"}

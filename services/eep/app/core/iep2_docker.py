@@ -110,6 +110,9 @@ def start_iep2(
             "S3_ACCESS_KEY":       s3_access_key,
             "S3_SECRET_KEY":       s3_secret_key,
             "S3_BUCKET":           s3_bucket,
+            # Lost-pool occlusion-recovery cosine threshold — propagated from
+            # EEP's env so it can be tuned without rebuilding the IEP2 image.
+            "REID_MATCH_THRESHOLD": os.environ.get("REID_MATCH_THRESHOLD", "0.75"),
         },
         volumes={
             IPC_SOCKETS_VOLUME: {"bind": "/tmp/sockets", "mode": "rw"},

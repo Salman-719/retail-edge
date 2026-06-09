@@ -290,6 +290,33 @@ class FrameUploadResponse(BaseModel):
     status: str
 
 
+# ─── Punch-in station (employee-linking) ───────────────────────────────────────
+
+class PunchStationRequest(BaseModel):
+    camera_config_id: uuid.UUID
+    position_x: float          # canvas px (converted to world metres for storage)
+    position_y: float          # canvas px
+    radius_m: float = 1.5
+
+    @field_validator("radius_m")
+    @classmethod
+    def radius_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("radius_m must be > 0")
+        return v
+
+
+class PunchStationResponse(BaseModel):
+    id: uuid.UUID
+    version_id: uuid.UUID
+    store_id: uuid.UUID
+    camera_config_id: uuid.UUID
+    camera_config_name: str | None = None
+    position_x: float          # canvas px (converted back from stored world metres)
+    position_y: float          # canvas px
+    radius_m: float
+
+
 # ─── Calibration ──────────────────────────────────────────────────────────────
 
 class Correspondence(BaseModel):

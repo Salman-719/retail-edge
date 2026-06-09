@@ -91,9 +91,8 @@ async def active_alerts(
 async def alert_history(
     from_d: date | None = Query(default=None, alias="from"),
     to_d: date | None = Query(default=None, alias="to"),
-    type: str | None = Query(default=None),
-    severity: str | None = Query(default=None),
-    resolution: str | None = Query(default=None),
+    type: str | None = Query(default=None, max_length=50),
+    resolution: str | None = Query(default=None, max_length=50),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     ctx: StoreContext = Depends(get_store_context),
@@ -106,19 +105,11 @@ async def alert_history(
         clauses.append("a.created_at >= :from_d")
         params["from_d"] = from_d
     if to_d is not None:
-        clauses.append("a.created_at < (CAST(:to_d AS date) + 1)")
+        clauses.append("a.created_at < (:to_d::date + 1)")
         params["to_d"] = to_d
     if type is not None:
         clauses.append("a.type = :type")
         params["type"] = type
-    if severity is not None:
-        if severity not in SEVERITIES:
-            raise HTTPException(
-                status_code=422,
-                detail={"error": "severity must be one of low|medium|high|critical", "code": "INVALID_SEVERITY"},
-            )
-        clauses.append("a.severity = :severity")
-        params["severity"] = severity
     if resolution is not None:
         clauses.append("a.resolution = :resolution")
         params["resolution"] = resolution
@@ -146,8 +137,8 @@ _TS_BUCKET = {
 async def alerts_timeseries(
     from_d: date = Query(alias="from"),
     to_d: date = Query(alias="to"),
-    granularity: str | None = Query(default="auto"),
-    resolution: str | None = Query(default=None),
+    granularity: str | None = Query(default="auto", max_length=10),
+    resolution: str | None = Query(default=None, max_length=50),
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):

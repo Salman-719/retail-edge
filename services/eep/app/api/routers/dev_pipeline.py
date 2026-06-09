@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,6 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, AsyncSessionLocal
 from app.core import dev_orchestrator as orch
+from app.schemas.punch import DevPunchRequest
+from app.core import shadow as _shadow
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +72,20 @@ async def _set_inference_device(device: str) -> None:
     r = aioredis.from_url(_REDIS_URL)
     try:
         await r.set(_DEVICE_KEY, device)
+    finally:
+        await r.aclose()
+
+
+async def _set_trace_flag(store_id: str, on: bool) -> None:
+    """Toggle the IEP3 dev reconciliation-trace gate (VD1). IEP3 reads this key
+    per batch; default-absent → no trace, zero overhead in production."""
+    r = aioredis.from_url(_REDIS_URL)
+    try:
+        key = f"iep3:debug_trace:{store_id}"
+        if on:
+            await r.set(key, "1")
+        else:
+            await r.delete(key)
     finally:
         await r.aclose()
 
@@ -234,6 +251,10 @@ async def pipeline_start(body: PipelineStartRequest):
     else:
         await _set_inference_device("cpu")
 
+    # Enable the IEP3 reconciliation trace for this run (VD1) — the spawned IEP3
+    # container reads this Redis gate each batch. Cleared on /pipeline/stop.
+    await _set_trace_flag(body.store_id, True)
+
     # Every Start does a full fresh reset first → run begins from frame 1.
     # The reset includes a short wait, by which time the inference services
     # (watcher polls every 2 s) have applied the requested device.
@@ -267,7 +288,45 @@ async def pipeline_stop(body: PipelineStopRequest):
     results = await asyncio.gather(*[_stop_one(body.store_id, cid) for cid in body.camera_ids])
     await loop.run_in_executor(None, orch.stop_iep3, body.store_id)
     await loop.run_in_executor(None, orch.stop_iep4, body.store_id)
+    # Clear the IEP3 trace gate (VD1) — captured rows persist for post-mortem.
+    await _set_trace_flag(body.store_id, False)
     return {"status": "stopped", "cameras": results}
+
+
+@router.get("/iep3/trace")
+async def iep3_trace(
+    store_id: str,
+    batch_number: int | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Read the IEP3 reconciliation trace (VD1) for a store, newest batches first,
+    optionally one batch. Admin/DEBUG-gated via the router (A4). Read-only."""
+    clauses = ["store_id = :sid"]
+    params: dict = {"sid": store_id, "limit": limit}
+    if batch_number is not None:
+        clauses.append("batch_number = :bn")
+        params["bn"] = batch_number
+    result = await db.execute(
+        text(f"""
+            SELECT id, batch_number, event_type, detail, created_at
+            FROM debug.recon_trace
+            WHERE {' AND '.join(clauses)}
+            ORDER BY batch_number DESC, id ASC
+            LIMIT :limit
+        """),
+        params,
+    )
+    rows = []
+    for r in result.mappings().all():
+        row = dict(r)
+        if isinstance(row.get("detail"), str):
+            try:
+                row["detail"] = json.loads(row["detail"])
+            except (ValueError, TypeError):
+                pass
+        rows.append(row)
+    return rows
 
 
 class ShiftCloseRequest(BaseModel):
@@ -303,6 +362,41 @@ async def shift_close(body: ShiftCloseRequest):
     return {"status": "closed", "store_id": body.store_id, "shift_date": shift_date.isoformat()}
 
 
+@router.post("/punch")
+async def dev_punch(body: DevPunchRequest):
+    """DEBUG manual trigger: simulate an employee punching in at the store's punch
+    machine. Inserts a pending punch_events row (source='simulated'); the EEP
+    punch_resolver links it to a global_id. Stands in for real punch hardware."""
+    import uuid as _uuid
+
+    from app.core.punch_ingest import create_punch_event, to_epoch_ms
+
+    punched_at_ms = to_epoch_ms(body.at)
+    async with AsyncSessionLocal() as db:
+        # Validate the employee belongs to the store (dev-grade check).
+        emp = (await db.execute(
+            text("SELECT id FROM employees WHERE id = :eid AND store_id = :sid"),
+            {"eid": _uuid.UUID(str(body.employee_id)), "sid": _uuid.UUID(str(body.store_id))},
+        )).first()
+        if emp is None:
+            raise HTTPException(status_code=404, detail={"error": "Employee not in store", "code": "EMPLOYEE_NOT_FOUND"})
+        ev = await create_punch_event(
+            db,
+            store_id=_uuid.UUID(str(body.store_id)),
+            employee_id=_uuid.UUID(str(body.employee_id)),
+            punched_at_ms=punched_at_ms,
+            source="simulated",
+        )
+    return {
+        "id": str(ev.id),
+        "store_id": str(ev.store_id),
+        "employee_id": str(ev.employee_id),
+        "punched_at_ms": ev.punched_at_ms,
+        "source": ev.source,
+        "status": ev.status,
+    }
+
+
 @router.get("/tracking")
 async def get_tracking(
     camera_id: str = Query(...),
@@ -314,15 +408,26 @@ async def get_tracking(
 
     With since_ts: returns rows at or after that timestamp in ascending order
     (incremental poll — accumulates the full run log without gaps).
-    Without since_ts: returns the latest :limit rows per local_id in the
-    stable display order (identity-first-seen ASC, within identity newest-first).
+    Without since_ts: returns the latest :limit rows per local_id, ordered by
+    frame number (descending).
+
+    frame_number is DENSE_RANK over distinct timestamp_ms for this camera — each
+    distinct capture timestamp is one frame, so detections in the same frame
+    share a frame_number. tracking_history is ephemeral (IEP3 deletes each
+    window after reconciliation), so frame numbers are relative to the rows
+    currently present, not absolute across the whole run.
+
+    A shadow query runs fire-and-forget after the response is assembled; it
+    never delays or affects the return value.
     """
+    t0 = time.monotonic()
     if since_ts is not None:
         rows = (await db.execute(
             text("""
                 SELECT local_id::text AS local_id, timestamp_ms,
                        floor_x, floor_y, zone_id::text AS zone_id,
-                       bbox_confidence, bbox_area
+                       bbox_confidence, bbox_area,
+                       DENSE_RANK() OVER (ORDER BY timestamp_ms) AS frame_number
                 FROM tracking_history
                 WHERE camera_id = :cam AND timestamp_ms >= :since
                 ORDER BY timestamp_ms ASC
@@ -337,24 +442,38 @@ async def get_tracking(
                     SELECT local_id::text AS local_id, timestamp_ms,
                            floor_x, floor_y, zone_id::text AS zone_id,
                            bbox_confidence, bbox_area,
-                           MIN(timestamp_ms) OVER (PARTITION BY local_id) AS id_first_seen,
+                           DENSE_RANK() OVER (ORDER BY timestamp_ms) AS frame_number,
                            ROW_NUMBER()      OVER (PARTITION BY local_id ORDER BY timestamp_ms DESC) AS rn
                     FROM tracking_history
                     WHERE camera_id = :cam
                 )
                 SELECT local_id, timestamp_ms, floor_x, floor_y, zone_id,
-                       bbox_confidence, bbox_area
+                       bbox_confidence, bbox_area, frame_number
                 FROM ranked
                 WHERE rn <= :lim
-                ORDER BY id_first_seen ASC, timestamp_ms DESC
+                ORDER BY frame_number DESC, local_id ASC
             """),
             {"cam": camera_id, "lim": limit},
         )).mappings().all()
+    prod_latency_ms = (time.monotonic() - t0) * 1000
     total = (await db.execute(
         text("SELECT COUNT(*) FROM tracking_history WHERE camera_id = :cam"),
         {"cam": camera_id},
     )).scalar_one()
-    return {"camera_id": camera_id, "total": total, "rows": [dict(r) for r in rows]}
+    prod_rows = [dict(r) for r in rows]
+
+    # Fire shadow comparison — completely detached from the production response.
+    asyncio.create_task(
+        _shadow.shadow_tracking(
+            camera_id=camera_id,
+            limit=limit,
+            prod_rows=prod_rows,
+            prod_latency_ms=prod_latency_ms,
+            db_factory=AsyncSessionLocal,
+        )
+    )
+
+    return {"camera_id": camera_id, "total": total, "rows": prod_rows}
 
 
 @router.get("/iep3")
@@ -363,7 +482,12 @@ async def get_iep3(
     limit: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ):
-    """Recent global_tracking_history (IEP3 reconciliation output), newest first."""
+    """Recent global_tracking_history (IEP3 reconciliation output), newest first.
+
+    A shadow query runs fire-and-forget after the response is assembled;
+    it never delays or affects the return value.
+    """
+    t0 = time.monotonic()
     rows = (await db.execute(
         text("""
             SELECT global_id::text AS global_id, batch_number, timestamp_ms,
@@ -376,6 +500,7 @@ async def get_iep3(
         """),
         {"store": store_id, "lim": limit},
     )).mappings().all()
+    prod_latency_ms = (time.monotonic() - t0) * 1000
     summary = (await db.execute(
         text("""
             SELECT COUNT(*) AS positions,
@@ -385,4 +510,43 @@ async def get_iep3(
         """),
         {"store": store_id},
     )).mappings().first()
-    return {"store_id": store_id, "summary": dict(summary), "rows": [dict(r) for r in rows]}
+    prod_rows = [dict(r) for r in rows]
+
+    # Fire shadow comparison — completely detached from the production response.
+    asyncio.create_task(
+        _shadow.shadow_iep3(
+            store_id=store_id,
+            limit=limit,
+            prod_rows=prod_rows,
+            prod_latency_ms=prod_latency_ms,
+            db_factory=AsyncSessionLocal,
+        )
+    )
+
+    return {"store_id": store_id, "summary": dict(summary), "rows": prod_rows}
+
+
+@router.get("/iep3/local-global")
+async def get_local_global(
+    store_id: str = Query(...),
+    limit: int = Query(500, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    """local→global→camera mapping (VD2/VD3 identity through-line). Reads the
+    persisted global_local_mapping (joined to global_identities for store scope).
+    Needs no trace flag. Newest links first."""
+    rows = (await db.execute(
+        text("""
+            SELECT m.camera_id,
+                   m.local_id::text  AS local_id,
+                   m.global_id::text AS global_id,
+                   m.is_active, m.linked_at_ts, m.last_seen_ts
+            FROM global_local_mapping m
+            JOIN global_identities gi ON gi.global_id = m.global_id
+            WHERE gi.store_id = :store
+            ORDER BY m.last_seen_ts DESC
+            LIMIT :lim
+        """),
+        {"store": store_id, "lim": limit},
+    )).mappings().all()
+    return {"store_id": store_id, "rows": [dict(r) for r in rows]}

@@ -54,7 +54,7 @@ async def live_overview(
     cutoff = now_ms - settings.LIVE_STALE_MS
 
     res = await db.execute(_PRESENT_SQL, {"sid": ctx.store_id, "cutoff": cutoff})
-    rows = [dict(r) for r in res.mappings().all()]
+    rows = [dict(r._mapping) for r in res.mappings().all()]
 
     # KPIs over the SAME present set the dots come from (incl. unplaceable persons).
     total = len(rows)

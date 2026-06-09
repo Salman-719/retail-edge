@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
 from app.core.database import get_db
+from app.core.ratelimit import MAX_LIST_ROWS
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
 from app.models.employee import Employee
 from app.schemas.employees import (
@@ -46,7 +47,7 @@ async def list_employees(
     query = select(Employee).where(Employee.store_id == ctx.store_id)
     if active_only:
         query = query.where(Employee.is_active == True)
-    query = query.order_by(Employee.name)
+    query = query.order_by(Employee.name).limit(MAX_LIST_ROWS)
     result = await db.execute(query)
     return result.scalars().all()
 

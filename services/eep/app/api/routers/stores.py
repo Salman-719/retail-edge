@@ -22,11 +22,18 @@ async def list_stores(
     payload: dict = Depends(get_current_user_payload),
     db: AsyncSession = Depends(get_db),
 ):
-    if payload.get("account_type") != "owner":
+    if payload.get("is_super_admin"):
+        # Super-admin sees the whole fleet across all owners.
+        # TODO pagination: unbounded select, fine while the fleet is small.
+        result = await db.execute(select(Store).order_by(Store.name))
+    elif payload.get("account_type") == "owner":
+        user_id = uuid.UUID(payload["sub"])
+        result = await db.execute(
+            select(Store).where(Store.created_by == user_id).order_by(Store.name)
+        )
+    else:
         raise HTTPException(status_code=403, detail={"error": "Owner access required", "code": "OWNER_REQUIRED"})
 
-    user_id = uuid.UUID(payload["sub"])
-    result = await db.execute(select(Store).where(Store.created_by == user_id))
     stores = result.scalars().all()
 
     items = []

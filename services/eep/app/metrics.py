@@ -2,12 +2,12 @@ from prometheus_client import Counter, Gauge
 
 EEP_ACTIVE_CAMERAS = Gauge(
     "eep_active_cameras",
-    "Number of camera configs currently marked running by EEP",
+    "Number of (store_id, camera_config_id) pairs currently in the running state",
 )
 
 EEP_SCHEDULER_TICKS = Counter(
     "eep_scheduler_ticks_total",
-    "Completed camera scheduler evaluations",
+    "Total number of evaluate_schedules() invocations completed by APScheduler",
 )
 
 EEP_GRPC_CONNECTIONS = Gauge(

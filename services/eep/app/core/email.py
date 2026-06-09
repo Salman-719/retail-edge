@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.core.resilience import SMTP_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ async def send_shift_failure_alert(store_id, shift_date, failed_step: str, error
         await aiosmtplib.send(
             msg, hostname=settings.SMTP_HOST, port=settings.SMTP_PORT,
             username=settings.SMTP_USER, password=settings.SMTP_PASSWORD, start_tls=True,
+            timeout=SMTP_TIMEOUT_S,
         )
         logger.info("Shift failure alert sent to %d recipient(s) store=%s", len(recipients), store_id)
     except Exception as exc:
@@ -113,6 +115,7 @@ async def send_invitation_email(to_email: str, store_name: str, slug: str, token
             username=settings.SMTP_USER,
             password=settings.SMTP_PASSWORD,
             start_tls=True,
+            timeout=SMTP_TIMEOUT_S,
         )
         logger.info("Invitation email sent to %s", to_email)
     except Exception as exc:
@@ -160,6 +163,7 @@ async def send_password_reset_email(to_email: str, token: str) -> None:
             username=settings.SMTP_USER,
             password=settings.SMTP_PASSWORD,
             start_tls=True,
+            timeout=SMTP_TIMEOUT_S,
         )
         logger.info("Password reset email sent to %s", to_email)
     except Exception as exc:

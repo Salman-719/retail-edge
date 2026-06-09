@@ -18,7 +18,10 @@ async def write_audit_log(
     after_state: dict[str, Any] | None = None,
 ) -> None:
     if action not in AUDIT_ACTIONS:
-        raise ValueError(f"Unknown audit action: {action}")
+        raise ValueError(
+            f"Unregistered audit action {action!r}; "
+            "add it to app/core/audit_actions.py"
+        )
     log = AuditLog(
         store_id=store_id,
         user_id=user_id,

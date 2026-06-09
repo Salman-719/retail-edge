@@ -1,8 +1,11 @@
-"""Camera schedule evaluator — runs every WINDOW_SECONDS via APScheduler.
+"""Store-hours camera evaluator — runs every WINDOW_SECONDS via APScheduler (C2).
 
-Evaluates all active camera_schedules against the current local time in each
-store's timezone. Calls _on_camera_start / _on_camera_stop when the running
-state changes. Camera start/stop is delegated to orchestrator (gRPC to Edge Agent).
+Evaluates each active store's store_operating_hours against the current local
+time in the store's timezone: when the store is open, every camera_config of its
+ACTIVE config version is started; when closed, they are stopped. Calls
+_on_camera_start / _on_camera_stop on running-state transitions. Camera start/stop
+is delegated to orchestrator (gRPC to Edge Agent). Store open/close drives the
+IEP5 shift boundary via the per-store running-set transitions below.
 """
 import asyncio
 import logging
@@ -29,10 +32,6 @@ _running_cameras: set[tuple[str, str]] = set()
 _store_shift_start: dict[str, date] = {}
 
 
-def _update_active_camera_metric() -> None:
-    EEP_ACTIVE_CAMERAS.set(len(_running_cameras))
-
-
 def _stores_running() -> set[str]:
     return {sid for (sid, _cfg) in _running_cameras}
 
@@ -56,32 +55,108 @@ def _fire_shift_end(store_id: str, shift_date: date) -> None:
 
 def mark_running(store_id: str, camera_config_id: str) -> None:
     _running_cameras.add((str(store_id), str(camera_config_id)))
-    _update_active_camera_metric()
+    EEP_ACTIVE_CAMERAS.set(len(_running_cameras))
 
 
 def mark_stopped(store_id: str, camera_config_id: str) -> None:
     _running_cameras.discard((str(store_id), str(camera_config_id)))
-    _update_active_camera_metric()
+    EEP_ACTIVE_CAMERAS.set(len(_running_cameras))
 
-_LOAD_SQL = text("""
-SELECT
-    cs.id              AS schedule_id,
-    cs.store_id,
-    cs.camera_config_id,
-    cs.days_of_week,
-    cs.start_time,
-    cs.end_time,
-    s.timezone         AS store_timezone,
-    pc.id              AS physical_camera_id
-FROM camera_schedules cs
-JOIN stores s                  ON s.id   = cs.store_id
-JOIN camera_configs cc         ON cc.id  = cs.camera_config_id
-JOIN store_config_versions scv ON scv.id = cc.version_id
-JOIN physical_cameras pc       ON pc.id  = cc.physical_camera_id
-WHERE cs.is_active = true
-  AND s.status = 'active'
+# Per-weekday open/close for every active store.
+_HOURS_SQL = text("""
+SELECT soh.store_id,
+       soh.day_of_week,
+       soh.is_open,
+       soh.open_time,
+       soh.close_time,
+       s.timezone        AS store_timezone
+FROM store_operating_hours soh
+JOIN stores s ON s.id = soh.store_id
+WHERE s.status = 'active'
 """)
 
+# Every camera_config of each active store's ACTIVE config version.
+_ACTIVE_CAMERAS_SQL = text("""
+SELECT cc.store_id,
+       cc.id              AS camera_config_id,
+       pc.id              AS physical_camera_id,
+       s.timezone         AS store_timezone
+FROM camera_configs cc
+JOIN store_config_versions scv ON scv.id = cc.version_id
+JOIN stores s                  ON s.id  = cc.store_id
+JOIN physical_cameras pc       ON pc.id = cc.physical_camera_id
+WHERE scv.status = 'active'
+  AND s.status   = 'active'
+""")
+
+
+async def _load_store_hours(session) -> tuple[dict, dict, list]:
+    """Load (hours_by_store, store_tz, cameras) for one evaluation tick.
+
+    hours_by_store: store_id(str) -> {day_of_week(int) -> row dict}
+    store_tz:       store_id(str) -> tz string
+    cameras:        list of active-version camera_config row dicts
+    """
+    hours_res = await session.execute(_HOURS_SQL)
+    hours_by_store: dict[str, dict[int, dict]] = {}
+    store_tz: dict[str, str] = {}
+    for r in hours_res:
+        m = dict(r._mapping)
+        sid = str(m["store_id"])
+        hours_by_store.setdefault(sid, {})[int(m["day_of_week"])] = m
+        store_tz[sid] = m["store_timezone"] or "UTC"
+
+    cam_res = await session.execute(_ACTIVE_CAMERAS_SQL)
+    cameras = [dict(r._mapping) for r in cam_res]
+    for c in cameras:
+        store_tz.setdefault(str(c["store_id"]), c["store_timezone"] or "UTC")
+
+    return hours_by_store, store_tz, cameras
+
+
+def _store_open(hours_by_day: dict[int, dict], now_local: datetime) -> bool:
+    """True if the store is open at now_local, honoring overnight wrap.
+
+    For the current weekday's row: if close > open it is a same-day window
+    (open <= now < close); if close <= open it wraps past midnight
+    (now >= open OR now < close). The previous day's row is also consulted so an
+    overnight window opened yesterday still counts in today's early hours even if
+    today itself is closed. is_open=false / missing row → closed.
+    """
+    t = now_local.time().replace(tzinfo=None)
+    today = now_local.weekday()
+
+    row = hours_by_day.get(today)
+    if row and row["is_open"] and row["open_time"] is not None and row["close_time"] is not None:
+        o, c = row["open_time"], row["close_time"]
+        if c > o:
+            if o <= t < c:
+                return True
+        else:  # overnight wrap
+            if t >= o or t < c:
+                return True
+
+    prev = hours_by_day.get((today - 1) % 7)
+    if prev and prev["is_open"] and prev["open_time"] is not None and prev["close_time"] is not None:
+        o, c = prev["open_time"], prev["close_time"]
+        if c <= o and t < c:  # yesterday's window wrapped into today
+            return True
+
+    return False
+
+
+def _store_open_now(sid: str, hours_by_store: dict, store_tz: dict, now_utc: datetime) -> bool:
+    """Resolve store-openness for a tick, converting now_utc into store-local."""
+    tz_str = store_tz.get(sid, "UTC")
+    try:
+        now_local = now_utc.astimezone(ZoneInfo(tz_str))
+    except ZoneInfoNotFoundError:
+        log.error(
+            "evaluate_store_hours: invalid timezone %r for store %s — treating as closed",
+            tz_str, sid,
+        )
+        return False
+    return _store_open(hours_by_store.get(sid, {}), now_local)
 
 
 async def rebuild_running_cameras() -> None:
@@ -96,32 +171,23 @@ async def rebuild_running_cameras() -> None:
     """
     try:
         async with AsyncSessionLocal() as session:
-            result = await session.execute(_LOAD_SQL)
-            rows = [dict(r._mapping) for r in result]
+            hours_by_store, store_tz, cameras = await _load_store_hours(session)
     except Exception:
         log.exception("rebuild_running_cameras: DB load failed, skipping")
         return
 
     now_utc = datetime.now(timezone.utc)
+    open_cache: dict[str, bool] = {}
 
-    for row in rows:
+    for row in cameras:
         try:
-            tz_str = row["store_timezone"] or "UTC"
-            try:
-                store_tz = ZoneInfo(tz_str)
-            except ZoneInfoNotFoundError:
-                log.error(
-                    "rebuild_running_cameras: invalid timezone %r for store %s — skipping",
-                    tz_str, row["store_id"],
-                )
+            store_id = str(row["store_id"])
+            if store_id not in open_cache:
+                open_cache[store_id] = _store_open_now(store_id, hours_by_store, store_tz, now_utc)
+            if not open_cache[store_id]:
                 continue
 
-            now_local = now_utc.astimezone(store_tz)
-            if not _should_run(row, now_local):
-                continue
-
-            store_id  = str(row["store_id"])
-            phys_id   = str(row["physical_camera_id"])
+            phys_id = str(row["physical_camera_id"])
             if _camera_status.is_running(store_id, phys_id):
                 key = (store_id, str(row["camera_config_id"]))
                 _running_cameras.add(key)
@@ -131,24 +197,9 @@ async def rebuild_running_cameras() -> None:
                 )
         except Exception:
             log.exception(
-                "rebuild_running_cameras: error for schedule_id=%s",
-                row.get("schedule_id"),
+                "rebuild_running_cameras: error for camera_config_id=%s",
+                row.get("camera_config_id"),
             )
-    _update_active_camera_metric()
-
-
-async def _load_schedules(session) -> list[dict]:
-    result = await session.execute(_LOAD_SQL)
-    return [dict(row._mapping) for row in result]
-
-
-def _should_run(row: dict, now_local: datetime) -> bool:
-    current_day  = now_local.weekday()
-    current_time = now_local.time().replace(tzinfo=None)
-    return (
-        current_day in row["days_of_week"]
-        and row["start_time"] <= current_time < row["end_time"]
-    )
 
 
 async def _on_camera_start(row: dict) -> None:
@@ -244,42 +295,39 @@ async def _activate_pending_versions(now_utc: datetime) -> None:
             )
 
 
-async def evaluate_schedules() -> None:
-    """APScheduler job: evaluate all active schedules and emit start/stop events."""
+async def evaluate_store_hours() -> None:
+    """APScheduler job: open store → start its active-version cameras; closed → stop."""
     tick_start = time.monotonic()
 
     try:
         async with AsyncSessionLocal() as session:
-            rows = await _load_schedules(session)
+            hours_by_store, store_tz, cameras = await _load_store_hours(session)
     except Exception:
-        log.exception("evaluate_schedules: DB load failed, skipping tick")
+        log.exception("evaluate_store_hours: DB load failed, skipping tick")
         return
 
     now_utc = datetime.now(timezone.utc)
     stores_before = _stores_running()
-    # store_id -> tz string, for resolving store-local shift dates on transitions.
-    store_tz: dict[str, str] = {str(r["store_id"]): (r["store_timezone"] or "UTC") for r in rows}
 
-    for row in rows:
+    # Resolve each store's openness once per tick.
+    open_cache: dict[str, bool] = {}
+
+    def _is_open(sid: str) -> bool:
+        if sid not in open_cache:
+            open_cache[sid] = _store_open_now(sid, hours_by_store, store_tz, now_utc)
+        return open_cache[sid]
+
+    for row in cameras:
         try:
-            tz_str = row["store_timezone"] or "UTC"
-            try:
-                now_local = now_utc.astimezone(ZoneInfo(tz_str))
-            except ZoneInfoNotFoundError:
-                log.error(
-                    "evaluate_schedules: invalid timezone %r for store %s — skipping",
-                    tz_str, row["store_id"],
-                )
-                continue
-
-            should_run = _should_run(row, now_local)
-            key = (str(row["store_id"]), str(row["camera_config_id"]))
+            store_id = str(row["store_id"])
+            should_run = _is_open(store_id)
+            key = (store_id, str(row["camera_config_id"]))
 
             if should_run and key not in _running_cameras:
                 # Don't race with k3s/Docker on-failure restart recovery
                 phys_id = str(row.get("physical_camera_id", ""))
                 if phys_id:
-                    cs = _camera_status.get(str(row["store_id"]), phys_id)
+                    cs = _camera_status.get(store_id, phys_id)
                     if cs and cs["status"] in ("restarting", "starting", "pending"):
                         log.info(
                             "camera %s status=%s — skipping start  config=%s",
@@ -288,17 +336,15 @@ async def evaluate_schedules() -> None:
                         continue
                 await _on_camera_start(row)
                 _running_cameras.add(key)
-                _update_active_camera_metric()
 
             elif not should_run and key in _running_cameras:
                 await _on_camera_stop(row)
                 _running_cameras.discard(key)
-                _update_active_camera_metric()
 
         except Exception:
             log.exception(
-                "evaluate_schedules: error processing schedule_id=%s",
-                row.get("schedule_id"),
+                "evaluate_store_hours: error processing camera_config_id=%s",
+                row.get("camera_config_id"),
             )
 
     # ── Per-store shift start/end detection ──────────────────────────────────
@@ -318,13 +364,13 @@ async def evaluate_schedules() -> None:
         _fire_shift_end(sid, shift_date)
 
     await _activate_pending_versions(now_utc)
-    _update_active_camera_metric()
-    EEP_SCHEDULER_TICKS.inc()
 
     elapsed = time.monotonic() - tick_start
     from app.core.scheduler import _WINDOW_SECONDS
     if elapsed > _WINDOW_SECONDS * 0.5:
         log.warning(
-            "evaluate_schedules took %.1fs — approaching %.0fs interval",
+            "evaluate_store_hours took %.1fs — approaching %.0fs interval",
             elapsed, _WINDOW_SECONDS,
         )
+
+    EEP_SCHEDULER_TICKS.inc()
