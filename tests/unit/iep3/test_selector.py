@@ -8,7 +8,7 @@ write_canonical_positions tested with mocked repo.
 import pytest
 from unittest.mock import MagicMock
 
-from conftest import (
+from .conftest import (
     STORE_ID, CAM_01, CAM_02, CAM_03,
     LOCAL_01, LOCAL_02, LOCAL_03,
     GLOBAL_01, GLOBAL_02, WINDOW_START, WINDOW_END,
