@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { NavLink, useNavigate, useParams } from 'react-router-dom'
 import {
   Store, Radio, BarChart2, Bot, Users, Calendar,
-  UserCheck, ClipboardList, SlidersHorizontal, ChevronLeft, Video, Bug,
+  UserCheck, ClipboardList, SlidersHorizontal, ChevronLeft, Video, Bug, Bell,
 } from 'lucide-react'
 import { useAuth } from '../store'
 import { logout, getActiveAlerts, getActiveVersion } from '../api'
@@ -14,6 +14,7 @@ const NAV_GROUPS = [
       { label: 'Live Monitoring', path: 'live',      Icon: Radio },
       { label: 'Live View',       path: 'live-view', Icon: Video },
       { label: 'Analytics',       path: 'analytics', Icon: BarChart2 },
+      { label: 'Alerts',          path: 'alerts',    Icon: Bell },
       { label: 'AI Assistant',    path: 'agent',     Icon: Bot },
     ],
   },
@@ -98,7 +99,7 @@ export default function Sidebar() {
                 >
                   <Icon size={15} className="nav-icon shrink-0" />
                   <span className="flex-1 truncate">{label}</span>
-                  {path === 'live' && alertCount > 0 && (
+                  {(path === 'live' || path === 'alerts') && alertCount > 0 && (
                     <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center leading-none shrink-0">
                       {alertCount}
                     </span>

@@ -11,6 +11,9 @@ from app.api.routers.shifts import router as shifts_router
 from app.api.routers.audit import router as audit_router
 from app.api.routers.settings import router as settings_router
 from app.api.routers.schedules import router as schedules_router
+from app.api.routers.analytics import router as analytics_router
+from app.api.routers.alerts import router as alerts_router
+from app.api.routers.live import router as live_router
 
 
 def register_routers(app: FastAPI) -> None:
@@ -25,6 +28,9 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(audit_router, prefix="/api")
     app.include_router(settings_router, prefix="/api")
     app.include_router(schedules_router, prefix="/api")
+    app.include_router(analytics_router, prefix="/api")
+    app.include_router(alerts_router, prefix="/api")
+    app.include_router(live_router, prefix="/api")
 
     from app.core.config import settings
     if settings.DEBUG_MODE:

@@ -6,7 +6,7 @@ from app.models.invitation import Invitation
 from app.models.refresh_token import RefreshToken
 from app.models.audit_log import AuditLog
 from app.models.store_settings import StoreSettings
-from app.models.alert_config import AlertConfig
+from app.models.alert_rule import AlertRule, AlertRuleZone
 from app.models.physical_camera import PhysicalCamera
 from app.models.version import StoreConfigVersion
 from app.models.coordinate_frame import CoordinateFrame
@@ -34,7 +34,8 @@ __all__ = [
     "RefreshToken",
     "AuditLog",
     "StoreSettings",
-    "AlertConfig",
+    "AlertRule",
+    "AlertRuleZone",
     "PhysicalCamera",
     "StoreConfigVersion",
     "CoordinateFrame",

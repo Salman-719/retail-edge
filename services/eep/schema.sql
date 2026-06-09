@@ -94,16 +94,7 @@ CREATE TABLE audit_logs (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     store_id     UUID REFERENCES stores(id) ON DELETE SET NULL,
     user_id      UUID REFERENCES users(id) ON DELETE SET NULL,
-    action       VARCHAR(50) NOT NULL CHECK (action IN (
-                     'login', 'logout',
-                     'config_edited', 'version_activated', 'version_rolled_back',
-                     'member_invited', 'member_removed', 'member_role_changed',
-                     'permission_changed', 'password_reset',
-                     'employee_created', 'employee_updated', 'employee_deleted',
-                     'shift_created', 'shift_updated', 'shift_deleted',
-                     'store_created', 'store_updated',
-                     'draft_created', 'draft_discarded', 'draft_expired'
-                 )),
+    action       VARCHAR(50) NOT NULL,
     entity_type  VARCHAR(50),
     entity_id    UUID,
     before_state JSONB,
@@ -376,17 +367,6 @@ CREATE TABLE shift_instances (
     CONSTRAINT scheduled_end_after_start CHECK (scheduled_end > scheduled_start)
 );
 
-CREATE TABLE alert_configs (
-    id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_id                 UUID NOT NULL UNIQUE REFERENCES stores(id) ON DELETE CASCADE,
-    shift_start_grace_min    INTEGER NOT NULL DEFAULT 15,
-    absence_threshold_min    INTEGER NOT NULL DEFAULT 15,
-    queue_people_threshold   INTEGER NOT NULL DEFAULT 10,
-    queue_wait_min_threshold INTEGER NOT NULL DEFAULT 7,
-    queue_alert_cooldown_min INTEGER NOT NULL DEFAULT 15,
-    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 CREATE TABLE alerts (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     store_id    UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
@@ -395,6 +375,8 @@ CREATE TABLE alerts (
                     'staff_absence', 'queue_buildup',
                     'camera_offline', 'camera_degraded'
                 )),
+    severity    VARCHAR(10) NOT NULL DEFAULT 'medium'
+                CHECK (severity IN ('low', 'medium', 'high', 'critical')),
     employee_id UUID REFERENCES employees(id) ON DELETE SET NULL,
     zone_id     UUID REFERENCES zones(id) ON DELETE SET NULL,
     details     JSONB,
@@ -808,11 +790,16 @@ CREATE TABLE IF NOT EXISTS global_identities (
                    CHECK (state IN ('active', 'lost', 'exited')),
     lost_since_ts  BIGINT,
     entry_zone_id  UUID             REFERENCES zones(id) ON DELETE SET NULL,
-    exit_zone_id   UUID             REFERENCES zones(id) ON DELETE SET NULL
+    exit_zone_id   UUID             REFERENCES zones(id) ON DELETE SET NULL,
+    is_employee    BOOLEAN          NOT NULL DEFAULT FALSE,
+    employee_id    UUID             REFERENCES employees(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_global_identities_store_state
     ON global_identities(store_id, state);
+
+CREATE INDEX IF NOT EXISTS idx_global_identities_employee
+    ON global_identities(employee_id) WHERE employee_id IS NOT NULL;
 
 -- Partial index: only index lost rows for the lost-timeout sweep query.
 CREATE INDEX IF NOT EXISTS idx_global_identities_lost

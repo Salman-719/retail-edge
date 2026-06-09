@@ -62,6 +62,17 @@ trigger Karpenter instead of consuming stable DB/controller capacity.
 4. EEP starts, runs migrations, and later provisions per-store IEP3/IEP4/IEP5
    workloads through the Kubernetes API.
 
+## Live Product Data
+
+- IEP3 persists reconciled identities and floor positions.
+- IEP4 maintains `active_person_state`, evaluates alert rules, and writes alerts.
+- IEP5 writes daily/weekly/monthly analytics and heatmap rollups.
+- EEP exposes `/live/overview`, `/cameras/health`, `/alerts/*`, and
+  `/analytics/*`; the frontend reads those APIs directly.
+- `eep.liveStaleMs` controls how long an identity remains visible. The default
+  `120000` covers two 60-second processing windows.
+- `eep.heatmapCellSizeM` must match IEP5's heatmap writer. The default is `0.5`.
+
 ## Verification
 
 - `kubectl get nodes -L workload`

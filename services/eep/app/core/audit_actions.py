@@ -1,0 +1,38 @@
+"""Canonical actions accepted by the audit log writer."""
+
+AUDIT_ACTIONS: frozenset[str] = frozenset(
+    {
+        "login",
+        "logout",
+        "password_reset",
+        "permission_changed",
+        "store_created",
+        "store_updated",
+        "store_deleted",
+        "config_edited",
+        "version_activated",
+        "version_rolled_back",
+        "draft_created",
+        "draft_discarded",
+        "draft_expired",
+        "member_invited",
+        "member_removed",
+        "member_role_changed",
+        "employee_created",
+        "employee_updated",
+        "employee_deleted",
+        "shift_created",
+        "shift_updated",
+        "shift_deleted",
+        "shift_pattern_created",
+        "shift_pattern_updated",
+        "shift_pattern_deleted",
+        "shift_employee_assigned",
+        "shift_attendance_updated",
+        "break_created",
+        "alert_dismissed",
+        "alert_rule_created",
+        "alert_rule_updated",
+        "alert_rule_deleted",
+    }
+)

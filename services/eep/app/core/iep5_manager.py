@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import os
 
+from app.core.config import settings
+
 log = logging.getLogger(__name__)
 
 _NAMESPACE      = os.environ.get("K8S_NAMESPACE",   "retailvision")
@@ -22,7 +24,8 @@ _DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK",  "retail-edge_default")
 
 _WINDOW_SECONDS          = os.environ.get("WINDOW_SECONDS",          "60")
 _DATABASE_URL_SERVER     = os.environ.get("DATABASE_URL_SERVER",     "")
-_HEATMAP_CELL_SIZE_M     = os.environ.get("HEATMAP_CELL_SIZE_M",     "0.5")
+# Single source of truth (config), passed through to the IEP5 container as an env var.
+_HEATMAP_CELL_SIZE_M     = str(settings.HEATMAP_CELL_SIZE_M)
 _PASSTHROUGH_DWELL_MS    = os.environ.get("PASSTHROUGH_DWELL_MS",    "30000")
 _DEAD_PERIOD_THRESHOLD   = os.environ.get("DEAD_PERIOD_THRESHOLD",   "3")
 _DEAD_PERIOD_DURATION_MS = os.environ.get("DEAD_PERIOD_DURATION_MS", "1800000")

@@ -143,7 +143,7 @@ WHERE global_id = ANY($1::uuid[])
 # ── Alert rules / zones / state ──────────────────────────────────────────────
 
 LOAD_ACTIVE_RULES = """
-SELECT id, type, name, threshold_minutes, cooldown_minutes,
+SELECT id, type, name, severity, threshold_minutes, cooldown_minutes,
        followup_interval_minutes, people_threshold, min_employees,
        employee_id, only_during_shift
 FROM alert_rules
@@ -223,8 +223,10 @@ WHERE aps.store_id = $1
 # ── Alerts ───────────────────────────────────────────────────────────────────
 
 INSERT_ALERT = """
-INSERT INTO alerts (store_id, type, zone_id, details, alert_rule_id, is_followup)
-VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+INSERT INTO alerts (
+    store_id, type, zone_id, details, alert_rule_id, is_followup, severity
+)
+VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
 """
 
 RESOLVE_ALERTS_FOR_RULE = """

@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     GRPC_SERVER_KEY_PATH:  str = Field(default="")
     AGENT_SECRET: str = Field(default="")  # empty = dev mode (no auth check)
 
+    # ── Analytics / heatmap ──────────────────────────────────────────────────
+    # Heatmap grid cell size in world metres. SINGLE source of truth: the IEP5
+    # launcher (iep5_manager) passes this to the writer and the analytics heatmap
+    # endpoint reconstructs cell rectangles with the same value. They MUST match
+    # or every cell is the wrong size. Matches IEP5's own default (0.5).
+    HEATMAP_CELL_SIZE_M: float = 0.5
+
+    # A person appears in live monitoring while its reconciled identity is fresh.
+    LIVE_STALE_MS: int = 120_000
+
     # ── Feature flags ────────────────────────────────────────────────────────
     # Explicit false default — never rely on absence of this var.
     DEBUG_MODE: bool = False

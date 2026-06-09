@@ -220,6 +220,9 @@ routers map directly onto the product surface:
 | `members` | Org members & roles (invite, edit, remove) |
 | `employees` / `shifts` | Staff records, shift patterns, assignments, breaks |
 | `schedules` | Per-camera active windows (days/times) that drive Start/StopCamera |
+| `live` | Reconciled people/KPIs plus camera and edge-agent health |
+| `alerts` | Active/history views, resolution, and per-store alert-rule CRUD |
+| `analytics` | Read-only store, zone, employee, flow, distribution, and heatmap rollups |
 | `audit` | Audit log of privileged actions |
 | `settings` | Store/org settings |
 | `debug` / `dev_pipeline` | Dev-only routes (gated by `DEBUG_MODE`) to drive and inspect the pipeline |
@@ -236,6 +239,9 @@ auto-refresh interceptor). The floor-plan editor (zone/camera placement, calibra
 overlays) is built on **Konva** canvas.
 
 - **Production build** is served by the Docker `frontend` service on `:3000`.
+- **Live Monitoring** polls EEP's reconciled identity and camera-health APIs;
+  **Analytics** reads IEP5's TimescaleDB rollups; **Alerts** reads and manages
+  IEP4 output and rules. These pages do not use frontend demo fixtures.
 - The **Vite dev server** on `:5173` additionally exposes **dev pipeline screens**
   (`/store/<slug>/dev/e2e`, `/dev/vision`) that are stripped from production
   builds. These drive the real IEP1→IEP2→IEP3 pipeline with a CPU/GPU toggle,
@@ -339,9 +345,11 @@ retail-edge/
 
 - **Done & committed:** Auth + store shell, store config/onboarding (floor plan,
   zones, cameras, calibration, versioning), members, employees & shifts; the full
-  edge→cloud vision pipeline (IEP1→IEP2→IEP3) with dev (CPU) and GPU paths.
-- **In progress / planned:** Live Monitoring and Analytics frontend pages,
-  IEP4 (alerts), IEP5 (analytics aggregation), IEP6 (NL agent), audit/settings UI.
+  edge→cloud vision pipeline (IEP1→IEP2→IEP3); live monitoring, camera/agent
+  health, IEP4 alerts and rule management, IEP5 analytics/heatmaps, IEP6, audit,
+  and settings.
+- **Operational dependency:** live pages remain empty until an edge is connected,
+  a store version is active, and IEP3/IEP4 have produced reconciled state.
 
 For setup, run commands, environment variables, and troubleshooting, see
 [`README.md`](README.md). For deeper rationale on specific decisions, see

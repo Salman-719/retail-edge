@@ -104,6 +104,10 @@ spec:
               value: "false"
             - name: CANARY_PERCENTAGE
               value: {{ .Values.eep.canaryPercentage | quote }}
+            - name: LIVE_STALE_MS
+              value: {{ .Values.eep.liveStaleMs | quote }}
+            - name: HEATMAP_CELL_SIZE_M
+              value: {{ .Values.eep.heatmapCellSizeM | quote }}
             # ── Dynamic pipeline provisioning (iep3/iep4/iep5 managers) ──
             # EEP provisions per-store workers via the k8s API; these tell the
             # managers which namespace + images to use and how children connect.

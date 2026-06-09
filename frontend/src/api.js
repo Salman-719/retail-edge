@@ -293,10 +293,13 @@ export const getSyncEvent = (slug, eventId) =>
 export const requestDraftDiscard = (slug) =>
   api.post(`/store/${slug}/members/draft-discard-request`).then(r => r.data)
 
-// ─── Live Monitoring (Phase 5+) ──────────────────────────────────────────────
+// ─── Live Monitoring ─────────────────────────────────────────────────────────
 
-export const getLiveSummary = (slug) =>
-  api.get(`/store/${slug}/live/summary`).then(r => r.data)
+export const getLiveOverview = (slug) =>
+  api.get(`/store/${slug}/live/overview`).then(r => r.data)
+
+export const getCameraHealth = (slug) =>
+  api.get(`/store/${slug}/cameras/health`).then(r => r.data)
 
 export const getActiveAlerts = (slug) =>
   api.get(`/store/${slug}/alerts/active`).then(r => r.data)
@@ -304,16 +307,54 @@ export const getActiveAlerts = (slug) =>
 export const resolveAlert = (slug, alertId) =>
   api.post(`/store/${slug}/alerts/${alertId}/resolve`).then(r => r.data)
 
-// ─── Analytics (Phase 6+) ────────────────────────────────────────────────────
+export const getAlertHistory = (slug, params) =>
+  api.get(`/store/${slug}/alerts/history`, { params }).then(r => r.data)
+
+export const getAlertTimeseries = (slug, params) =>
+  api.get(`/store/${slug}/alerts/timeseries`, { params }).then(r => r.data)
+
+export const listAlertRules = (slug) =>
+  api.get(`/store/${slug}/alert-rules`).then(r => r.data)
+
+export const getAlertRule = (slug, ruleId) =>
+  api.get(`/store/${slug}/alert-rules/${ruleId}`).then(r => r.data)
+
+export const getAlertRuleDefaults = (slug) =>
+  api.get(`/store/${slug}/alert-rules/defaults`).then(r => r.data)
+
+export const createAlertRule = (slug, body) =>
+  api.post(`/store/${slug}/alert-rules`, body).then(r => r.data)
+
+export const updateAlertRule = (slug, ruleId, body) =>
+  api.patch(`/store/${slug}/alert-rules/${ruleId}`, body).then(r => r.data)
+
+export const deleteAlertRule = (slug, ruleId) =>
+  api.delete(`/store/${slug}/alert-rules/${ruleId}`)
+
+// ─── Analytics (E1/E3) ───────────────────────────────────────────────────────
+// All return the envelope { store_id, grain, from, to, rows } (heatmap: cells).
+// params: { from, to, granularity?, zone_ids?, employee_ids? }
+
+export const getStoreSeries = (slug, params) =>
+  api.get(`/store/${slug}/analytics/store-series`, { params }).then(r => r.data)
+
+export const getZoneAnalytics = (slug, params) =>
+  api.get(`/store/${slug}/analytics/zones`, { params }).then(r => r.data)
+
+export const getComposition = (slug, params) =>
+  api.get(`/store/${slug}/analytics/composition`, { params }).then(r => r.data)
+
+export const getDistribution = (slug, params) =>
+  api.get(`/store/${slug}/analytics/distribution`, { params }).then(r => r.data)
+
+export const getEmployeeAnalytics = (slug, params) =>
+  api.get(`/store/${slug}/analytics/employees`, { params }).then(r => r.data)
+
+export const getFlowMatrix = (slug, params) =>
+  api.get(`/store/${slug}/analytics/flow-matrix`, { params }).then(r => r.data)
 
 export const getHeatmap = (slug, params) =>
   api.get(`/store/${slug}/analytics/heatmap`, { params }).then(r => r.data)
-
-export const getZoneTraffic = (slug, params) =>
-  api.get(`/store/${slug}/analytics/zone-traffic`, { params }).then(r => r.data)
-
-export const getTrends = (slug, params) =>
-  api.get(`/store/${slug}/analytics/trends`, { params }).then(r => r.data)
 
 // ─── Employees (Phase 4+) ────────────────────────────────────────────────────
 
@@ -398,12 +439,6 @@ export const getSettings = (slug) =>
 
 export const patchSettings = (slug, body) =>
   api.patch(`/store/${slug}/settings`, body).then(r => r.data)
-
-export const getAlertConfig = (slug) =>
-  api.get(`/store/${slug}/alert-config`).then(r => r.data)
-
-export const patchAlertConfig = (slug, body) =>
-  api.patch(`/store/${slug}/alert-config`, body).then(r => r.data)
 
 // ─── Audit (Phase 7+) ────────────────────────────────────────────────────────
 

@@ -311,7 +311,8 @@ helm upgrade --install retailvision ./charts/retailvision \
 ```
 **Expect:** `STATUS: deployed`. EEP runs Alembic at startup, building the schema
 through the current head revision, including TimescaleDB hypertables, edge-agent
-tables, packed ReID embedding galleries, and the optional IEP3 debug trace table.
+tables, packed ReID embedding galleries, live identity fields, alert severity,
+and the optional IEP3 debug trace table.
 
 For later `helm upgrade` commands, either re-run this full command or include
 `--reuse-values`; otherwise Helm will drop the gRPC NLB service annotations that
@@ -354,6 +355,27 @@ Confirm public app/API:
 curl -sk -o /dev/null -w "%{http_code}\n" "https://$APP_HOST/api/stores"
 ```
 **Expect:** `401` because the API is live and requires auth.
+
+Confirm the live API surface and migrations:
+```bash
+kubectl -n retailvision exec deploy/eep -- alembic current
+kubectl -n retailvision port-forward svc/eep-http 8000:8000 >/tmp/rv-eep-pf.log 2>&1 &
+sleep 2
+curl -fsS http://localhost:8000/openapi.json | jq -e '
+  .paths[
+    "/api/store/{slug}/live/overview"
+  ] and .paths[
+    "/api/store/{slug}/cameras/health"
+  ] and .paths[
+    "/api/store/{slug}/alerts/active"
+  ] and .paths[
+    "/api/store/{slug}/analytics/store-series"
+  ]'
+```
+**Expect:** Alembic reports revision `0019` and `jq` returns a truthy object.
+After login, Live Monitoring, Analytics, and Alerts should load backend data
+without a demo-data banner. Empty values are valid until the edge is connected,
+the store has an active version, and IEP3/IEP4/IEP5 have produced data.
 
 Confirm observability/MLOps:
 ```bash
@@ -826,7 +848,7 @@ git fetch origin && git merge origin/reconfig-edge      # only if integrating br
   that collides with an upstream one, fixing its `down_revision`.
 - Trigger the image build:
   ```bash
-  git tag v1.2.1 && git push origin v1.2.1     # CI builds all images + -cpu/-cuda variants
+  git tag v1.3.0 && git push origin v1.3.0     # CI builds all images + -cpu/-cuda variants
   ```
   > ⚠️ **Wait for ALL matrix jobs to go green before deploying.** Each service is a
   > separate job; deploying while (say) the `eep` job is still running causes
@@ -837,6 +859,7 @@ git fetch origin && git merge origin/reconfig-edge      # only if integrating br
 **3. [LOCAL] Roll out the cloud** (EEP self-applies new Alembic migrations)
 ```bash
 export OWNER=salman-719 REGION=eu-west-1 BUCKET=retailvision-prod-objects-692461731658
+export VERSION=1.3.0
 export APP_HOST="$(terraform -chdir=infra/aws output -raw app_host)"
 export EEP_HOST="$(terraform -chdir=infra/aws output -raw eep_host)"
 export INGRESS_EIP="$(terraform -chdir=infra/aws output -raw ingress_eip)"
@@ -851,12 +874,25 @@ helm upgrade retailvision ./charts/retailvision \
   --set s3.region="$REGION" \
   --set monitoring.grafana.host="grafana.$INGRESS_EIP.nip.io" \
   --set mlflow.host="mlflow.$INGRESS_EIP.nip.io" \
+  --set eep.image.tag="$VERSION" \
+  --set iep3.image.tag="$VERSION" \
+  --set iep4.image.tag="$VERSION" \
+  --set iep5.image.tag="$VERSION" \
+  --set iep6.image.tag="$VERSION" \
+  --set frontend.image.tag="$VERSION" \
+  --set mlflow.image.tag="$VERSION" \
   -n retailvision
 kubectl -n retailvision rollout status deploy/eep && kubectl -n retailvision get pods
+kubectl -n retailvision set image statefulset -l app=iep4 \
+  iep4="ghcr.io/$OWNER/retailvision/iep4:$VERSION"
 ```
-> Tags now come from `values.yaml` (step 2), so no per-image `--set …tag` needed.
+> Keep the explicit image-tag overrides when using `--reuse-values`; otherwise
+> Helm can retain the previous release's tags even when `values.yaml` changed.
 > IEP3/IEP4 are re-provisioned by EEP per active store — no `iep3.stores` flag in
 > normal operation (that's only for `staticProvisioning=true`).
+> Existing per-store IEP4 StatefulSets are patched explicitly above so custom
+> rule severity starts propagating immediately; future activation also uses the
+> new image configured in EEP.
 > Migration note for the `reconfig-edge` ReID alignment: revision `0014` clears
 > only `local_centroids` and `global_embeddings` because old single-centroid rows
 > cannot be converted to packed embedding heaps. It does **not** wipe stores,
@@ -868,7 +904,9 @@ kubectl -n retailvision rollout status deploy/eep && kubectl -n retailvision get
 > first-time TimescaleDB adoption needs the **clean reinstall** (Part E) so
 > Postgres re-seeds. Existing data is lost — back up first if it matters.
 
-**4. [EDGE] Update each store's device** (`git pull` first)
+**4. [EDGE] Update each store's device only when edge code or image tags changed**
+(`git pull` first). The `1.3.0` live/analytics/alerts release is cloud-only and
+does not require an edge redeploy.
 - **cpu / cuda**: re-run the bootstrap — it re-applies the overlay at the new tag
   and pulls the new `-cpu`/`-cuda` images:
   ```bash
@@ -881,7 +919,8 @@ kubectl -n retailvision rollout status deploy/eep && kubectl -n retailvision get
   bootstrap rewrites it to the version you pass — the next `StartCamera` uses it.
 
 **5. Verify**: `kubectl -n retailvision get pods` (cloud + each edge) all `Running`;
-hit `https://$APP_HOST`.
+hit `https://$APP_HOST`, then verify Live Monitoring, Analytics, and Alerts.
+For releases containing migrations, also run the live API/migration checks in A7.
 
 The granular variants (D1–D5) below cover individual cases.
 
@@ -991,6 +1030,9 @@ sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.2.1 "$EEP_HOST" "$AGENT_SE
 | `redis-server-0` stuck `ContainerCreating` | cert not issued yet | wait ~1 min; check `kubectl -n retailvision get certificate` |
 | EEP log `Error 111 ... redis-server:6380` | Redis still starting | transient; clears once `redis-server-0` is `Running` |
 | `curl /api/...` → `404` | wrong path; real routes are `/api/auth`, `/api/stores`, … | test `/api/stores` (expect `401`) |
+| GUI says `Showing demo data — live backend not connected` | an old frontend image is still deployed; current production pages contain no demo fallback | verify the new frontend tag exists, update `frontend.image.tag`, run `helm upgrade`, and wait for `kubectl -n retailvision rollout status deploy/frontend` |
+| Live/Analytics/Alerts returns `404` after frontend update | frontend and EEP image tags are out of sync | deploy the matching EEP tag, confirm Alembic reaches `0019`, and inspect the OpenAPI paths using the A7 commands |
+| Live Monitoring loads but shows zero people | no fresh reconciled identities exist inside `eep.liveStaleMs`, or IEP3/IEP4 is not running | activate the store version, verify edge camera status and per-store IEP3/IEP4 pods, then inspect `global_identities` and `active_person_state` |
 | `certificate retailvision-app-tls` not Ready | Let's Encrypt rate-limited nip.io | re-run A7 with `--set ingress.clusterIssuer=retailvision-ca-issuer` |
 | **[EDGE]** bootstrap aborts: `Packages were downgraded ... without --allow-downgrades` (nvidia-container-toolkit) | JetPack already has a newer toolkit | already fixed (script skips it if present) — `git pull` then re-run the bootstrap |
 | **[EDGE]** `retailvision-edge-agent.service not found` / namespace empty | bootstrap aborted before steps 4–7 | fix the abort cause above, then re-run the bootstrap (it's idempotent) |

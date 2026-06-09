@@ -51,6 +51,7 @@ class AlertRule:
     id:                        uuid.UUID
     type:                      str
     name:                      str
+    severity:                  str
     threshold_minutes:         int
     cooldown_minutes:          int
     followup_interval_minutes: int
