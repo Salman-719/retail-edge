@@ -91,8 +91,8 @@ async def active_alerts(
 async def alert_history(
     from_d: date | None = Query(default=None, alias="from"),
     to_d: date | None = Query(default=None, alias="to"),
-    type: str | None = Query(default=None),
-    resolution: str | None = Query(default=None),
+    type: str | None = Query(default=None, max_length=50),
+    resolution: str | None = Query(default=None, max_length=50),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     ctx: StoreContext = Depends(get_store_context),
@@ -137,8 +137,8 @@ _TS_BUCKET = {
 async def alerts_timeseries(
     from_d: date = Query(alias="from"),
     to_d: date = Query(alias="to"),
-    granularity: str | None = Query(default="auto"),
-    resolution: str | None = Query(default=None),
+    granularity: str | None = Query(default="auto", max_length=10),
+    resolution: str | None = Query(default=None, max_length=50),
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
 ):

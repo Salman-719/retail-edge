@@ -76,7 +76,7 @@ async def record_punch_event(
 @router.get("/store/{slug}/punch-events", response_model=list[PunchEventResponse])
 async def list_punch_events(
     slug: str,
-    status: str | None = Query(default=None),
+    status: str | None = Query(default=None, pattern="^(pending|linked|unmatched)$"),
     limit: int = Query(default=50, ge=1, le=500),
     ctx: StoreContext = Depends(get_store_context),
     db: AsyncSession = Depends(get_db),
