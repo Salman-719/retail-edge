@@ -23,6 +23,9 @@ Common environment:
 Optional switches:
   AUTO_APPROVE=1     Apply Terraform without an interactive approval prompt.
   SKIP_IMAGE_CHECK=1 Skip the GHCR tag/public visibility check.
+  ALLOW_CORE_REPLACEMENT=1
+                     Explicitly allow a plan that deletes/replaces protected
+                     EKS/VPC/S3/EIP resources. Prefer cloud-eks-reset instead.
 EOF
 }
 
@@ -167,9 +170,36 @@ terraform validate
 popd >/dev/null
 
 bash scripts/check-cloud-deploy-preflight.sh
+bash scripts/repair-failed-eks-addons.sh
 
 pushd infra/aws >/dev/null
 terraform plan -out eks.tfplan
+
+PROTECTED_DELETIONS="$(terraform show -json eks.tfplan | jq -r '
+  .resource_changes[]? |
+  select(
+    .address == "module.eks.aws_eks_cluster.this[0]" or
+    .address == "module.vpc.aws_vpc.this[0]" or
+    .address == "aws_s3_bucket.objects" or
+    (.address | startswith("aws_eip.ingress")) or
+    (.address | startswith("aws_eip.grpc")) or
+    (.address | startswith("aws_eip.wireguard"))
+  ) |
+  select(.change.actions | index("delete")) |
+  .address
+')"
+
+if [[ -n "$PROTECTED_DELETIONS" && "${ALLOW_CORE_REPLACEMENT:-0}" != "1" ]]; then
+  echo
+  echo "ERROR: Terraform plans to delete or replace protected cloud resources:" >&2
+  while IFS= read -r protected_resource; do
+    [[ -n "$protected_resource" ]] && printf '  - %s\n' "$protected_resource" >&2
+  done <<<"$PROTECTED_DELETIONS"
+  echo "Normal deployment will not apply this plan." >&2
+  echo "Use make cloud-eks-reset for an intentional rebuild." >&2
+  exit 1
+fi
+
 if [[ "${AUTO_APPROVE:-0}" == "1" ]]; then
   terraform apply -auto-approve eks.tfplan
 else

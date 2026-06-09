@@ -29,12 +29,16 @@ resource "aws_eip" "grpc" {
 
 # ── AWS Load Balancer Controller ────────────────────────────────────────────
 resource "helm_release" "aws_lb_controller" {
-  namespace  = "kube-system"
-  name       = "aws-load-balancer-controller"
-  repository = "https://aws.github.io/eks-charts"
-  chart      = "aws-load-balancer-controller"
-  version    = var.lb_controller_version
-  wait       = true
+  namespace       = "kube-system"
+  name            = "aws-load-balancer-controller"
+  repository      = "https://aws.github.io/eks-charts"
+  chart           = "aws-load-balancer-controller"
+  version         = var.lb_controller_version
+  wait            = true
+  wait_for_jobs   = true
+  atomic          = true
+  cleanup_on_fail = true
+  timeout         = 900
 
   values = [yamlencode({
     clusterName = module.eks.cluster_name
@@ -51,6 +55,59 @@ resource "helm_release" "aws_lb_controller" {
   depends_on = [module.eks]
 }
 
+# The controller registers a mutating Service webhook before its pods are always
+# reachable. Helm releases installed in parallel can otherwise fail with
+# "no endpoints available for service aws-load-balancer-webhook-service".
+resource "null_resource" "aws_lb_webhook_ready" {
+  triggers = {
+    always_run         = timestamp()
+    cluster_name       = module.eks.cluster_name
+    controller_release = helm_release.aws_lb_controller.id
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      kubeconfig="$(mktemp)"
+      trap 'rm -f "$kubeconfig"' EXIT
+
+      aws eks update-kubeconfig \
+        --name '${module.eks.cluster_name}' \
+        --region '${var.aws_region}' \
+        --kubeconfig "$kubeconfig" \
+        >/dev/null
+
+      kubectl --kubeconfig "$kubeconfig" \
+        -n kube-system rollout status \
+        deploy/aws-load-balancer-controller \
+        --timeout=10m
+
+      for attempt in $(seq 1 60); do
+        endpoints="$(kubectl --kubeconfig "$kubeconfig" \
+          -n kube-system get endpoints aws-load-balancer-webhook-service \
+          -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}' \
+          2>/dev/null || true)"
+        if [[ -n "$endpoints" ]]; then
+          echo "AWS Load Balancer Controller webhook is ready: $endpoints"
+          exit 0
+        fi
+        echo "Waiting for AWS Load Balancer Controller webhook endpoints ($attempt/60)..."
+        sleep 5
+      done
+
+      kubectl --kubeconfig "$kubeconfig" \
+        -n kube-system get pods,endpoints \
+        -l app.kubernetes.io/name=aws-load-balancer-controller \
+        -o wide || true
+      echo "AWS Load Balancer Controller webhook did not become ready." >&2
+      exit 1
+    EOT
+  }
+
+  depends_on = [helm_release.aws_lb_controller]
+}
+
 # ── ingress-nginx → internet-facing NLB for HTTPS app/API traffic ───────────
 resource "helm_release" "ingress_nginx" {
   namespace        = "ingress-nginx"
@@ -60,6 +117,10 @@ resource "helm_release" "ingress_nginx" {
   chart            = "ingress-nginx"
   version          = var.ingress_nginx_version
   wait             = true
+  wait_for_jobs    = true
+  atomic           = true
+  cleanup_on_fail  = true
+  timeout          = 900
 
   values = [yamlencode({
     controller = {
@@ -83,7 +144,7 @@ resource "helm_release" "ingress_nginx" {
     }
   })]
 
-  depends_on = [helm_release.aws_lb_controller]
+  depends_on = [null_resource.aws_lb_webhook_ready]
 }
 
 # ── cert-manager + ClusterIssuers ───────────────────────────────────────────
@@ -95,6 +156,10 @@ resource "helm_release" "cert_manager" {
   chart            = "cert-manager"
   version          = var.cert_manager_version
   wait             = true
+  wait_for_jobs    = true
+  atomic           = true
+  cleanup_on_fail  = true
+  timeout          = 900
   set {
     name  = "crds.enabled"
     value = "true"
@@ -115,7 +180,7 @@ resource "helm_release" "cert_manager" {
       tolerations  = local.stable_addon_tolerations
     }
   })]
-  depends_on = [module.eks]
+  depends_on = [null_resource.aws_lb_webhook_ready]
 }
 
 resource "kubectl_manifest" "issuer_letsencrypt" {
@@ -197,6 +262,10 @@ resource "helm_release" "keda" {
   chart            = "keda"
   version          = var.keda_version
   wait             = true
+  wait_for_jobs    = true
+  atomic           = true
+  cleanup_on_fail  = true
+  timeout          = 900
 
   values = [yamlencode({
     nodeSelector = { workload = "stable" }
@@ -211,7 +280,7 @@ resource "helm_release" "keda" {
     }
   })]
 
-  depends_on = [module.eks]
+  depends_on = [null_resource.aws_lb_webhook_ready]
 }
 
 # ── External Secrets Operator + ClusterSecretStore (IRSA → Secrets Manager) ──
@@ -223,6 +292,10 @@ resource "helm_release" "external_secrets" {
   chart            = "external-secrets"
   version          = var.external_secrets_version
   wait             = true
+  wait_for_jobs    = true
+  atomic           = true
+  cleanup_on_fail  = true
+  timeout          = 900
 
   values = [yamlencode({
     installCRDs = true
@@ -241,7 +314,7 @@ resource "helm_release" "external_secrets" {
       tolerations  = local.stable_addon_tolerations
     }
   })]
-  depends_on = [module.eks]
+  depends_on = [null_resource.aws_lb_webhook_ready]
 }
 
 resource "kubectl_manifest" "cluster_secret_store" {
@@ -262,17 +335,21 @@ resource "kubectl_manifest" "cluster_secret_store" {
 
 # ── metrics-server (HPA) ────────────────────────────────────────────────────
 resource "helm_release" "metrics_server" {
-  namespace  = "kube-system"
-  name       = "metrics-server"
-  repository = "https://kubernetes-sigs.github.io/metrics-server/"
-  chart      = "metrics-server"
-  version    = var.metrics_server_version
-  wait       = true
+  namespace       = "kube-system"
+  name            = "metrics-server"
+  repository      = "https://kubernetes-sigs.github.io/metrics-server/"
+  chart           = "metrics-server"
+  version         = var.metrics_server_version
+  wait            = true
+  wait_for_jobs   = true
+  atomic          = true
+  cleanup_on_fail = true
+  timeout         = 900
   values = [yamlencode({
     nodeSelector = { workload = "stable" }
     tolerations  = local.stable_addon_tolerations
   })]
-  depends_on = [module.eks]
+  depends_on = [null_resource.aws_lb_webhook_ready]
 }
 
 # ── default gp3 StorageClass (EBS CSI) ──────────────────────────────────────

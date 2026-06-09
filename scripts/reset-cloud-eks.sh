@@ -97,6 +97,7 @@ if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/
     --query 'nodegroups[]' \
     --output text 2>/dev/null || true)"
   for nodegroup in $NODEGROUPS; do
+    echo "Requesting deletion of EKS node group ${nodegroup}..."
     aws eks delete-nodegroup \
       --cluster-name "$CLUSTER_NAME" \
       --nodegroup-name "$nodegroup" \
@@ -104,10 +105,12 @@ if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/
       >/dev/null || true
   done
   for nodegroup in $NODEGROUPS; do
+    echo "Waiting for EKS node group ${nodegroup} to be deleted..."
     aws eks wait nodegroup-deleted \
       --cluster-name "$CLUSTER_NAME" \
       --nodegroup-name "$nodegroup" \
       --region "$AWS_REGION" || true
+    echo "EKS node group ${nodegroup} deletion wait finished."
   done
 
   FARGATE_PROFILES="$(aws eks list-fargate-profiles \
@@ -116,6 +119,7 @@ if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/
     --query 'fargateProfileNames[]' \
     --output text 2>/dev/null || true)"
   for profile in $FARGATE_PROFILES; do
+    echo "Deleting EKS Fargate profile ${profile}..."
     aws eks delete-fargate-profile \
       --cluster-name "$CLUSTER_NAME" \
       --fargate-profile-name "$profile" \
@@ -125,10 +129,14 @@ if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/
       --cluster-name "$CLUSTER_NAME" \
       --fargate-profile-name "$profile" \
       --region "$AWS_REGION" || true
+    echo "EKS Fargate profile ${profile} deletion wait finished."
   done
 
+  echo "Requesting deletion of EKS cluster ${CLUSTER_NAME}..."
   aws eks delete-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null || true
+  echo "Waiting for EKS cluster ${CLUSTER_NAME} to be deleted..."
   aws eks wait cluster-deleted --name "$CLUSTER_NAME" --region "$AWS_REGION" || true
+  echo "EKS cluster ${CLUSTER_NAME} deletion wait finished."
 fi
 
 echo "Terminating project EC2 instances..."

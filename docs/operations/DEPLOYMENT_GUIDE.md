@@ -198,6 +198,16 @@ The script:
 - runs a mandatory AWS/state preflight before planning. It stops if an EKS
   cluster, S3 bucket, IAM resources, secrets, KMS alias, log group, or required
   EIPs exist outside the active remote state;
+- removes Terraform-managed add-on Helm releases left in `failed` or
+  `pending-*` state by an interrupted earlier apply;
+- installs the AWS Load Balancer Controller first and waits for both its
+  deployment and webhook endpoint before installing any other Service-producing
+  add-on;
+- installs add-on Helm charts atomically, rolling back a failed chart instead of
+  leaving a poisoned Helm release;
+- rejects normal deployment plans that delete or replace the EKS cluster, VPC,
+  object bucket, or fixed EIPs; intentional destruction must use
+  `make cloud-eks-reset`;
 - pauses after showing the Terraform plan and requires typing `APPLY`;
 - configures `kubectl`;
 - writes `retailvision/openai-api-key` if `OPENAI_API_KEY` is set;
@@ -1243,7 +1253,7 @@ sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SE
 |---|---|---|
 | `aws ... InvalidClientTokenId` | profile region not enabled (opt-in) | `aws configure set region eu-west-1 --profile adsal` |
 | zsh `command not found: --flag` | multi-line paste mangled | paste **one line** at a time |
-| Terraform `aws-load-balancer-webhook-service ... no endpoints` | AWS Load Balancer Controller webhook was registered before its pod became Ready | wait for the controller rollout and endpoints, then rerun `make cloud-eks-deploy` so Terraform creates a fresh plan |
+| Terraform `aws-load-balancer-webhook-service ... no endpoints` | an older deployment installed add-ons in parallel before the controller webhook had endpoints | pull the latest branch and rerun `make cloud-eks-deploy`; it removes the failed release, installs the controller first, and gates every other add-on on a live webhook endpoint |
 | Terraform `AddressLimitExceeded` | the deployment needs five EIPs, but old or unrelated addresses consume the regional quota | stop; run the reset workflow below for old RetailVision resources, then release only confirmed-unused unrelated EIPs or request a quota increase |
 | Terraform `ResourceExistsException`, `EntityAlreadyExists`, `BucketAlreadyOwnedByYou`, log group already exists, or KMS alias already exists | AWS contains resources from an older deployment that are absent from the active remote Terraform state | do not rerun apply; use `CONFIRM_RESET=retailvision-production make cloud-eks-reset` for the approved wipe, or import every resource when preserving it |
 | Terraform `secret ... scheduled for deletion` | an older teardown scheduled a fixed-name Secrets Manager secret for deletion | use the approved reset workflow and wait for its final preflight; do not apply a stale plan |
@@ -1275,6 +1285,39 @@ sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SE
 | Grafana login fails | wrong admin password | read it: `kubectl -n retailvision get secret retailvision-secrets -o jsonpath='{.data.grafana-admin-password}' | base64 -d` |
 | Prometheus target `iep3` down | IEP3 pod has no scrape annotation / not running | confirm the pod has `prometheus.io/scrape=true` (set by `iep3_manager`) and is `Running` |
 | `mlflow` pod `CrashLoopBackOff` | S3 creds/endpoint or PVC issue | `kubectl -n retailvision logs deploy/mlflow`; verify `s3-access-key`/`s3-secret-key` secrets and `s3.bucket` |
+
+### Recover the Load Balancer Webhook Race
+
+For this exact error:
+
+```text
+failed calling webhook "mservice.elbv2.k8s.aws"
+no endpoints available for service "aws-load-balancer-webhook-service"
+```
+
+Do **not** reset the cluster. The successful resources from the partial apply are
+already in remote Terraform state. Pull the fixed dependency graph and resume:
+
+```bash
+cd "$HOME/retail-edge"
+git pull --ff-only origin deploy/aws-eks
+make cloud-eks-prereqs
+
+export AWS_REGION=eu-west-1
+export OWNER=salman-719
+export VERSION=1.3.1
+export LETSENCRYPT_EMAIL=aas145@mail.aub.edu
+
+make cloud-eks-deploy
+```
+
+The wrapper removes only unhealthy Terraform-managed add-on Helm releases, then
+creates a fresh Terraform plan. Type `APPLY` after reviewing it. Terraform keeps
+the EKS cluster, VPC, node groups, EIPs, IAM, bucket, and healthy add-ons already
+created; it installs or repairs only what remains. The new dependency gate waits
+up to 10 minutes for the controller deployment and up to 5 minutes for a real
+webhook endpoint before cert-manager, ingress-nginx, KEDA, External Secrets,
+metrics-server, or Karpenter can proceed.
 
 ### Recover a Cross-Node Ingress 504
 
@@ -1341,6 +1384,25 @@ The reset is intentionally destructive. It removes the RetailVision EKS
 deployment, application data, object bucket contents, secrets, fixed-name IAM
 resources, load balancers, and tagged EIPs. It retains only the S3 Terraform
 backend and DynamoDB lock table.
+
+EKS node-group and cluster deletion can take 20-40 minutes. Leave the reset
+running while it prints `Waiting for EKS node group ...` or
+`Waiting for EKS cluster ...`. To inspect it without interfering, open a second
+CloudShell tab and run:
+
+```bash
+export AWS_REGION=eu-west-1
+ps -ef | grep -E '[a]ws eks wait|[r]eset-cloud-eks'
+aws eks list-nodegroups \
+  --cluster-name retailvision-production \
+  --region "$AWS_REGION" \
+  --output table 2>/dev/null || true
+aws eks describe-cluster \
+  --name retailvision-production \
+  --region "$AWS_REGION" \
+  --query 'cluster.status' \
+  --output text 2>/dev/null || echo "cluster deleted"
+```
 
 The reset ends by running the preflight. Continue only when it prints:
 
