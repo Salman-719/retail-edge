@@ -36,7 +36,6 @@ log = logging.getLogger("reid_service")
 REID_INPUT_SOCK       = os.environ.get("REID_INPUT_SOCK",       "ipc:///tmp/sockets/reid_input.sock")
 REID_HEALTH_UNIX_SOCK = os.environ.get("REID_HEALTH_SOCK",      "unix:///tmp/sockets/reid_health.sock")
 REID_HEALTH_TCP_ADDR  = os.environ.get("REID_HEALTH_TCP_ADDR",  "[::]:50053")
-REID_METRICS_PORT     = int(os.environ.get("REID_METRICS_PORT", "9401"))
 
 REID_MODEL_PATH  = os.environ.get("REID_MODEL_PATH",  "resnet50_msmt17.engine")
 MAX_BATCH_SIZE    = int(os.environ.get("REID_MAX_BATCH_SIZE",    "64"))
@@ -73,34 +72,6 @@ REID_BATCH_SIZE = Histogram(
 REID_EMBEDDING_NORM = Histogram(
     "reid_embedding_norm",
     "L2 norm of raw ResNet50 embeddings before normalisation (2048-dim)",
-    ["model_version"],
-    buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0],
-)
-
-_MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
-
-REID_CROPS = Counter(
-    "reid_crops_processed_total",
-    "Total person crops processed by the ReID service",
-)
-REID_ERRORS = Counter(
-    "reid_errors_total",
-    "Crops that failed preprocessing or caused ReID inference errors",
-)
-REID_INFERENCE = Histogram(
-    "reid_inference_seconds",
-    "Wall-clock ReID batch inference time",
-    ["model_version"],
-    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0],
-)
-REID_BATCH_SIZE = Histogram(
-    "reid_batch_size",
-    "Crops per ReID inference batch",
-    buckets=[1, 2, 4, 8, 16, 32, 48, 64, 96, 128],
-)
-REID_EMBEDDING_NORM = Histogram(
-    "reid_embedding_norm",
-    "L2 norm of raw embeddings before normalization",
     ["model_version"],
     buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0],
 )
@@ -210,13 +181,7 @@ def _l2_normalize(emb: np.ndarray) -> np.ndarray:
 def _infer_and_pack(engine, batch_items: list[dict]) -> list[dict]:
     """Preprocess, infer, L2-normalise, pack responses."""
     # Preprocess all crops to float16 tensors.
-    tensors = []
-    for item in batch_items:
-        try:
-            tensors.append(_preprocess_crop(item["crop"]))
-        except Exception:
-            REID_ERRORS.inc()
-            tensors.append(np.zeros((3, 256, 128), dtype=np.float16))
+    tensors = [_preprocess_crop(item["crop"]) for item in batch_items]
     batch   = np.stack(tensors, axis=0)              # [B, 3, 256, 128] fp16
 
     t0 = time.monotonic()
@@ -311,9 +276,6 @@ async def main() -> None:
     log.info("Prometheus metrics server started on :%d", REID_METRICS_PORT)
 
     from grpc_health.v1 import health, health_pb2
-
-    start_http_server(REID_METRICS_PORT)
-    log.info("Prometheus metrics server started on :%d", REID_METRICS_PORT)
 
     health_servicer = health.HealthServicer()
     health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)  # R7

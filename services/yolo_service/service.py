@@ -37,7 +37,6 @@ log = logging.getLogger("yolo_service")
 YOLO_INPUT_SOCK       = os.environ.get("YOLO_INPUT_SOCK",       "ipc:///tmp/sockets/yolo_input.sock")
 YOLO_HEALTH_UNIX_SOCK = os.environ.get("YOLO_HEALTH_SOCK",      "unix:///tmp/sockets/yolo_health.sock")
 YOLO_HEALTH_TCP_ADDR  = os.environ.get("YOLO_HEALTH_TCP_ADDR",  "[::]:50052")
-YOLO_METRICS_PORT     = int(os.environ.get("YOLO_METRICS_PORT", "9400"))
 
 YOLO_MODEL_VARIANT    = os.environ.get("YOLO_MODEL_VARIANT",     "n")
 YOLO_CONF_THRESHOLD   = float(os.environ.get("YOLO_CONF",        "0.25"))
@@ -89,44 +88,6 @@ DETECTOR_CONF_MEAN = Gauge(
     ["model_version"],
 )
 
-_MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
-
-DETECTOR_FRAMES = Counter(
-    "detector_frames_total",
-    "Total frames processed by the detector service",
-)
-DETECTOR_DETECTIONS = Counter(
-    "detector_detections_total",
-    "Person detections returned by the detector service",
-    ["model_version"],
-)
-DETECTOR_ERRORS = Counter(
-    "detector_errors_total",
-    "Frames that failed to decode or caused detector inference errors",
-)
-DETECTOR_INFERENCE = Histogram(
-    "detector_inference_seconds",
-    "Wall-clock detector batch inference time",
-    ["model_version"],
-    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0],
-)
-DETECTOR_BATCH_SIZE = Histogram(
-    "detector_batch_size",
-    "Frames per detector inference batch",
-    buckets=[1, 2, 4, 8, 16, 24, 32, 48, 64],
-)
-DETECTOR_CONFIDENCE = Histogram(
-    "detector_detection_confidence",
-    "Confidence score of each accepted person detection",
-    ["model_version"],
-    buckets=[0.25, 0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0],
-)
-DETECTOR_CONF_MEAN = Gauge(
-    "detector_inference_confidence_mean",
-    "Mean confidence of person detections in the latest detector batch",
-    ["model_version"],
-)
-
 # ── Per-camera result sockets ─────────────────────────────────────────────────
 # One PUSH socket per camera_id — routes results to the correct IEP2 container.
 # Deviation from spec single YOLO_OUTPUT_SOCK: ZMQ PUSH/PULL round-robins across
@@ -175,7 +136,6 @@ def _decode_frame(jpeg_bytes: bytes) -> np.ndarray:
     arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
     frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if frame is None:
-        DETECTOR_ERRORS.inc()
         return np.zeros((640, 640, 3), dtype=np.uint8)
     return frame
 
@@ -295,9 +255,6 @@ async def main() -> None:
     log.info("Prometheus metrics server started on :%d", YOLO_METRICS_PORT)
 
     from grpc_health.v1 import health, health_pb2
-
-    start_http_server(YOLO_METRICS_PORT)
-    log.info("Prometheus metrics server started on :%d", YOLO_METRICS_PORT)
 
     health_servicer = health.HealthServicer()
     health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)  # R7
