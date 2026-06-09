@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, AsyncSessionLocal
 from app.core import dev_orchestrator as orch
+from app.core import shadow as _shadow
 
 log = logging.getLogger(__name__)
 
@@ -270,7 +272,11 @@ async def get_tracking(
     Returns up to :lim rows per local_id, ordered so that the identity that
     appeared first always sorts first (stable display numbering in the UI).
     Within each identity, rows are newest-first.
+
+    A shadow query runs fire-and-forget after the response is assembled;
+    it never delays or affects the return value.
     """
+    t0 = time.monotonic()
     rows = (await db.execute(
         text("""
             WITH ranked AS (
@@ -290,11 +296,25 @@ async def get_tracking(
         """),
         {"cam": camera_id, "lim": limit},
     )).mappings().all()
+    prod_latency_ms = (time.monotonic() - t0) * 1000
     total = (await db.execute(
         text("SELECT COUNT(*) FROM tracking_history WHERE camera_id = :cam"),
         {"cam": camera_id},
     )).scalar_one()
-    return {"camera_id": camera_id, "total": total, "rows": [dict(r) for r in rows]}
+    prod_rows = [dict(r) for r in rows]
+
+    # Fire shadow comparison — completely detached from the production response.
+    asyncio.create_task(
+        _shadow.shadow_tracking(
+            camera_id=camera_id,
+            limit=limit,
+            prod_rows=prod_rows,
+            prod_latency_ms=prod_latency_ms,
+            db_factory=AsyncSessionLocal,
+        )
+    )
+
+    return {"camera_id": camera_id, "total": total, "rows": prod_rows}
 
 
 @router.get("/iep3")
@@ -303,7 +323,12 @@ async def get_iep3(
     limit: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ):
-    """Recent global_tracking_history (IEP3 reconciliation output), newest first."""
+    """Recent global_tracking_history (IEP3 reconciliation output), newest first.
+
+    A shadow query runs fire-and-forget after the response is assembled;
+    it never delays or affects the return value.
+    """
+    t0 = time.monotonic()
     rows = (await db.execute(
         text("""
             SELECT global_id::text AS global_id, batch_number, timestamp_ms,
@@ -316,6 +341,7 @@ async def get_iep3(
         """),
         {"store": store_id, "lim": limit},
     )).mappings().all()
+    prod_latency_ms = (time.monotonic() - t0) * 1000
     summary = (await db.execute(
         text("""
             SELECT COUNT(*) AS positions,
@@ -325,4 +351,17 @@ async def get_iep3(
         """),
         {"store": store_id},
     )).mappings().first()
-    return {"store_id": store_id, "summary": dict(summary), "rows": [dict(r) for r in rows]}
+    prod_rows = [dict(r) for r in rows]
+
+    # Fire shadow comparison — completely detached from the production response.
+    asyncio.create_task(
+        _shadow.shadow_iep3(
+            store_id=store_id,
+            limit=limit,
+            prod_rows=prod_rows,
+            prod_latency_ms=prod_latency_ms,
+            db_factory=AsyncSessionLocal,
+        )
+    )
+
+    return {"store_id": store_id, "summary": dict(summary), "rows": prod_rows}
