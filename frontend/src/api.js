@@ -167,6 +167,14 @@ export const getDevTracking = (cameraId, limit = 50, sinceTs = null) =>
 export const getDevIep3 = (storeId, limit = 50) =>
   api.get('/debug/dev/iep3', { params: { store_id: storeId, limit } }).then(r => r.data)
 
+export const getDevLocalGlobal = (storeId, limit = 500) =>
+  api.get('/debug/dev/iep3/local-global', { params: { store_id: storeId, limit } }).then(r => r.data)
+
+export const getDevReconTrace = (storeId, batchNumber = null, limit = 1000) =>
+  api.get('/debug/dev/iep3/trace', {
+    params: { store_id: storeId, limit, ...(batchNumber != null ? { batch_number: batchNumber } : {}) },
+  }).then(r => r.data)
+
 export const getDevGpuStatus = () =>
   api.get('/debug/dev/gpu-status').then(r => r.data)
 

@@ -28,6 +28,7 @@ import time
 from collections import defaultdict
 
 import numpy as np
+import redis.asyncio as aioredis
 
 from app.appearance_fallback import resolve_ambiguous
 from app.camera_graph import CameraGraph, connected_components
@@ -67,6 +68,23 @@ class Reconciler:
         self._selector = PositionSelector(repo=repo, settings=settings)
         self._state    = StateManager(repo=repo, settings=settings)
 
+        # Lazy Redis client for the dev trace gate (VD1). Default off → no work.
+        self._trace_redis: aioredis.Redis | None = None
+
+    def _trace_client(self) -> aioredis.Redis:
+        if self._trace_redis is None:
+            self._trace_redis = aioredis.from_url(
+                self._settings.server_redis_url, decode_responses=True
+            )
+        return self._trace_redis
+
+    async def _trace_enabled(self) -> bool:
+        """Redis-gated dev trace flag. Failures default to OFF (never block)."""
+        try:
+            return bool(await self._trace_client().get(f"iep3:debug_trace:{self._store_id}"))
+        except Exception:
+            return False
+
     async def process_batch(
         self,
         batch_number: int,
@@ -85,10 +103,19 @@ class Reconciler:
             batch_number, window_start_ms, window_end_ms, sorted(reporting_cameras),
         )
 
+        # Dev trace (VD1): Redis-gated, default off. `trace` stays None in prod →
+        # zero collection overhead; only a list when explicitly enabled.
+        trace: list | None = [] if await self._trace_enabled() else None
+
         # ── Stage 0: camera overlap graph (read-only, outside the transaction) ──
         # Reloaded each batch so a version activation is picked up automatically.
         edges = await self._repo.get_camera_overlap_edges(self._store_id)
         graph = CameraGraph(edges)
+        if trace is not None:
+            trace.append({
+                "event_type": "graph",
+                "detail": {"pairs": [[str(a), str(b)] for a, b in graph.overlapping_pairs()]},
+            })
 
         n_cross_links = 0
         n_new_globals = 0
@@ -106,7 +133,7 @@ class Reconciler:
 
                 # ── Stage 2 + 3: voting + appearance fallback → confirmed edges ─
                 confirmed_edges, n_cross_links = await self._match(
-                    conn, graph, obs_by_cam, per_local
+                    conn, graph, obs_by_cam, per_local, trace=trace
                 )
 
                 # ── Stage 4: connected components ───────────────────────────
@@ -125,6 +152,7 @@ class Reconciler:
                     batch_number=batch_number,
                     window_start_ms=window_start_ms,
                     window_end_ms=window_end_ms,
+                    trace=trace,
                 )
 
                 # ── Stage 7: state machine ──────────────────────────────────
@@ -155,6 +183,13 @@ class Reconciler:
                 logger.exception(
                     "tracking_history cleanup failed for batch=%d — rows remain", batch_number,
                 )
+
+        # ── Dev trace write (VD1) — best-effort, after commit, NEVER blocks ────
+        if trace:
+            try:
+                await self._repo.write_recon_trace(self._store_id, batch_number, trace)
+            except Exception:
+                logger.exception("recon_trace write failed for batch=%d (best-effort)", batch_number)
 
         # ── Stats + metrics ───────────────────────────────────────────────────
         reconcile_elapsed = time.monotonic() - t0
@@ -221,10 +256,12 @@ class Reconciler:
                 pl["fx"], pl["fy"] = d.floor_x, d.floor_y
         return obs_by_cam, per_local
 
-    async def _match(self, conn, graph, obs_by_cam, per_local):
+    async def _match(self, conn, graph, obs_by_cam, per_local, trace=None):
         """Stages 2 + 3 — return (confirmed_edges, n_cross_links).
 
         confirmed_edges: list of ((cam_a, local_a), (cam_b, local_b)).
+        When `trace` is set (dev VD1), spatial_vote + reid_fallback events are
+        appended from values the voter/fallback already computed.
         """
         s = self._settings
         confirmed_edges: list = []
@@ -233,6 +270,7 @@ class Reconciler:
         for cam_a, cam_b in graph.overlapping_pairs():
             if cam_a not in obs_by_cam or cam_b not in obs_by_cam:
                 continue
+            vote_details = [] if trace is not None else None
             confirmed, ambiguous = vote_camera_pair(
                 obs_by_cam[cam_a], obs_by_cam[cam_b],
                 vote_distance_threshold_m=s.vote_distance_threshold_m,
@@ -240,11 +278,21 @@ class Reconciler:
                 min_votes=s.min_votes,
                 temporal_tolerance_ms=s.temporal_tolerance_ms,
                 ambiguity_margin=s.ambiguity_margin,
+                details=vote_details,
             )
             for la, lb, _vr in confirmed:
                 confirmed_edges.append(((cam_a, la), (cam_b, lb)))
             for la, lb, vr in ambiguous:
                 ambiguous_all.append((cam_a, la, cam_b, lb, vr))
+
+            if trace is not None and vote_details:
+                for d in vote_details:
+                    trace.append({"event_type": "spatial_vote", "detail": {
+                        "cam_a": str(cam_a), "local_a": str(d["local_a"]),
+                        "cam_b": str(cam_b), "local_b": str(d["local_b"]),
+                        "vote_rate": d["vote_rate"], "votes": d["votes"],
+                        "co_visible": d["co_visible"], "class": d["class"],
+                    }})
 
         # Stage 3 — appearance fallback for ambiguous pairs only.
         if ambiguous_all:
@@ -257,13 +305,26 @@ class Reconciler:
                 for lid, heap in heaps.items()
             }
             amb_pairs = [(la, lb, vr) for _, la, _, lb, vr in ambiguous_all]
+            reid_details = [] if trace is not None else None
             for la, lb, _vr in resolve_ambiguous(
                 amb_pairs, embeddings,
                 reid_fallback_threshold=s.reid_fallback_threshold,
+                details=reid_details,
             ):
                 cam_a = per_local[la]["camera"]
                 cam_b = per_local[lb]["camera"]
                 confirmed_edges.append(((cam_a, la), (cam_b, lb)))
+
+            if trace is not None and reid_details:
+                for d in reid_details:
+                    ca = per_local.get(d["local_a"], {}).get("camera")
+                    cb = per_local.get(d["local_b"], {}).get("camera")
+                    trace.append({"event_type": "reid_fallback", "detail": {
+                        "cam_a": str(ca), "local_a": str(d["local_a"]),
+                        "cam_b": str(cb), "local_b": str(d["local_b"]),
+                        "cosine": d["cosine"], "threshold": d["threshold"],
+                        "matched": d["matched"], "final_score": d["final_score"],
+                    }})
 
         return confirmed_edges, len(confirmed_edges)
 

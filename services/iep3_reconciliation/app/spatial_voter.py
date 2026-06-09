@@ -58,10 +58,14 @@ def vote_camera_pair(
     min_votes: int,
     temporal_tolerance_ms: int,
     ambiguity_margin: float,
+    details: list | None = None,
 ) -> tuple[set, set]:
     """Vote one camera pair.
 
     Returns (confirmed, ambiguous), each a set of (local_a, local_b, vote_rate).
+
+    If `details` is provided (dev trace, VD1), the per-decision votes/co_visible
+    already computed here are appended to it — never recomputed, off by default.
     """
     idx_a = _build_ts_index(obs_a)
     idx_b = _build_ts_index(obs_b)
@@ -136,6 +140,15 @@ def vote_camera_pair(
                 continue
             confirmed.pop((a, b), None)
             ambiguous[(a, b)] = vr
+
+    if details is not None:
+        for klass, decisions in (("confirmed", confirmed), ("ambiguous", ambiguous)):
+            for (a, b), vr in decisions.items():
+                details.append({
+                    "local_a": a, "local_b": b, "vote_rate": vr,
+                    "votes": votes.get((a, b), 0), "co_visible": co_visible.get((a, b), 0),
+                    "class": klass,
+                })
 
     confirmed_set = {(a, b, vr) for (a, b), vr in confirmed.items()}
     ambiguous_set = {(a, b, vr) for (a, b), vr in ambiguous.items()}

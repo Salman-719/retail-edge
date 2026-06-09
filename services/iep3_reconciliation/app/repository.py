@@ -4,6 +4,7 @@ data structures and call methods here — they never construct queries.
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass
@@ -414,6 +415,42 @@ class Iep3Repository:
             )
             for r in rows
         ]
+
+    # Dev reconciliation trace (VD1). Capped: keep only the most recent N batches
+    # per store, pruned on each write — ephemeral diagnostic data, never unbounded.
+    RECON_TRACE_KEEP_BATCHES = 50
+
+    async def write_recon_trace(
+        self,
+        store_id: str,
+        batch_number: int,
+        events: list[dict],
+    ) -> None:
+        """Best-effort bulk insert of one batch's trace events into debug.recon_trace,
+        then prune to the last RECON_TRACE_KEEP_BATCHES batches for this store.
+
+        Own connection (outside the batch transaction). Caller wraps in try/except;
+        this MUST NOT block or fail reconciliation.
+        """
+        if not events:
+            return
+        store_uuid = uuid.UUID(store_id)
+        rows = [
+            (store_uuid, batch_number, e["event_type"], json.dumps(e["detail"]))
+            for e in events
+        ]
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                "INSERT INTO debug.recon_trace (store_id, batch_number, event_type, detail) "
+                "VALUES ($1, $2, $3, $4::jsonb)",
+                rows,
+                timeout=_STANDALONE_TIMEOUT,
+            )
+            await conn.execute(
+                "DELETE FROM debug.recon_trace WHERE store_id = $1 AND batch_number <= $2",
+                store_uuid, batch_number - self.RECON_TRACE_KEEP_BATCHES,
+                timeout=_STANDALONE_TIMEOUT,
+            )
 
     async def write_global_positions_bulk(
         self,

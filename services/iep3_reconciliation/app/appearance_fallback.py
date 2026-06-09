@@ -37,6 +37,7 @@ def resolve_ambiguous(
     embeddings: dict,
     *,
     reid_fallback_threshold: float,
+    details: list | None = None,
 ) -> set:
     """Resolve ambiguous pairs via appearance.
 
@@ -45,6 +46,9 @@ def resolve_ambiguous(
     Returns a set of confirmed (local_a, local_b, vote_rate). At most one
     local_b is confirmed per local_a (the highest combined score, if it clears
     the threshold).
+
+    If `details` is provided (dev trace, VD1), the per-`a` best candidate's
+    cosine/final/threshold/matched are appended — captured, not recomputed.
     """
     groups: dict[object, list[tuple]] = defaultdict(list)
     for a, b, vr in ambiguous_pairs:
@@ -53,12 +57,21 @@ def resolve_ambiguous(
     confirmed: set = set()
     for a, candidates in groups.items():
         emb_a = embeddings.get(a)
-        best = None  # (b, vote_rate, final_score)
+        best = None  # (b, vote_rate, final_score, appearance)
         for b, vr in candidates:
             appearance = _appearance_score(emb_a, embeddings.get(b))
             final = vr * VOTE_WEIGHT + appearance * APPEARANCE_WEIGHT
             if best is None or final > best[2]:
-                best = (b, vr, final)
-        if best is not None and best[2] >= reid_fallback_threshold:
+                best = (b, vr, final, appearance)
+        if best is None:
+            continue
+        matched = best[2] >= reid_fallback_threshold
+        if matched:
             confirmed.add((a, best[0], best[1]))
+        if details is not None:
+            details.append({
+                "local_a": a, "local_b": best[0], "cosine": best[3],
+                "final_score": best[2], "threshold": reid_fallback_threshold,
+                "matched": matched,
+            })
     return confirmed
