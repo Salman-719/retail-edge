@@ -145,17 +145,22 @@ def _load_model():
     # resnet50_msmt17.pt uses the legacy Python-2 pickle protocol (protocol 2).
     # torch.load defaults to utf-8 which fails on raw byte strings in that format.
     # Monkey-patch to inject encoding='latin1' for legacy files only.
+    device = _state["device"]
+    # boxmot select_device expects "cpu" or a CUDA index ("0", "1", …).
+    boxmot_device = "0" if device == "cuda" else device
+    # map_location ensures CUDA-stored tensors in the .pt file are remapped to
+    # the actual target device, avoiding "device 0 but device_count() is 0" when
+    # the file was saved on a different machine/device.
+    _map_location = torch.device("cuda:0") if device == "cuda" else torch.device("cpu")
+
     _original_torch_load = torch.load
     def _patched_torch_load(f, *args, **kwargs):
         kwargs.setdefault("encoding", "latin1")
+        kwargs.setdefault("map_location", _map_location)
         return _original_torch_load(f, *args, **kwargs)
     torch.load = _patched_torch_load
 
     try:
-        device = _state["device"]
-        # boxmot select_device expects "cpu" or a CUDA index ("0", "1", …),
-        # not PyTorch's "cuda" string.
-        boxmot_device = "0" if device == "cuda" else device
         rab = ReidAutoBackend(
             weights=Path(REID_MODEL_PATH),
             device=torch.device(boxmot_device) if boxmot_device == "cpu" else boxmot_device,
