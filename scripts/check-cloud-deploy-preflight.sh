@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+report_error() {
+  local status="$?"
+  local line="$1"
+  local command="$2"
+  trap - ERR
+  echo "ERROR: ${BASH_SOURCE[0]}:${line}: command failed with exit ${status}: ${command}" >&2
+  exit "$status"
+}
+trap 'report_error "$LINENO" "$BASH_COMMAND"' ERR
+
 AWS_REGION="${AWS_REGION:-${REGION:-eu-west-1}}"
 ENVIRONMENT="${ENVIRONMENT:-production}"
 CLUSTER_NAME="retailvision-${ENVIRONMENT}"
@@ -76,20 +86,22 @@ for secret_name in "${!SECRET_KEYS[@]}"; do
   fi
 done
 
-if aws logs describe-log-groups \
+LOG_GROUP_COUNT="$(aws logs describe-log-groups \
   --region "$AWS_REGION" \
   --log-group-name-prefix "/aws/eks/${CLUSTER_NAME}/cluster" \
   --query "logGroups[?logGroupName=='/aws/eks/${CLUSTER_NAME}/cluster'] | length(@)" \
-  --output text | grep -q '^1$'; then
+  --output text)"
+if [[ "$LOG_GROUP_COUNT" == "1" ]]; then
   if ! state_has "module.eks.aws_cloudwatch_log_group.this[0]"; then
     conflict "CloudWatch log group /aws/eks/${CLUSTER_NAME}/cluster exists outside the active Terraform state."
   fi
 fi
 
-if aws kms list-aliases \
+KMS_ALIAS_COUNT="$(aws kms list-aliases \
   --region "$AWS_REGION" \
   --query "Aliases[?AliasName=='alias/eks/${CLUSTER_NAME}'] | length(@)" \
-  --output text | grep -q '^1$'; then
+  --output text)"
+if [[ "$KMS_ALIAS_COUNT" == "1" ]]; then
   if ! grep -Fq "module.eks.module.kms.aws_kms_alias.this" <<<"$STATE"; then
     conflict "KMS alias alias/eks/${CLUSTER_NAME} exists outside the active Terraform state."
   fi
@@ -106,8 +118,8 @@ fi
 EIP_STATE_LIVE_COUNT=0
 while IFS= read -r eip_address; do
   [[ -z "$eip_address" ]] && continue
-  allocation_id="$(terraform -chdir=infra/aws state show -no-color "$eip_address" 2>/dev/null |
-    awk '$1 == "id" && $2 == "=" {print $3; exit}')"
+  eip_state="$(terraform -chdir=infra/aws state show -no-color "$eip_address" 2>/dev/null || true)"
+  allocation_id="$(awk '$1 == "id" && $2 == "=" && !found {print $3; found=1}' <<<"$eip_state")"
   if [[ -n "$allocation_id" ]] &&
     aws ec2 describe-addresses \
       --region "$AWS_REGION" \

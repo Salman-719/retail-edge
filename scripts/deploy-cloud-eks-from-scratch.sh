@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+report_error() {
+  local status="$?"
+  local line="$1"
+  local command="$2"
+  trap - ERR
+  echo "ERROR: ${BASH_SOURCE[0]}:${line}: command failed with exit ${status}: ${command}" >&2
+  exit "$status"
+}
+trap 'report_error "$LINENO" "$BASH_COMMAND"' ERR
+
 usage() {
   cat <<'EOF'
 Deploy RetailVision cloud to a fresh Amazon EKS stack.
@@ -169,7 +179,9 @@ terraform fmt -recursive
 terraform validate
 popd >/dev/null
 
+echo "Running AWS/Terraform state preflight..."
 bash scripts/check-cloud-deploy-preflight.sh
+echo "Repairing any unhealthy Terraform-managed add-on releases..."
 bash scripts/repair-failed-eks-addons.sh
 
 pushd infra/aws >/dev/null

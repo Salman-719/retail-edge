@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+report_error() {
+  local status="$?"
+  local line="$1"
+  local command="$2"
+  trap - ERR
+  echo "ERROR: ${BASH_SOURCE[0]}:${line}: command failed with exit ${status}: ${command}" >&2
+  exit "$status"
+}
+trap 'report_error "$LINENO" "$BASH_COMMAND"' ERR
+
 TERRAFORM_VERSION="${TERRAFORM_VERSION:-1.9.8}"
 HELM_VERSION="${HELM_VERSION:-3.15.4}"
 KUBECTL_VERSION="${KUBECTL_VERSION:-1.30.0}"
@@ -156,7 +166,7 @@ done
 
 echo "Deployment tools ready:"
 aws --version
-terraform version | head -1
+terraform version | sed -n '1p'
 helm version --short
 kubectl version --client
 jq --version
