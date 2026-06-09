@@ -1,5 +1,53 @@
 {{- if .Values.iep6.enabled }}
 # IEP6 — AI analytics agent (OpenAI). Read-only DB access + calls EEP for actions.
+#
+# Split into two deployments off the SAME image (S2 scaling design):
+#   * iep6-agent     — request-driven API. ENABLE_SCHEDULER=false. KEDA-scaled on
+#                      in-flight requests (see keda-iep6-scaledobject.yaml). The
+#                      "iep6" Service routes to these pods (app=iep6-agent).
+#   * iep6-scheduler — SINGLETON (replicas:1). ENABLE_SCHEDULER=true. Runs the
+#                      report/alert cron. NEVER scale it — multiple replicas would
+#                      duplicate scheduled insights/alerts (and OpenAI spend).
+#
+# Shared container env is defined once below and included by both, so they can
+# never drift. Only ENABLE_SCHEDULER (and replica/label/annotation) differ.
+{{- define "retailvision.iep6.env" -}}
+- name: PG_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: retailvision-secrets
+      key: postgres-password
+# Read-only analytics connection (use a read-only role in hardening).
+- name: DATABASE_URL_AGENT
+  value: "postgresql+asyncpg://{{ .Values.postgres.user }}:$(PG_PASSWORD)@{{ .Values.database.host }}:5432/{{ .Values.postgres.database }}"
+- name: REDIS_URL
+  valueFrom:
+    secretKeyRef:
+      name: retailvision-secrets
+      key: redis-url
+- name: OPENAI_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: retailvision-secrets
+      key: openai-api-key
+- name: OPENAI_MODEL
+  value: {{ .Values.iep6.openaiModel | quote }}
+- name: JWT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: retailvision-secrets
+      key: jwt-secret
+- name: EEP_BASE_URL
+  value: "http://eep-http:{{ .Values.eep.httpPort }}"
+- name: ENABLE_RAW_SQL
+  value: {{ .Values.iep6.enableRawSql | quote }}
+- name: ENABLE_EEP_ACTIONS
+  value: {{ .Values.iep6.enableEepActions | quote }}
+- name: WINDOW_SECONDS
+  value: {{ .Values.windowSeconds | quote }}
+{{- end -}}
+---
+# ── iep6-agent — request-driven API (KEDA-scaled; scheduler OFF) ────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,7 +56,8 @@ metadata:
   labels:
     app: iep6-agent
 spec:
-  replicas: {{ .Values.iep6.replicas }}
+  # KEDA owns the replica count once active; this is just the initial floor.
+  replicas: {{ .Values.iep6.keda.minReplicas | default 1 }}
   selector:
     matchLabels:
       app: iep6-agent
@@ -16,6 +65,10 @@ spec:
     metadata:
       labels:
         app: iep6-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8006"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: iep6-agent
@@ -25,41 +78,9 @@ spec:
             - containerPort: 8006
               name: http
           env:
-            - name: PG_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: retailvision-secrets
-                  key: postgres-password
-            # Read-only analytics connection (use a read-only role in hardening).
-            - name: DATABASE_URL_AGENT
-              value: "postgresql+asyncpg://{{ .Values.postgres.user }}:$(PG_PASSWORD)@{{ .Values.database.host }}:5432/{{ .Values.postgres.database }}"
-            - name: REDIS_URL
-              valueFrom:
-                secretKeyRef:
-                  name: retailvision-secrets
-                  key: redis-url
-            - name: OPENAI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: retailvision-secrets
-                  key: openai-api-key
-            - name: OPENAI_MODEL
-              value: {{ .Values.iep6.openaiModel | quote }}
-            - name: JWT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: retailvision-secrets
-                  key: jwt-secret
-            - name: EEP_BASE_URL
-              value: "http://eep-http:{{ .Values.eep.httpPort }}"
-            - name: ENABLE_RAW_SQL
-              value: {{ .Values.iep6.enableRawSql | quote }}
-            - name: ENABLE_EEP_ACTIONS
-              value: {{ .Values.iep6.enableEepActions | quote }}
+            {{- include "retailvision.iep6.env" . | nindent 12 }}
             - name: ENABLE_SCHEDULER
-              value: {{ .Values.iep6.schedulerEnabled | quote }}
-            - name: WINDOW_SECONDS
-              value: {{ .Values.windowSeconds | quote }}
+              value: "false"
           resources: {{ toYaml .Values.iep6.resources | nindent 12 }}
           livenessProbe:
             httpGet:
@@ -73,7 +94,47 @@ spec:
               port: 8006
             initialDelaySeconds: 5
             periodSeconds: 10
+{{- if .Values.iep6.scheduler.enabled }}
 ---
+# ── iep6-scheduler — SINGLETON cron (scheduler ON; NEVER autoscaled) ────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iep6-scheduler
+  namespace: retailvision
+  labels:
+    app: iep6-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iep6-scheduler
+  template:
+    metadata:
+      labels:
+        app: iep6-scheduler
+    spec:
+      containers:
+        - name: iep6-scheduler
+          image: "{{ .Values.global.imageRegistry }}/iep6:{{ .Values.iep6.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8006
+              name: http
+          env:
+            {{- include "retailvision.iep6.env" . | nindent 12 }}
+            - name: ENABLE_SCHEDULER
+              value: "true"
+          resources: {{ toYaml .Values.iep6.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8006
+            initialDelaySeconds: 15
+            periodSeconds: 15
+{{- end }}
+---
+# Service routes only to the request-serving agent pods.
 apiVersion: v1
 kind: Service
 metadata:

@@ -40,12 +40,17 @@ frontend:
     maxReplicas: 6
 
 iep6:
+  # Scheduler is a singleton deployment (iep6-scheduler); the agent API is KEDA-scaled.
+  scheduler:
+    enabled: true
   hpa:
-    # IEP6 currently runs its report/alert scheduler in-process. Keep one
-    # scheduler-enabled replica to avoid duplicate scheduled writes.
-    enabled: false
+    enabled: false   # CPU HPA off — KEDA drives the agent API
+  keda:
+    enabled: true
     minReplicas: 1
-    maxReplicas: 1
+    maxReplicas: 8          # higher ceiling in production
+    inflightThreshold: "10"
+    prometheusServerAddress: "http://prometheus.retailvision.svc:9090"
 
 postgres:
   storage: 50Gi
