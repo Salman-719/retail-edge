@@ -218,7 +218,9 @@ The script:
 - configures `kubectl`;
 - writes `retailvision/openai-api-key` if `OPENAI_API_KEY` is set;
 - runs `helm lint` and `helm template`;
-- installs the chart with Terraform outputs wired into Helm; and
+- installs the chart with Terraform outputs wired into Helm. Application
+  resources are preserved on failure, and a full diagnostic report is printed
+  instead of hiding the cause behind an atomic rollback; and
 - writes reusable exports to `/tmp/retailvision-cloud.env`, including
   `APP_HOST`, `EEP_HOST`, `AGENT_SECRET`, `WG_ENDPOINT`, `PG_HOST`, and
   `REDIS_HOST`;
@@ -432,48 +434,34 @@ export WG_SERVER_PUBLIC_KEY="$(./scripts/get-wireguard-server-key.sh "$WG_INSTAN
 echo "$WG_SERVER_PUBLIC_KEY"
 ```
 
-### A7. [LOCAL] Install the application (Helm)
+### A7. [LOCAL/CLOUDSHELL] Install or retry only the application
 
-Terraform prints `helm_install_hint`; use it, or run the equivalent command:
+The full deployment wrapper runs this automatically after Terraform. If
+Terraform and the add-ons succeeded but the application install failed, do not
+reset or recreate EKS. Retry only the application:
+
 ```bash
-cd ../..
-helm lint ./charts/retailvision \
-  -f charts/retailvision/values.production.yaml \
-  --set global.imageRegistry=ghcr.io/$OWNER/retailvision \
-  --set ingress.appHost="$APP_HOST" \
-  --set eep.grpcHost="$EEP_HOST" \
-  --set eep.grpc.serviceType=LoadBalancer \
-  --set s3.bucket="$BUCKET" \
-  --set s3.region="$REGION"
-
-helm upgrade --install retailvision ./charts/retailvision \
-  -f charts/retailvision/values.production.yaml \
-  --set global.imageRegistry=ghcr.io/$OWNER/retailvision \
-  --set ingress.appHost="$APP_HOST" \
-  --set eep.grpcHost="$EEP_HOST" \
-  --set eep.grpc.serviceType=LoadBalancer \
-  --set-string 'eep.grpc.serviceAnnotations.service\.beta\.kubernetes\.io/aws-load-balancer-type=external' \
-  --set-string 'eep.grpc.serviceAnnotations.service\.beta\.kubernetes\.io/aws-load-balancer-nlb-target-type=ip' \
-  --set-string 'eep.grpc.serviceAnnotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internet-facing' \
-  --set-string "eep.grpc.serviceAnnotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-eip-allocations=$GRPC_EIP_ALLOCATIONS" \
-  --set-string "eep.grpc.serviceAnnotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-subnets=$PUBLIC_SUBNET_IDS" \
-  --set-string "postgres.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-subnets=$PUBLIC_SUBNET_IDS" \
-  --set-string "redis.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-subnets=$PUBLIC_SUBNET_IDS" \
-  --set-string "postgres.service.loadBalancerSourceRanges[0]=$VPC_CIDR" \
-  --set-string "redis.service.loadBalancerSourceRanges[0]=$VPC_CIDR" \
-  --set s3.bucket="$BUCKET" \
-  --set s3.region="$REGION" \
-  --set monitoring.grafana.host="grafana.$INGRESS_EIP.nip.io" \
-  --set mlflow.host="mlflow.$INGRESS_EIP.nip.io" \
-  --set eep.image.tag="$VERSION" \
-  --set iep3.image.tag="$VERSION" \
-  --set iep4.image.tag="$VERSION" \
-  --set iep5.image.tag="$VERSION" \
-  --set iep6.image.tag="$VERSION" \
-  --set frontend.image.tag="$VERSION" \
-  --set mlflow.image.tag="$VERSION" \
-  -n retailvision --create-namespace --atomic --timeout 20m
+cd "$HOME/retail-edge"
+export AWS_REGION=eu-west-1
+export OWNER=salman-719
+export VERSION=1.3.1
+export HELM_TIMEOUT=30m
+make cloud-app-deploy
 ```
+
+This command reads all NLB, subnet, S3, host, WireGuard, and secret values from
+the active Terraform state. It verifies the load balancer controller, External
+Secrets, cert-manager, ClusterSecretStore, and internal CA before installing.
+It deliberately does not use `--atomic`: if readiness times out, the failed
+pods remain available and the command automatically prints descriptions, logs,
+PVCs, certificates, services, endpoints, and recent events.
+
+Run diagnostics again at any time with:
+
+```bash
+make cloud-app-diagnose
+```
+
 **Expect:** `STATUS: deployed`. EEP runs Alembic at startup, building the schema
 through the current head revision, including TimescaleDB hypertables, edge-agent
 tables, packed ReID embedding galleries, live identity fields, alert severity,
@@ -1187,9 +1175,10 @@ The granular variants (D1–D5) below cover individual cases.
    export INGRESS_EIP="$(terraform -chdir=infra/aws output -raw ingress_eip)"
    git pull
    ```
-   Then (one line):
+   Deploy only the application:
    ```bash
-   helm upgrade retailvision ./charts/retailvision -f charts/retailvision/values.production.yaml --reuse-values --set global.imageRegistry=ghcr.io/$OWNER/retailvision --set ingress.appHost="$APP_HOST" --set eep.grpcHost="$EEP_HOST" --set s3.bucket="$BUCKET" --set s3.region="$REGION" --set monitoring.grafana.host="grafana.$INGRESS_EIP.nip.io" --set mlflow.host="mlflow.$INGRESS_EIP.nip.io" --set eep.image.tag=$TAG --set iep3.image.tag=$TAG --set iep4.image.tag=$TAG --set iep5.image.tag=$TAG --set iep6.image.tag=$TAG --set frontend.image.tag=$TAG --set mlflow.image.tag=$TAG -n retailvision
+   export VERSION="$TAG"
+   make cloud-app-deploy
    ```
 3. **[LOCAL]** watch the rollout:
    ```bash
@@ -1271,7 +1260,8 @@ sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" "$VERSION" "$EEP_HOST" "$AGE
 | Terraform preflight says fewer than five EIPs are available | RetailVision or unrelated EIPs still occupy the regional quota | inspect `aws ec2 describe-addresses`; reset old RetailVision addresses, then release unused unrelated addresses or request quota |
 | Terraform warns `Helm uninstall ... resources were kept due to resource policy` for cert-manager CRDs | Helm preserves cert-manager CRDs by design across reinstall/retry | safe to ignore if the final Terraform apply completes successfully |
 | Helm `chart requires kubeVersion ... incompatible with Kubernetes v1.30.x-eks-...` | EKS reports a provider-suffixed Kubernetes version; Helm treats it like a prerelease unless the chart allows `-0` | chart `kubeVersion` must be `>=1.26.0-0`; pull latest `deploy/aws-eks` or patch `charts/retailvision/Chart.yaml` before installing |
-| Public app returns nginx `503 Service Temporarily Unavailable` | ingress/NLB is reachable, but the `frontend` Service has no Ready pod endpoints | inspect `kubectl -n retailvision get pods,endpoints`, events, and `describe pod`; fix Pending/ImagePull/secret/migration failures before retrying the URL |
+| Helm reports `context deadline exceeded` | one or more application resources did not become Ready before the timeout; older deployment scripts then erased the evidence with `--atomic` | pull the latest branch and run `VERSION=1.3.1 make cloud-app-deploy`; failed resources are preserved and automatic diagnostics identify the exact pod, certificate, PVC, image, scheduling, or load-balancer failure. Re-run `make cloud-app-diagnose` if needed |
+| Public app returns nginx `503 Service Temporarily Unavailable` | ingress/NLB is reachable, but the `frontend` Service has no Ready pod endpoints | run `make cloud-app-diagnose`; fix the reported Pending/ImagePull/secret/migration failure, then rerun `make cloud-app-deploy` |
 | Public app returns nginx `504`, while `curl http://frontend/` works inside the namespace | ingress-nginx and the frontend pods are on different nodes, but the EKS node security group blocks the frontend container port (`80`) between nodes | pull the Terraform fix that adds `node_security_group_additional_rules.ingress_nodes_all`, then rerun `make cloud-eks-deploy` with the normal exports |
 | `helm ... namespaces "retailvision" not found` on first try | namespace race | include `--create-namespace` (step A7) |
 | Pod `ImagePullBackOff`: GHCR `not found` | the chart tag was never built/pushed | trigger **Build & Push Images** with tag `1.3.0` or push Git tag `v1.3.0`; wait for all required jobs to pass, then restart affected deployments |

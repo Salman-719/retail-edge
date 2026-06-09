@@ -1,4 +1,4 @@
-.PHONY: proto cloud-eks-prereqs cloud-eks-reset cloud-eks-deploy camera-sim-up camera-sim-down camera-sim-status
+.PHONY: proto cloud-eks-prereqs cloud-eks-reset cloud-eks-deploy cloud-app-deploy cloud-app-diagnose camera-sim-up camera-sim-down camera-sim-status
 
 # Regenerate gRPC stubs from proto/agent.proto and sync service proto dirs.
 # On Unix: creates symlinks. On Windows (Git Bash / WSL): copies the file.
@@ -21,6 +21,12 @@ cloud-eks-reset:
 
 cloud-eks-deploy:
 	bash scripts/deploy-cloud-eks-from-scratch.sh
+
+cloud-app-deploy:
+	bash scripts/deploy-cloud-app.sh
+
+cloud-app-diagnose:
+	bash scripts/diagnose-cloud-app.sh
 
 camera-sim-up:
 	bash camera-simulator/scripts/start.sh
