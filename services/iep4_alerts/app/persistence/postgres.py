@@ -170,6 +170,7 @@ class AlertRepository:
                 id=r["id"],
                 type=r["type"],
                 name=r["name"],
+                severity=r["severity"],
                 threshold_minutes=r["threshold_minutes"],
                 cooldown_minutes=r["cooldown_minutes"],
                 followup_interval_minutes=r["followup_interval_minutes"],
@@ -252,12 +253,13 @@ class AlertRepository:
     async def insert_alert(
         self, rule_type: str, zone_id: uuid.UUID | None,
         details: dict, alert_rule_id: uuid.UUID, is_followup: bool,
+        severity: str = "medium",
     ) -> None:
         alert_type = _ALERT_TYPE.get(rule_type, "queue_buildup")
         async with self._pool.acquire() as conn:
             await conn.execute(
                 q.INSERT_ALERT, self._store_id, alert_type, zone_id,
-                json.dumps(details), alert_rule_id, is_followup,
+                json.dumps(details), alert_rule_id, is_followup, severity,
             )
 
     async def resolve_alerts_for_rule(self, rule_id: uuid.UUID) -> int:

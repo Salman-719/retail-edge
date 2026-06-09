@@ -6,7 +6,6 @@ from app.models.invitation import Invitation
 from app.models.refresh_token import RefreshToken
 from app.models.audit_log import AuditLog
 from app.models.store_settings import StoreSettings
-from app.models.alert_config import AlertConfig
 from app.models.physical_camera import PhysicalCamera
 from app.models.version import StoreConfigVersion
 from app.models.coordinate_frame import CoordinateFrame
@@ -20,11 +19,12 @@ from app.models.employee import Employee
 from app.models.shift_pattern import ShiftPattern
 from app.models.shift_instance import ShiftInstance, ShiftAssignment, BreakRecord
 from app.models.password_reset_token import PasswordResetToken
-from app.models.camera_schedule import CameraSchedule
+from app.models.store_operating_hours import StoreOperatingHours
 from app.models.edge_agent import EdgeAgent
 from app.models.camera_runtime_session import CameraRuntimeSession
 from app.models.punch_in_station import PunchInStation
 from app.models.punch_event import PunchEvent
+from app.models.alert_rule import AlertRule, AlertRuleZone
 
 __all__ = [
     "Base",
@@ -36,7 +36,6 @@ __all__ = [
     "RefreshToken",
     "AuditLog",
     "StoreSettings",
-    "AlertConfig",
     "PhysicalCamera",
     "StoreConfigVersion",
     "CoordinateFrame",
@@ -52,9 +51,11 @@ __all__ = [
     "ShiftAssignment",
     "BreakRecord",
     "PasswordResetToken",
-    "CameraSchedule",
+    "StoreOperatingHours",
     "EdgeAgent",
     "CameraRuntimeSession",
     "PunchInStation",
     "PunchEvent",
+    "AlertRule",
+    "AlertRuleZone",
 ]

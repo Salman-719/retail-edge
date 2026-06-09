@@ -22,9 +22,16 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 
-def create_access_token(user_id: uuid.UUID, account_type: str) -> str:
+def create_access_token(
+    user_id: uuid.UUID, account_type: str, is_super_admin: bool = False
+) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    payload = {"sub": str(user_id), "account_type": account_type, "exp": expire}
+    payload = {
+        "sub": str(user_id),
+        "account_type": account_type,
+        "is_super_admin": is_super_admin,
+        "exp": expire,
+    }
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
@@ -52,3 +59,18 @@ async def get_current_user_payload(
     if not credentials:
         raise HTTPException(status_code=401, detail={"error": "Authorization header missing", "code": "NO_AUTH"})
     return decode_access_token(credentials.credentials)
+
+
+async def require_super_admin(payload: dict = Depends(get_current_user_payload)) -> dict:
+    """Gate for non-store-scoped admin/dev routes (A4).
+
+    Allows super-admins, or any authenticated user when DEBUG_MODE is on (local-dev
+    convenience). NOT a store-membership gate — use get_store_context for those.
+    """
+    if payload.get("is_super_admin"):
+        return payload
+    if settings.DEBUG_MODE:
+        return payload
+    raise HTTPException(
+        status_code=403, detail={"error": "Super-admin required", "code": "ADMIN_REQUIRED"}
+    )

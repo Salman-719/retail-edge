@@ -1434,6 +1434,38 @@ async def get_draft_punch_station(
     return await _punch_station_response(station, fp, db)
 
 
+@router.get("/store/{slug}/punch-station", response_model=PunchStationResponse)
+async def get_active_punch_station(
+    slug: str,
+    ctx: StoreContext = Depends(get_store_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Read-only punch station of the ACTIVE version (C1 Store Setup view). Mirrors
+    the draft GET against status='active'. 404 if no active version / no station."""
+    ver_result = await db.execute(
+        select(StoreConfigVersion).where(
+            StoreConfigVersion.store_id == ctx.store_id,
+            StoreConfigVersion.status == "active",
+        )
+    )
+    version = ver_result.scalar_one_or_none()
+    if not version:
+        raise HTTPException(
+            status_code=404, detail={"error": "No active version", "code": "NO_ACTIVE_VERSION"}
+        )
+    result = await db.execute(
+        select(PunchInStation).where(PunchInStation.version_id == version.id)
+    )
+    station = result.scalar_one_or_none()
+    if not station:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "No punch-in station configured", "code": "NO_PUNCH_STATION"},
+        )
+    fp = await _get_floor_plan_scale(version.id, ctx.store_id, db)
+    return await _punch_station_response(station, fp, db)
+
+
 @router.put("/store/{slug}/draft/punch-station", response_model=PunchStationResponse)
 async def set_draft_punch_station(
     slug: str,

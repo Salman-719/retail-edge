@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { Cpu, Bell } from 'lucide-react'
+import { Cpu } from 'lucide-react'
 import { useAuth } from '../store'
-import { getSettings, patchSettings, getAlertConfig, patchAlertConfig } from '../api'
+import { getSettings, patchSettings } from '../api'
 import { usePageTitle } from '../components/PageMeta'
 import { FormSkeleton } from '../components/Skeletons'
 
@@ -98,10 +98,9 @@ export default function Settings() {
   usePageTitle('Settings')
 
   const [settings, setSettings] = useState(null)
-  const [alertConfig, setAlertConfig] = useState(null)
 
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(null) // 'settings' | 'alerts' | null
+  const [saving, setSaving] = useState(null) // 'settings' | null
   const [restored, setRestored] = useState(null)
   const [error, setError] = useState('')
 
@@ -109,11 +108,10 @@ export default function Settings() {
     let cancelled = false
     setLoading(true)
     setError('')
-    Promise.all([getSettings(slug), getAlertConfig(slug)])
-      .then(([s, a]) => {
+    getSettings(slug)
+      .then(s => {
         if (cancelled) return
         setSettings(s)
-        setAlertConfig(a)
       })
       .catch(err => {
         if (cancelled) return
@@ -142,31 +140,8 @@ export default function Settings() {
     }
   }
 
-  async function handleSaveAlerts() {
-    setSaving('alerts')
-    setError('')
-    try {
-      const updated = await patchAlertConfig(slug, {
-        shift_start_grace_min: alertConfig.shift_start_grace_min,
-        absence_threshold_min: alertConfig.absence_threshold_min,
-        queue_people_threshold: alertConfig.queue_people_threshold,
-        queue_wait_min_threshold: alertConfig.queue_wait_min_threshold,
-        queue_alert_cooldown_min: alertConfig.queue_alert_cooldown_min,
-      })
-      setAlertConfig(updated)
-    } catch (err) {
-      setError(err.response?.data?.detail?.error || 'Failed to save alert config')
-    } finally {
-      setSaving(null)
-    }
-  }
-
   function updateSettings(field, value) {
     setSettings(s => ({ ...s, [field]: value }))
-  }
-
-  function updateAlert(field, value) {
-    setAlertConfig(a => ({ ...a, [field]: value }))
   }
 
   function resetSettings() {
@@ -179,16 +154,6 @@ export default function Settings() {
       active_config_cache_ttl_sec: DEFAULT_SETTINGS.active_config_cache_ttl_sec,
     }))
     setRestored('settings')
-    setTimeout(() => setRestored(null), 3000)
-  }
-
-  function resetAlerts() {
-    setAlertConfig(a => ({
-      ...a,
-      shift_start_grace_min: DEFAULT_SETTINGS.shift_start_grace_min,
-      absence_threshold_min: DEFAULT_SETTINGS.absence_threshold_min,
-    }))
-    setRestored('alerts')
     setTimeout(() => setRestored(null), 3000)
   }
 
@@ -206,7 +171,7 @@ export default function Settings() {
     <div className="page-enter flex flex-col h-full overflow-auto pb-20">
       <header className="px-6 py-4 border-b border-gray-200 bg-white shrink-0">
         <h1 className="page-title">Settings</h1>
-        <p className="page-subtitle">Store configuration and alert thresholds</p>
+        <p className="page-subtitle">Store configuration</p>
       </header>
 
       <div className="flex-1 p-6 max-w-2xl">
@@ -248,41 +213,6 @@ export default function Settings() {
                   )}
                 </div>
                 <button onClick={resetSettings} className="btn-outline text-xs py-1.5">
-                  Reset to defaults
-                </button>
-              </div>
-            </Section>
-
-            {/* Alert Thresholds */}
-            <Section
-              title="Alert Thresholds"
-              description="Conditions that trigger operational alerts for this store"
-              icon={Bell}
-              iconColor="#f59e0b"
-            >
-              <FieldRow label="Shift start grace period" description="How late an employee can clock in before triggering an absence alert">
-                <NumberInput value={alertConfig.shift_start_grace_min} onChange={v => updateAlert('shift_start_grace_min', v)} min={0} max={120} unit="minutes" />
-              </FieldRow>
-              <FieldRow label="Absence threshold" description="Minutes without detection before an employee is marked absent">
-                <NumberInput value={alertConfig.absence_threshold_min} onChange={v => updateAlert('absence_threshold_min', v)} min={1} max={120} unit="minutes" />
-              </FieldRow>
-              <FieldRow label="Queue size threshold" description="Number of people in a queue that triggers an alert">
-                <NumberInput value={alertConfig.queue_people_threshold} onChange={v => updateAlert('queue_people_threshold', v)} min={1} max={500} unit="people" />
-              </FieldRow>
-              <FieldRow label="Queue wait threshold" description="Wait time before a queue alert is raised">
-                <NumberInput value={alertConfig.queue_wait_min_threshold} onChange={v => updateAlert('queue_wait_min_threshold', v)} min={1} max={120} unit="minutes" />
-              </FieldRow>
-              <FieldRow label="Alert cooldown" description="Minimum time between repeated queue alerts">
-                <NumberInput value={alertConfig.queue_alert_cooldown_min} onChange={v => updateAlert('queue_alert_cooldown_min', v)} min={1} max={120} unit="minutes" />
-              </FieldRow>
-
-              <div className="py-4 flex items-center justify-between gap-3">
-                <div>
-                  {restored === 'alerts' && (
-                    <span className="text-xs text-amber-600 font-medium">Defaults restored — save to apply.</span>
-                  )}
-                </div>
-                <button onClick={resetAlerts} className="btn-outline text-xs py-1.5">
                   Reset to defaults
                 </button>
               </div>

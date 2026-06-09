@@ -11,19 +11,19 @@ _WINDOW_SECONDS = float(os.environ["WINDOW_SECONDS"])
 
 
 def start_scheduler() -> None:
-    from app.tasks.camera_scheduler import evaluate_schedules
+    from app.tasks.camera_scheduler import evaluate_store_hours
 
     scheduler.add_job(
-        evaluate_schedules,
+        evaluate_store_hours,
         trigger="interval",
         seconds=_WINDOW_SECONDS,
-        id="camera_schedule_evaluator",
+        id="store_hours_evaluator",
         replace_existing=True,
         max_instances=1,
     )
     scheduler.start()
     log.info(
-        "Scheduler started — job=camera_schedule_evaluator interval=%.0fs",
+        "Scheduler started — job=store_hours_evaluator interval=%.0fs",
         _WINDOW_SECONDS,
     )
 

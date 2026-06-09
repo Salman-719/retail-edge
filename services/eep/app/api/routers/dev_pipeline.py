@@ -74,6 +74,20 @@ async def _set_inference_device(device: str) -> None:
         await r.aclose()
 
 
+async def _set_trace_flag(store_id: str, on: bool) -> None:
+    """Toggle the IEP3 dev reconciliation-trace gate (VD1). IEP3 reads this key
+    per batch; default-absent → no trace, zero overhead in production."""
+    r = aioredis.from_url(_REDIS_URL)
+    try:
+        key = f"iep3:debug_trace:{store_id}"
+        if on:
+            await r.set(key, "1")
+        else:
+            await r.delete(key)
+    finally:
+        await r.aclose()
+
+
 @router.get("/gpu-status")
 async def gpu_status():
     """Report whether this machine exposes a usable GPU to the inference services."""
@@ -235,6 +249,10 @@ async def pipeline_start(body: PipelineStartRequest):
     else:
         await _set_inference_device("cpu")
 
+    # Enable the IEP3 reconciliation trace for this run (VD1) — the spawned IEP3
+    # container reads this Redis gate each batch. Cleared on /pipeline/stop.
+    await _set_trace_flag(body.store_id, True)
+
     # Every Start does a full fresh reset first → run begins from frame 1.
     # The reset includes a short wait, by which time the inference services
     # (watcher polls every 2 s) have applied the requested device.
@@ -268,7 +286,45 @@ async def pipeline_stop(body: PipelineStopRequest):
     results = await asyncio.gather(*[_stop_one(body.store_id, cid) for cid in body.camera_ids])
     await loop.run_in_executor(None, orch.stop_iep3, body.store_id)
     await loop.run_in_executor(None, orch.stop_iep4, body.store_id)
+    # Clear the IEP3 trace gate (VD1) — captured rows persist for post-mortem.
+    await _set_trace_flag(body.store_id, False)
     return {"status": "stopped", "cameras": results}
+
+
+@router.get("/iep3/trace")
+async def iep3_trace(
+    store_id: str,
+    batch_number: int | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Read the IEP3 reconciliation trace (VD1) for a store, newest batches first,
+    optionally one batch. Admin/DEBUG-gated via the router (A4). Read-only."""
+    clauses = ["store_id = :sid"]
+    params: dict = {"sid": store_id, "limit": limit}
+    if batch_number is not None:
+        clauses.append("batch_number = :bn")
+        params["bn"] = batch_number
+    result = await db.execute(
+        text(f"""
+            SELECT id, batch_number, event_type, detail, created_at
+            FROM debug.recon_trace
+            WHERE {' AND '.join(clauses)}
+            ORDER BY batch_number DESC, id ASC
+            LIMIT :limit
+        """),
+        params,
+    )
+    rows = []
+    for r in result.mappings().all():
+        row = dict(r)
+        if isinstance(row.get("detail"), str):
+            try:
+                row["detail"] = json.loads(row["detail"])
+            except (ValueError, TypeError):
+                pass
+        rows.append(row)
+    return rows
 
 
 class ShiftCloseRequest(BaseModel):
@@ -429,3 +485,29 @@ async def get_iep3(
         {"store": store_id},
     )).mappings().first()
     return {"store_id": store_id, "summary": dict(summary), "rows": [dict(r) for r in rows]}
+
+
+@router.get("/iep3/local-global")
+async def get_local_global(
+    store_id: str = Query(...),
+    limit: int = Query(500, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    """local→global→camera mapping (VD2/VD3 identity through-line). Reads the
+    persisted global_local_mapping (joined to global_identities for store scope).
+    Needs no trace flag. Newest links first."""
+    rows = (await db.execute(
+        text("""
+            SELECT m.camera_id,
+                   m.local_id::text  AS local_id,
+                   m.global_id::text AS global_id,
+                   m.is_active, m.linked_at_ts, m.last_seen_ts
+            FROM global_local_mapping m
+            JOIN global_identities gi ON gi.global_id = m.global_id
+            WHERE gi.store_id = :store
+            ORDER BY m.last_seen_ts DESC
+            LIMIT :lim
+        """),
+        {"store": store_id, "lim": limit},
+    )).mappings().all()
+    return {"store_id": store_id, "rows": [dict(r) for r in rows]}

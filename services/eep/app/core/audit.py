@@ -3,6 +3,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit_actions import AUDIT_ACTIONS
 from app.models.audit_log import AuditLog
 
 
@@ -16,6 +17,11 @@ async def write_audit_log(
     before_state: dict[str, Any] | None = None,
     after_state: dict[str, Any] | None = None,
 ) -> None:
+    if action not in AUDIT_ACTIONS:
+        raise ValueError(
+            f"Unregistered audit action {action!r}; "
+            "add it to app/core/audit_actions.py"
+        )
     log = AuditLog(
         store_id=store_id,
         user_id=user_id,

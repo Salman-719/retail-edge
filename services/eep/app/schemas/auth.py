@@ -19,6 +19,7 @@ class RegisterResponse(BaseModel):
     user_id: uuid.UUID
     email: str
     account_type: str
+    is_super_admin: bool = False
 
 
 class LoginRequest(BaseModel):
@@ -39,6 +40,7 @@ class LoginResponse(BaseModel):
     account_type: str
     stores: list[StoreRef]
     redirect_slug: str | None = None
+    is_super_admin: bool = False
 
 
 class RefreshRequest(BaseModel):

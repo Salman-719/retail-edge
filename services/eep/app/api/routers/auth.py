@@ -42,7 +42,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 async def _create_tokens(db: AsyncSession, user: User) -> tuple[str, str]:
-    access_token = create_access_token(user.id, user.account_type)
+    access_token = create_access_token(user.id, user.account_type, user.is_super_admin)
     raw_refresh, token_hash = create_refresh_token()
     rt = RefreshToken(
         user_id=user.id,
@@ -56,6 +56,22 @@ async def _create_tokens(db: AsyncSession, user: User) -> tuple[str, str]:
 
 async def _build_login_response(db: AsyncSession, user: User) -> LoginResponse:
     access_token, raw_refresh = await _create_tokens(db, user)
+
+    if user.is_super_admin:
+        # Super-admin lands on the all-stores fleet dashboard, not a single store.
+        result = await db.execute(select(Store).order_by(Store.name))
+        stores = [
+            StoreRef(id=s.id, name=s.name, slug=s.slug, status=s.status)
+            for s in result.scalars().all()
+        ]
+        return LoginResponse(
+            access_token=access_token,
+            refresh_token=raw_refresh,
+            account_type=user.account_type,
+            stores=stores,
+            redirect_slug=None,
+            is_super_admin=True,
+        )
 
     if user.account_type == "owner":
         result = await db.execute(select(Store).where(Store.created_by == user.id))
@@ -102,7 +118,12 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    return RegisterResponse(user_id=user.id, email=user.email, account_type=user.account_type)
+    return RegisterResponse(
+        user_id=user.id,
+        email=user.email,
+        account_type=user.account_type,
+        is_super_admin=user.is_super_admin,
+    )
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -150,7 +171,7 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
         .values(revoked_at=datetime.now(timezone.utc))
     )
 
-    new_access = create_access_token(user.id, user.account_type)
+    new_access = create_access_token(user.id, user.account_type, user.is_super_admin)
     raw_refresh, new_hash = create_refresh_token()
     new_rt = RefreshToken(
         user_id=user.id,
@@ -338,7 +359,7 @@ async def accept_invite(slug: str, body: AcceptInviteRequest, db: AsyncSession =
         entity_type="store_member", entity_id=member.id,
     )
 
-    access_token = create_access_token(user.id, user.account_type)
+    access_token = create_access_token(user.id, user.account_type, user.is_super_admin)
     raw_refresh, token_hash = create_refresh_token()
     db.add(RefreshToken(
         user_id=user.id,

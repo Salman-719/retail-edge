@@ -10,7 +10,6 @@ from app.core.audit import write_audit_log
 from app.core.auth import get_current_user_payload
 from app.core.database import get_db
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
-from app.models.alert_config import AlertConfig
 from app.models.store import Store
 from app.models.store_settings import StoreSettings
 from app.schemas.store import CreateStoreRequest, PatchStoreRequest, StoreDetail, StoreListItem
@@ -23,11 +22,18 @@ async def list_stores(
     payload: dict = Depends(get_current_user_payload),
     db: AsyncSession = Depends(get_db),
 ):
-    if payload.get("account_type") != "owner":
+    if payload.get("is_super_admin"):
+        # Super-admin sees the whole fleet across all owners.
+        # TODO pagination: unbounded select, fine while the fleet is small.
+        result = await db.execute(select(Store).order_by(Store.name))
+    elif payload.get("account_type") == "owner":
+        user_id = uuid.UUID(payload["sub"])
+        result = await db.execute(
+            select(Store).where(Store.created_by == user_id).order_by(Store.name)
+        )
+    else:
         raise HTTPException(status_code=403, detail={"error": "Owner access required", "code": "OWNER_REQUIRED"})
 
-    user_id = uuid.UUID(payload["sub"])
-    result = await db.execute(select(Store).where(Store.created_by == user_id))
     stores = result.scalars().all()
 
     items = []
@@ -72,9 +78,6 @@ async def create_store(
 
     # Auto-create store_settings with defaults
     db.add(StoreSettings(store_id=store.id))
-
-    # Auto-create alert_configs with defaults
-    db.add(AlertConfig(store_id=store.id))
 
     await write_audit_log(
         db, "store_created", store_id=store.id, user_id=user_id,

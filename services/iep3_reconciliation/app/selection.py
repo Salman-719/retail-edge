@@ -72,6 +72,7 @@ class PositionSelector:
         batch_number: int,
         window_start_ms: int,
         window_end_ms: int,
+        trace: list | None = None,
     ) -> int:
         """Write one global_tracking_history row per active GlobalID.
 
@@ -123,7 +124,9 @@ class PositionSelector:
             needs_entry = reports[0].needs_entry_zone
 
             for bucket_ms in sorted(buckets):
-                winner, score = self._select_best(buckets[bucket_ms], resolution_map)
+                winner, score, components = self._select_best(
+                    buckets[bucket_ms], resolution_map, collect_components=(trace is not None)
+                )
                 if winner is None:
                     continue
 
@@ -142,6 +145,18 @@ class PositionSelector:
                     source_local_id=winner.local_id,
                     selection_score=float(score),
                 ))
+
+                if trace is not None:
+                    trace.append({
+                        "event_type": "selection",
+                        "detail": {
+                            "global_id": str(global_id),
+                            "timestamp_ms": bucket_ms,
+                            "source_camera": winner.camera_id,
+                            "score": float(score),
+                            "components": components or {},
+                        },
+                    })
 
                 if earliest_winner is None:
                     earliest_winner = winner
@@ -181,13 +196,16 @@ class PositionSelector:
         self,
         reports: list[PositionRow],
         resolution_map: dict[str, tuple[int, int]],
-    ) -> tuple[PositionRow | None, float]:
-        """Score all reports for one GlobalID and return (winner, score).
+        collect_components: bool = False,
+    ) -> tuple[PositionRow | None, float, dict | None]:
+        """Score all reports for one GlobalID and return (winner, score, components).
 
-        Returns (None, 0.0) if reports is empty.
+        Returns (None, 0.0, None) if reports is empty. `components` is the winner's
+        score breakdown, built only when collect_components (dev trace, VD1).
         """
         best_pos: PositionRow | None = None
         best_score: float = -1.0
+        best_components: dict | None = None
 
         for report in reports:
             w, h = resolution_map.get(
@@ -206,8 +224,18 @@ class PositionSelector:
             if score > best_score:
                 best_score = score
                 best_pos = report
+                if collect_components:
+                    frame_px = w * h
+                    norm_area = min(report.bbox_area / frame_px, 1.0) if frame_px > 0 else 0.0
+                    best_components = {
+                        "normalized_area": norm_area,
+                        "bbox_confidence": report.bbox_confidence,
+                        "weight_area": self._settings.position_weight_area,
+                        "weight_confidence": self._settings.position_weight_conf,
+                        "frame_width": w, "frame_height": h,
+                    }
 
-        return best_pos, best_score
+        return best_pos, best_score, best_components
 
     async def _resolve_resolutions(
         self,

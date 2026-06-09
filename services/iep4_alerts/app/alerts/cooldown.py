@@ -60,6 +60,7 @@ class CooldownMachine:
                         rule_type=rule.type, zone_id=ctx.zone_id,
                         details={**ctx.details, "followup": True},
                         alert_rule_id=rule.id, is_followup=True,
+                        severity=rule.severity,
                     )
                     state.last_followup_at = now_ms
             else:
@@ -80,6 +81,7 @@ class CooldownMachine:
         await self._repo.insert_alert(
             rule_type=rule.type, zone_id=ctx.zone_id,
             details=ctx.details, alert_rule_id=rule.id, is_followup=False,
+            severity=rule.severity,
         )
         state.status = "firing"
         state.fired_at = now_ms
