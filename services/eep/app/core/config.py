@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     GRPC_SERVER_KEY_PATH:  str = Field(default="")
     AGENT_SECRET: str = Field(default="")  # empty = dev mode (no auth check)
 
+    # ── Analytics / heatmap ──────────────────────────────────────────────────
+    # Heatmap grid cell size in world metres. SINGLE source of truth: the IEP5
+    # launcher (iep5_manager) passes this to the writer and the analytics heatmap
+    # endpoint reconstructs cell rectangles with the same value. They MUST match
+    # or every cell is the wrong size. Matches IEP5's own default (0.5).
+    HEATMAP_CELL_SIZE_M: float = 0.5
+
     # ── Punch-in resolver (employee-linking) ─────────────────────────────────
     PUNCH_RESOLVER_INTERVAL_S: float = 20.0    # tick cadence
     PUNCH_SETTLE_MS: int = 90_000              # wait past T for IEP3 to reconcile the window

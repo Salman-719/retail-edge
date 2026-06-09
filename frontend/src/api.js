@@ -304,16 +304,30 @@ export const getActiveAlerts = (slug) =>
 export const resolveAlert = (slug, alertId) =>
   api.post(`/store/${slug}/alerts/${alertId}/resolve`).then(r => r.data)
 
-// ─── Analytics (Phase 6+) ────────────────────────────────────────────────────
+// ─── Analytics (E1/E3) ───────────────────────────────────────────────────────
+// All return the envelope { store_id, grain, from, to, rows } (heatmap: cells).
+// params: { from, to, granularity?, zone_ids?, employee_ids? }
+
+export const getStoreSeries = (slug, params) =>
+  api.get(`/store/${slug}/analytics/store-series`, { params }).then(r => r.data)
+
+export const getZoneAnalytics = (slug, params) =>
+  api.get(`/store/${slug}/analytics/zones`, { params }).then(r => r.data)
+
+export const getComposition = (slug, params) =>
+  api.get(`/store/${slug}/analytics/composition`, { params }).then(r => r.data)
+
+export const getDistribution = (slug, params) =>
+  api.get(`/store/${slug}/analytics/distribution`, { params }).then(r => r.data)
+
+export const getEmployeeAnalytics = (slug, params) =>
+  api.get(`/store/${slug}/analytics/employees`, { params }).then(r => r.data)
+
+export const getFlowMatrix = (slug, params) =>
+  api.get(`/store/${slug}/analytics/flow-matrix`, { params }).then(r => r.data)
 
 export const getHeatmap = (slug, params) =>
   api.get(`/store/${slug}/analytics/heatmap`, { params }).then(r => r.data)
-
-export const getZoneTraffic = (slug, params) =>
-  api.get(`/store/${slug}/analytics/zone-traffic`, { params }).then(r => r.data)
-
-export const getTrends = (slug, params) =>
-  api.get(`/store/${slug}/analytics/trends`, { params }).then(r => r.data)
 
 // ─── Employees (Phase 4+) ────────────────────────────────────────────────────
 
