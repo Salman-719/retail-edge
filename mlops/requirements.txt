@@ -13,6 +13,7 @@ nvidia-ml-py>=12.0     # MLflow GPU system metrics (gpu_utilization/memory/power
                        # MLflow's gpu_monitor expects this (the maintained replacement for the
                        # deprecated 'pynvml' package, which raised a FutureWarning + nvml AttributeError).
 boto3>=1.34
+requests>=2.31
 numpy==1.26.4
 pandas>=2.0
 matplotlib>=3.8

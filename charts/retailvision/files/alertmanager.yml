@@ -1,0 +1,29 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default-null
+  group_by: ["alertname", "severity", "job"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: default-null
+      group_wait: 0s
+      repeat_interval: 1h
+
+receivers:
+  # Safe production default: alerts are evaluated and visible in Prometheus /
+  # Grafana, but no external notifications are sent until a receiver is added
+  # from Kubernetes/AWS Secrets.
+  - name: default-null
+
+inhibit_rules:
+  - source_matchers:
+      - alertname="TargetDown"
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
+    equal: ["job"]

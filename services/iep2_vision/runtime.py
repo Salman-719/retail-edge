@@ -41,6 +41,17 @@ try:
     from .projection.projector import FloorProjector
     from .ingest.redis_source import RedisStreamFrameSource, make_s3_client
     from .live_publisher import LivePublisher
+    from .metrics import (
+        IEP2_DETECTION_CONFIDENCE,
+        IEP2_DETECTIONS_PER_FRAME,
+        IEP2_ERRORS,
+        IEP2_FRAME_LATENCY,
+        IEP2_FRAMES,
+        IEP2_IDENTITY_SWITCHES,
+        IEP2_TRACK_AGE,
+        IEP2_TRACKS_ACTIVE,
+        MODEL_VERSION,
+    )
 except ImportError:
     _root = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, _root)
@@ -53,6 +64,17 @@ except ImportError:
     from projection.projector import FloorProjector
     from ingest.redis_source import RedisStreamFrameSource, make_s3_client
     from live_publisher import LivePublisher
+    from metrics import (
+        IEP2_DETECTION_CONFIDENCE,
+        IEP2_DETECTIONS_PER_FRAME,
+        IEP2_ERRORS,
+        IEP2_FRAME_LATENCY,
+        IEP2_FRAMES,
+        IEP2_IDENTITY_SWITCHES,
+        IEP2_TRACK_AGE,
+        IEP2_TRACKS_ACTIVE,
+        MODEL_VERSION,
+    )
 
 _MAX_WIRE_WIDTH = 640
 
@@ -133,6 +155,49 @@ def _project_tracks(tracks: list[dict], projector: FloorProjector) -> None:
             t["floor_y"] = None
             t["clamped"] = False
             t["floor_pos"] = None
+
+
+def _record_iep2_frame_metrics(
+    camera_id: str,
+    detections: list[dict],
+    tracks: list[dict],
+    elapsed_seconds: float,
+    track_ages: dict[int, int],
+    previous_track_ids: set[int],
+    frame_index: int,
+) -> set[int]:
+    """Update per-frame metrics and return the current tracker ID set."""
+    current_track_ids = {int(t["track_id"]) for t in tracks if t.get("track_id") is not None}
+
+    IEP2_FRAMES.labels(camera_id=camera_id).inc()
+    IEP2_FRAME_LATENCY.labels(camera_id=camera_id).observe(max(elapsed_seconds, 0.0))
+    IEP2_DETECTIONS_PER_FRAME.labels(camera_id=camera_id).observe(len(detections))
+    IEP2_TRACKS_ACTIVE.labels(camera_id=camera_id).set(len(current_track_ids))
+
+    for detection in detections:
+        confidence = detection.get("confidence")
+        if confidence is not None:
+            IEP2_DETECTION_CONFIDENCE.labels(
+                camera_id=camera_id,
+                model_version=MODEL_VERSION,
+            ).observe(float(confidence))
+
+    for track_id in current_track_ids:
+        track_ages[track_id] = track_ages.get(track_id, 0) + 1
+
+    for ended in previous_track_ids - current_track_ids:
+        age = track_ages.pop(ended, 0)
+        if age:
+            IEP2_TRACK_AGE.labels(
+                camera_id=camera_id,
+                model_version=MODEL_VERSION,
+            ).observe(age)
+
+    if frame_index > 0:
+        for _track_id in current_track_ids - previous_track_ids:
+            IEP2_IDENTITY_SWITCHES.labels(camera_id=camera_id).inc()
+
+    return current_track_ids
 
 
 async def _load_projector(persistence: PostgresPersistence, camera_config_id: str | None) -> FloorProjector:
@@ -232,12 +297,12 @@ class IEP2Runtime:
         persistence: "PostgresPersistence",
         batch_number: int,
     ) -> None:
-        """Collect active centroids and UPSERT to local_centroids.
+        """Collect active embedding heaps and UPSERT to local_centroids.
 
         Called once per batch window after all tracking_history rows are
         written and before XACK fires. Safe to call when no tracks are active.
         """
-        active = manager.get_active_centroids()
+        active = manager.get_active_embeddings_packed()
         if not active:
             return
 
@@ -246,15 +311,17 @@ class IEP2Runtime:
                 "local_id":         str(uuid.UUID(int=local_id_int)),
                 "camera_id":        self.settings.camera_id,
                 "store_id":         self.settings.store_id,
-                "centroid":         centroid_array.astype(np.float32).tobytes(),
+                "embeddings":       embeddings_bytes,
+                "embedding_count":  count,
+                "quality_scores":   quality_bytes,
                 "updated_at_batch": batch_number,
             }
-            for local_id_int, centroid_array in active.items()
+            for local_id_int, (embeddings_bytes, count, quality_bytes) in active.items()
         ]
 
         await persistence.upsert_local_centroids(records)
         log.debug(
-            "Flushed %d centroids for batch %d camera %s",
+            "Flushed %d embedding stores for batch %d camera %s",
             len(records), batch_number, self.settings.camera_id,
         )
 
@@ -345,8 +412,11 @@ class IEP2Runtime:
         seen_ids: set  = set()
         frame_index    = 0
         db_rows_written = 0
+        track_ages: dict[int, int] = {}
+        previous_track_ids: set[int] = set()
 
         for _capture_ts_ms, _s3_key, frame in source:
+            _frame_t0 = time.monotonic()
             detections = await self.yolo_client.detect(frame, _capture_ts_ms)
             tracks     = update(tracker, detections, frame)
             _project_tracks(tracks, projector)
@@ -361,6 +431,15 @@ class IEP2Runtime:
 
             rows = await self._run_frame_detections(enriched, _capture_ts_ms, persistence, projector)
             db_rows_written += rows
+            previous_track_ids = _record_iep2_frame_metrics(
+                camera_id=camera_id,
+                detections=detections,
+                tracks=enriched,
+                elapsed_seconds=time.monotonic() - _frame_t0,
+                track_ages=track_ages,
+                previous_track_ids=previous_track_ids,
+                frame_index=frame_index,
+            )
 
             frame_b64, scale = _encode_frame(frame)
             display_tracks = (
@@ -383,6 +462,13 @@ class IEP2Runtime:
                 new_entries=new_entries,
             )
             frame_index += 1
+
+        for age in track_ages.values():
+            if age:
+                IEP2_TRACK_AGE.labels(
+                    camera_id=camera_id,
+                    model_version=MODEL_VERSION,
+                ).observe(age)
 
         log.info(
             "Stream finished  camera=%s  frames=%d  db_rows=%d",
@@ -407,6 +493,8 @@ class IEP2Runtime:
         frame_index    = 0
         db_rows_written = 0
         _resolution_written = False  # write stream resolution once from first valid frame
+        track_ages: dict[int, int] = {}
+        previous_track_ids: set[int] = set()
 
         async def _load_and_detect_s3(mfst: dict) -> tuple[list, list, list, list]:
             """Fetch frames from S3/tmpfs and run detect_batch for one manifest.
@@ -478,6 +566,15 @@ class IEP2Runtime:
 
                 rows = await self._run_frame_detections(enriched, capture_ts_ms, persistence, projector)
                 db_rows_written += rows
+                previous_track_ids = _record_iep2_frame_metrics(
+                    camera_id=camera_id,
+                    detections=detections,
+                    tracks=enriched,
+                    elapsed_seconds=time.monotonic() - _t_frame_s3,
+                    track_ages=track_ages,
+                    previous_track_ids=previous_track_ids,
+                    frame_index=frame_index,
+                )
 
                 frame_b64, scale = _encode_frame(frame)
                 display_tracks = (
@@ -521,6 +618,13 @@ class IEP2Runtime:
                 window_end_ms=manifest.get("window_end_ms", 0),
             )
             await source.ack(message_id)
+
+        for age in track_ages.values():
+            if age:
+                IEP2_TRACK_AGE.labels(
+                    camera_id=camera_id,
+                    model_version=MODEL_VERSION,
+                ).observe(age)
 
         log.info(
             "Stream finished (IEP1)  camera=%s  frames=%d  db_rows=%d",
@@ -762,11 +866,17 @@ async def run_daemon(settings) -> None:
         await reid_client.start()
 
         # ── Pipeline components ───────────────────────────────────────────────
+        # Restart recovery: when a persisted local_id reappears (process restart
+        # or post-TTL BoTSORT reuse), reload its embedding heap from the DB.
+        async def _embedding_loader(local_id_int: int):
+            return await persistence.load_local_embeddings(uuid.UUID(int=local_id_int))
+
         tracker  = create_tracker()
         manager  = LocalIdentityManager(
             reid_client=reid_client,
             camera_id=settings.camera_id,
             redis_local=sync_redis,
+            embedding_loader=_embedding_loader,
         )
         projector = FloorProjector()
         if settings.camera_config_id:
@@ -796,6 +906,9 @@ async def run_daemon(settings) -> None:
             s3_client=None,  # frames come from tmpfs, not S3
         )
         await consumer.connect()
+        track_ages: dict[int, int] = {}
+        previous_track_ids: set[int] = set()
+        daemon_frame_index = 0
 
         try:
             log.info("IEP2 daemon SERVING  camera=%s", settings.camera_id)
@@ -892,14 +1005,23 @@ async def run_daemon(settings) -> None:
                             bbox_y2=y2,
                         )
                     frame_count += 1
+                    previous_track_ids = _record_iep2_frame_metrics(
+                        camera_id=settings.camera_id,
+                        detections=detections,
+                        tracks=enriched,
+                        elapsed_seconds=time.monotonic() - _t_frame,
+                        track_ages=track_ages,
+                        previous_track_ids=previous_track_ids,
+                        frame_index=daemon_frame_index,
+                    )
+                    daemon_frame_index += 1
 
                 # ── Strict batch-close order: centroids → batch_complete → XACK → cleanup ──
-                fake_settings = type("_S", (), {
-                    "camera_id": settings.camera_id,
-                    "store_id":  settings.store_id,
-                })()
-                rt = _DaemonBatchHelper(fake_settings)
-                await rt._flush_centroids_daemon(manager, persistence, manifest.get("batch_number", 0))
+                await _flush_centroids_daemon(
+                    manager, persistence,
+                    settings.camera_id, settings.store_id,
+                    manifest.get("batch_number", 0),
+                )
 
                 await server_redis.xadd(
                     "stream:iep2:batch_complete",
@@ -929,7 +1051,17 @@ async def run_daemon(settings) -> None:
         except asyncio.CancelledError:
             log.info("IEP2 daemon cancelled  camera=%s", settings.camera_id)
             raise
+        except Exception:
+            IEP2_ERRORS.labels(camera_id=settings.camera_id).inc()
+            log.exception("IEP2 daemon failed  camera=%s", settings.camera_id)
+            raise
         finally:
+            for age in track_ages.values():
+                if age:
+                    IEP2_TRACK_AGE.labels(
+                        camera_id=settings.camera_id,
+                        model_version=MODEL_VERSION,
+                    ).observe(age)
             for task in (health_task, reload_task):
                 if task is not None:
                     task.cancel()
@@ -945,26 +1077,35 @@ async def run_daemon(settings) -> None:
             sync_redis.close()
 
 
-class _DaemonBatchHelper:
-    """Thin adapter so flush_centroids can reuse IEP2Runtime's method."""
-    def __init__(self, settings):
-        self.settings = settings
+async def _flush_centroids_daemon(
+    manager,
+    persistence,
+    camera_id: str,
+    store_id: str,
+    batch_number: int,
+) -> None:
+    """UPSERT active embedding heaps at daemon batch-close (embeddings → batch_complete → XACK order).
 
-    async def _flush_centroids_daemon(self, manager, persistence, batch_number):
-        active = manager.get_active_centroids()
-        if not active:
-            return
-        records = [
-            {
-                "local_id":         str(uuid.UUID(int=lid)),
-                "camera_id":        self.settings.camera_id,
-                "store_id":         self.settings.store_id,
-                "centroid":         arr.astype("float32").tobytes(),
-                "updated_at_batch": batch_number,
-            }
-            for lid, arr in active.items()
-        ]
-        await persistence.upsert_local_centroids(records)
+    Module-level form (from employee-detection) carrying the new packed-embedding
+    format (embeddings/embedding_count/quality_scores) — the old single `centroid`
+    column was dropped by migration 0013_embedding_store.
+    """
+    active = manager.get_active_embeddings_packed()
+    if not active:
+        return
+    records = [
+        {
+            "local_id":         str(uuid.UUID(int=lid)),
+            "camera_id":        camera_id,
+            "store_id":         store_id,
+            "embeddings":       embeddings_bytes,
+            "embedding_count":  count,
+            "quality_scores":   quality_bytes,
+            "updated_at_batch": batch_number,
+        }
+        for lid, (embeddings_bytes, count, quality_bytes) in active.items()
+    ]
+    await persistence.upsert_local_centroids(records)
 
 
 # ---------------------------------------------------------------------------

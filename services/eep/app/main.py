@@ -16,6 +16,8 @@ from sqlalchemy import delete, text
 
 from app.api import register_routers
 from app.core.database import AsyncSessionLocal, engine
+from app.core.config import settings
+from app.core.canary import CanaryMiddleware
 from app.core.scheduler import start_scheduler, stop_scheduler
 from app.grpc_server.server import start_grpc_server, stop_grpc_server
 import app.models  # noqa: F401 — registers all SQLAlchemy mappers at startup
@@ -131,6 +133,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RetailVision EEP", lifespan=lifespan)
+app.add_middleware(CanaryMiddleware, canary_percentage=settings.CANARY_PERCENTAGE)
 
 # Prometheus metrics: exposes GET /metrics with request count, latency histogram,
 # and error rate. Scraped by Prometheus (job "eep") — see monitoring/prometheus.yml.

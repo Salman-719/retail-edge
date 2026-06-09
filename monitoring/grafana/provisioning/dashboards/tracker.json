@@ -1,0 +1,307 @@
+{
+  "title": "RetailVision -- Tracker Lifecycle",
+  "uid": "retailvision-tracker",
+  "tags": ["retailvision", "tracker", "botsort"],
+  "timezone": "browser",
+  "refresh": "15s",
+  "schemaVersion": 38,
+  "templating": {
+    "list": [
+      {
+        "name": "camera_id",
+        "label": "Camera",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+        "query": "label_values(iep2_tracks_active, camera_id)",
+        "multi": true,
+        "includeAll": true,
+        "current": {"text": "All", "value": "$__all"},
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Active Tracks",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 1
+    },
+    {
+      "type": "timeseries",
+      "title": "Active tracks over time (per camera)",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 1},
+      "id": 2,
+      "options": {
+        "tooltip": {"mode": "multi"},
+        "legend": {"displayMode": "list", "placement": "bottom"}
+      },
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0, "custom": {"fillOpacity": 10}},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "iep2_tracks_active{camera_id=~\"$camera_id\"}",
+          "legendFormat": "{{camera_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Peak active tracks",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
+      "id": 3,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["max"]}},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 15}, {"color": "red", "value": 30}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "max(iep2_tracks_active{camera_id=~\"$camera_id\"})",
+          "legendFormat": "Peak",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Avg active tracks",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 1},
+      "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["mean"]}},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "avg(iep2_tracks_active{camera_id=~\"$camera_id\"})",
+          "legendFormat": "Avg",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Current active tracks",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 5},
+      "id": 5,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "sum(iep2_tracks_active{camera_id=~\"$camera_id\"})",
+          "legendFormat": "Total",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Identity switches (total)",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 5},
+      "id": 6,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10}, {"color": "red", "value": 30}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "sum(iep2_identity_switches_total{camera_id=~\"$camera_id\"})",
+          "legendFormat": "Switches",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Track Age Distribution",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9},
+      "id": 10
+    },
+    {
+      "type": "timeseries",
+      "title": "Track age p50 / p95 (frames survived before drop)",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+      "id": 11,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0, "custom": {"fillOpacity": 5}},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "camera:iep2_track_age_p50:rate5m{camera_id=~\"$camera_id\"}",
+          "legendFormat": "p50 {{camera_id}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "camera:iep2_track_age_p95:rate5m{camera_id=~\"$camera_id\"}",
+          "legendFormat": "p95 {{camera_id}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "barchart",
+      "title": "Track age histogram (frames survived, all cameras)",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+      "id": 12,
+      "options": {
+        "xField": "le",
+        "tooltip": {"mode": "multi"},
+        "legend": {"displayMode": "list", "placement": "bottom"}
+      },
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "sum by (le) (iep2_track_age_frames_bucket{camera_id=~\"$camera_id\"})",
+          "legendFormat": "{{le}} frames",
+          "refId": "A",
+          "format": "heatmap"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Identity Switches",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 18},
+      "id": 20
+    },
+    {
+      "type": "timeseries",
+      "title": "Identity switch rate (per minute)",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 19},
+      "id": 21,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "min": 0,
+          "custom": {"fillOpacity": 10},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 15}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "rate(iep2_identity_switches_total{camera_id=~\"$camera_id\"}[5m]) * 60",
+          "legendFormat": "{{camera_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Switch rate now (per min)",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 19},
+      "id": 22,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 15}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "sum(rate(iep2_identity_switches_total{camera_id=~\"$camera_id\"}[5m])) * 60",
+          "legendFormat": "Switches/min",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Track completion rate",
+      "description": "Fraction of tracks that survived >= 5 frames (not noise). Higher = better tracking stability.",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 19},
+      "id": 23,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "green", "value": 0.75}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "sum(iep2_track_age_frames_bucket{camera_id=~\"$camera_id\", le=\"5\"}) / sum(iep2_track_age_frames_count{camera_id=~\"$camera_id\"})",
+          "legendFormat": "Completion rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Frame Throughput & Detection Count",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 27},
+      "id": 30
+    },
+    {
+      "type": "timeseries",
+      "title": "Frames processed per second (per camera)",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 28},
+      "id": 31,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "fieldConfig": {"defaults": {"unit": "fps", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "rate(iep2_frames_processed_total{camera_id=~\"$camera_id\"}[1m])",
+          "legendFormat": "{{camera_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Avg detections per frame (per camera)",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 28},
+      "id": 32,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "rate(iep2_detections_per_frame_sum{camera_id=~\"$camera_id\"}[5m]) / rate(iep2_detections_per_frame_count{camera_id=~\"$camera_id\"}[5m])",
+          "legendFormat": "{{camera_id}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "time": {"from": "now-30m", "to": "now"}
+}

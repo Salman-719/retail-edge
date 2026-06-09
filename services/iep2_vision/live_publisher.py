@@ -92,6 +92,10 @@ class LivePublisher:
                     det["floor_x"] = float(t["floor_x"])
                 if t.get("floor_y") is not None:
                     det["floor_y"] = float(t["floor_y"])
+                if t.get("reid_sim") is not None:
+                    det["reid_sim"] = float(t["reid_sim"])
+                if t.get("reid_matched") is not None:
+                    det["reid_matched"] = bool(t["reid_matched"])
                 detections.append(det)
 
             payload = json.dumps({
@@ -122,7 +126,7 @@ class LivePublisher:
             detections = []
             for t in frame_dets:
                 bbox = t.get("bbox", [0, 0, 0, 0])
-                detections.append({
+                det = {
                     "track_id": t["track_id"],
                     "local_id": _local_id_str(t.get("local_id")),
                     "x1": int(bbox[0]),
@@ -130,7 +134,12 @@ class LivePublisher:
                     "x2": int(bbox[2]),
                     "y2": int(bbox[3]),
                     "confidence": float(t.get("confidence", 0.0)),
-                })
+                }
+                if t.get("reid_sim") is not None:
+                    det["reid_sim"] = float(t["reid_sim"])
+                if t.get("reid_matched") is not None:
+                    det["reid_matched"] = bool(t["reid_matched"])
+                detections.append(det)
             payload = json.dumps({
                 "camera_id": self._camera_id,
                 "timestamp_ms": timestamp_ms,

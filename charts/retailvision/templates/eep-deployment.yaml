@@ -102,6 +102,8 @@ spec:
               value: "/certs/tls.key"
             - name: DEBUG_MODE
               value: "false"
+            - name: CANARY_PERCENTAGE
+              value: {{ .Values.eep.canaryPercentage | quote }}
             # ── Dynamic pipeline provisioning (iep3/iep4/iep5 managers) ──
             # EEP provisions per-store workers via the k8s API; these tell the
             # managers which namespace + images to use and how children connect.
@@ -117,6 +119,20 @@ spec:
                   key: redis-url
             - name: IEP3_IMAGE
               value: "{{ .Values.global.imageRegistry }}/iep3:{{ .Values.iep3.image.tag }}"
+            - name: VOTE_DISTANCE_THRESHOLD_M
+              value: {{ .Values.iep3.matcher.voteDistanceThresholdM | quote }}
+            - name: MIN_VOTE_RATE
+              value: {{ .Values.iep3.matcher.minVoteRate | quote }}
+            - name: MIN_VOTES
+              value: {{ .Values.iep3.matcher.minVotes | quote }}
+            - name: TEMPORAL_TOLERANCE_MS
+              value: {{ .Values.iep3.matcher.temporalToleranceMs | quote }}
+            - name: AMBIGUITY_MARGIN
+              value: {{ .Values.iep3.matcher.ambiguityMargin | quote }}
+            - name: REID_FALLBACK_THRESHOLD
+              value: {{ .Values.iep3.matcher.reidFallbackThreshold | quote }}
+            - name: MAX_EMBEDDINGS
+              value: {{ .Values.iep3.matcher.maxEmbeddings | quote }}
             - name: IEP4_IMAGE
               value: "{{ .Values.global.imageRegistry }}/iep4:{{ .Values.iep4.image.tag }}"
             - name: IEP5_IMAGE

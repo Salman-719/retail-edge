@@ -1,0 +1,97 @@
+# Cloud Prometheus — scrapes cloud-hosted services (EEP, IEP3-6, live_bridge)
+# and federates edge metrics from each store's edge Prometheus.
+#
+# Deployed to Kubernetes; Prometheus is NOT publicly exposed (ClusterIP only).
+# Access via kubectl port-forward or Grafana's internal DNS.
+
+global:
+  scrape_interval: 15s
+  external_labels:
+    cluster: cloud
+
+rule_files:
+  - alert_rules.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ── Cloud services ────────────────────────────────────────────────────────────
+  # These services run in the cloud k8s cluster and expose /metrics via FastAPI
+  # prometheus-fastapi-instrumentator. Targets use k8s internal DNS.
+
+  - job_name: eep
+    static_configs:
+      - targets: ["eep.retailvision.svc.cluster.local:8000"]
+
+  - job_name: iep3
+    static_configs:
+      - targets: ["iep3-reconciliation.retailvision.svc.cluster.local:9300"]
+
+  - job_name: iep4
+    static_configs:
+      - targets: ["iep4-alerts.retailvision.svc.cluster.local:8004"]
+
+  - job_name: iep5
+    static_configs:
+      - targets: ["iep5-analytics.retailvision.svc.cluster.local:8005"]
+
+  - job_name: iep6
+    static_configs:
+      - targets: ["iep6-agent.retailvision.svc.cluster.local:8006"]
+
+  - job_name: live_bridge
+    static_configs:
+      - targets: ["live-bridge.retailvision.svc.cluster.local:8010"]
+
+  # ── Infrastructure exporters ──────────────────────────────────────────────────
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter.retailvision.svc.cluster.local:9121"]
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter.retailvision.svc.cluster.local:9187"]
+
+  - job_name: node
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "^(.+):\\d+$"
+        target_label: __address__
+        replacement: "${1}:9100"
+
+  # ── Edge federation ───────────────────────────────────────────────────────────
+  # One job per store (or use a loop in your Helm chart / Terraform to generate
+  # these dynamically). Each edge device runs its own Prometheus (prometheus-edge.yml)
+  # exposed through an internal VPN/tunnel at the address below.
+  # The /federate endpoint returns all time series matching the match[] filters —
+  # only the subset needed for cross-store dashboards is pulled here.
+  #
+  # Add one entry per store:
+  #   - job_name: edge_store_<store_id>
+  #     honor_labels: true
+  #     metrics_path: /federate
+  #     params:
+  #       match[]:
+  #         - '{job=~"detector|reid|iep1|iep2"}'
+  #     static_configs:
+  #       - targets: ["<store-vpn-ip>:9090"]
+  #         labels:
+  #           store_id: "<store_id>"
+  #
+  # Example for a single store (replace with real VPN IPs in production):
+  - job_name: edge_store_example
+    honor_labels: true
+    metrics_path: /federate
+    params:
+      match[]:
+        - '{job=~"detector|reid|iep1|iep2"}'
+        - 'up'
+    static_configs:
+      - targets: ["edge-store-vpn-ip:9090"]
+        labels:
+          store_id: "example-store"

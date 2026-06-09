@@ -22,6 +22,7 @@ import redis.asyncio as aioredis
 
 from app.coordinator import BatchCoordinator, check_pel_health
 from app.db import close_pool, create_pool, get_pool
+from app.metrics import start_metrics_server
 from app.reconciler import Reconciler
 from app.repository import Iep3Repository
 from app.settings import get_settings
@@ -40,6 +41,7 @@ REQUIRED_TABLES = {
     "global_local_mapping",
     "global_embeddings",
     "global_tracking_history",
+    "camera_zone_coverage",   # Stage 0 overlap graph source (EEP-populated)
 }
 
 
@@ -79,6 +81,12 @@ async def _main() -> None:
         settings.server_redis_url,
     )
 
+    # ── Metrics server ────────────────────────────────────────────────────────
+    # Exposes /metrics on :9300 (own background thread). Started early so the
+    # target is UP even while the daemon waits for its first batch.
+    start_metrics_server(9300)
+    logger.info("Prometheus metrics server started on :9300")
+
     # ── Infrastructure ────────────────────────────────────────────────────────
     pool = await create_pool(settings.database_url_server)
     await _verify_db(pool)
@@ -92,9 +100,14 @@ async def _main() -> None:
     # ── Repository ────────────────────────────────────────────────────────────
     repo = Iep3Repository(get_pool(), embedding_dim=settings.embedding_dim)
 
-    # ── R1: expected cameras from DB ──────────────────────────────────────────
-    expected_cameras = await repo.get_expected_cameras_count(settings.store_id)
-    logger.info("Expected cameras from DB: %d", expected_cameras)
+    # ── R1: expected cameras — env override takes priority (set by dev pipeline
+    # when fewer cameras than the full version are started); otherwise from DB. ──
+    if settings.expected_cameras > 0:
+        expected_cameras = settings.expected_cameras
+        logger.info("Expected cameras from env: %d", expected_cameras)
+    else:
+        expected_cameras = await repo.get_expected_cameras_count(settings.store_id)
+        logger.info("Expected cameras from DB: %d", expected_cameras)
 
     # ── Startup orphan sweep ──────────────────────────────────────────────────
     await repo.orphan_sweep(settings.store_id)

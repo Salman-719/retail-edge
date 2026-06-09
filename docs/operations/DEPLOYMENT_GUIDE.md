@@ -134,6 +134,8 @@ stable_node_count     = 2
 stable_node_max_count = 4
 node_root_volume_gb   = 60
 karpenter_cpu_limit   = "200"
+wireguard_enabled     = true
+wireguard_instance_type = "t4g.nano"
 ```
 Apply:
 ```bash
@@ -239,6 +241,9 @@ export EEP_HOST="$(terraform output -raw eep_host)"
 export AGENT_SECRET="$(terraform output -raw agent_secret)"
 export GRPC_EIP_ALLOCATIONS="$(terraform output -json grpc_eip_allocation_ids | jq -r 'join("\\,")')"
 export PUBLIC_SUBNET_IDS="$(terraform output -json public_subnet_ids | jq -r 'join("\\,")')"
+export VPC_CIDR="$(terraform output -raw vpc_cidr)"
+export WG_INSTANCE_ID="$(terraform output -raw wireguard_instance_id)"
+export WG_ENDPOINT="$(terraform output -raw wireguard_endpoint)"
 ```
 
 ### A4b. [LOCAL] Set the OpenAI API key (IEP6 agent)
@@ -262,9 +267,21 @@ kubectl get sc
 kubectl -n kube-system get deploy aws-load-balancer-controller metrics-server karpenter
 kubectl -n cert-manager get pods
 kubectl -n external-secrets get pods
+aws ssm describe-instance-information \
+  --filters "Key=InstanceIds,Values=$WG_INSTANCE_ID" \
+  --query 'InstanceInformationList[0].PingStatus' --output text
 ```
 **Expect:** two `workload=stable` nodes, add-ons Running, and `gp3` as the default
-StorageClass.
+StorageClass. The SSM command should print `Online`; user-data may need 2–5
+minutes after Terraform finishes.
+
+Read the generated WireGuard server public key:
+
+```bash
+cd "$HOME/retail-edge"
+export WG_SERVER_PUBLIC_KEY="$(./scripts/get-wireguard-server-key.sh "$WG_INSTANCE_ID" "$REGION")"
+echo "$WG_SERVER_PUBLIC_KEY"
+```
 
 ### A6. [LOCAL] Install the application (Helm)
 
@@ -282,6 +299,10 @@ helm upgrade --install retailvision ./charts/retailvision \
   --set-string 'eep.grpc.serviceAnnotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internet-facing' \
   --set-string "eep.grpc.serviceAnnotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-eip-allocations=$GRPC_EIP_ALLOCATIONS" \
   --set-string "eep.grpc.serviceAnnotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-subnets=$PUBLIC_SUBNET_IDS" \
+  --set-string "postgres.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-subnets=$PUBLIC_SUBNET_IDS" \
+  --set-string "redis.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-subnets=$PUBLIC_SUBNET_IDS" \
+  --set-string "postgres.service.loadBalancerSourceRanges[0]=$VPC_CIDR" \
+  --set-string "redis.service.loadBalancerSourceRanges[0]=$VPC_CIDR" \
   --set s3.bucket="$BUCKET" \
   --set s3.region="$REGION" \
   --set monitoring.grafana.host="grafana.$INGRESS_EIP.nip.io" \
@@ -289,7 +310,8 @@ helm upgrade --install retailvision ./charts/retailvision \
   -n retailvision --create-namespace
 ```
 **Expect:** `STATUS: deployed`. EEP runs Alembic at startup, building the schema
-through revision **0013** including TimescaleDB hypertables.
+through the current head revision, including TimescaleDB hypertables, edge-agent
+tables, packed ReID embedding galleries, and the optional IEP3 debug trace table.
 
 For later `helm upgrade` commands, either re-run this full command or include
 `--reuse-values`; otherwise Helm will drop the gRPC NLB service annotations that
@@ -300,12 +322,26 @@ were supplied by `--set-string`.
 ```bash
 kubectl -n retailvision get pods -o wide
 kubectl -n retailvision get hpa
-kubectl -n retailvision get svc eep-grpc
+kubectl -n retailvision get svc eep-grpc postgres redis-server
 kubectl -n retailvision logs deploy/eep --tail=30
 ```
 **Expect:** Postgres/Redis/Prometheus/Grafana/MLflow on stable nodes; EEP,
 frontend, IEP6, and per-store workers schedulable on Karpenter nodes. No `iep3`
 or `iep4` exists yet unless a store version has been activated.
+
+The Postgres and Redis Services should each receive an **internal** AWS NLB
+hostname. Record them for Part C:
+
+```bash
+export PG_HOST="$(kubectl -n retailvision get svc postgres -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+export REDIS_HOST="$(kubectl -n retailvision get svc redis-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+test -n "$PG_HOST" && test -n "$REDIS_HOST"
+echo "PG_HOST=$PG_HOST"
+echo "REDIS_HOST=$REDIS_HOST"
+```
+
+These DNS names resolve to private VPC addresses and are unreachable until the
+edge WireGuard peer is enrolled.
 
 Confirm **TimescaleDB** is active:
 ```bash
@@ -318,6 +354,42 @@ Confirm public app/API:
 curl -sk -o /dev/null -w "%{http_code}\n" "https://$APP_HOST/api/stores"
 ```
 **Expect:** `401` because the API is live and requires auth.
+
+Confirm observability/MLOps:
+```bash
+kubectl -n retailvision get deploy prometheus grafana alertmanager mlflow
+kubectl -n retailvision get cm prometheus-config grafana-dashboards alertmanager-config
+kubectl -n retailvision port-forward svc/prometheus 9090:9090 >/tmp/rv-prometheus.log 2>&1 &
+sleep 2
+curl -fsS "http://localhost:9090/-/ready"
+curl -fsS "http://localhost:9090/api/v1/rules" | jq '.data.groups | length'
+```
+**Expect:** all four deployments available, Prometheus ready, and a non-zero
+rules group count.
+
+Grafana and MLflow URLs, when set in Helm:
+```bash
+echo "https://grafana.$INGRESS_EIP.nip.io"
+echo "https://mlflow.$INGRESS_EIP.nip.io"
+```
+Grafana password:
+```bash
+kubectl -n retailvision get secret retailvision-secrets \
+  -o jsonpath='{.data.grafana-admin-password}' | base64 -d; echo
+```
+
+Run an MLOps smoke check from the repo root:
+```bash
+python3 -m venv .venv-mlops
+. .venv-mlops/bin/activate
+pip install -r mlops/requirements.txt
+export PROMETHEUS_URL=http://localhost:9090
+export MLFLOW_TRACKING_URI="https://mlflow.$INGRESS_EIP.nip.io"
+python mlops/check_state.py --model-name retailvision || true
+python mlops/run_promotion.py --model-name retailvision --dry-run
+```
+`check_state.py` may warn if no model has been registered yet; that is normal on
+a fresh deployment.
 
 ### A8. [LOCAL] Verify autoscaling
 
@@ -424,11 +496,24 @@ The bootstrap **detects the device** and applies the matching kustomize overlay
 
 | Profile | Detected when | yolo/reid image | GPU | Notes |
 |---|---|---|---|---|
-| `jetson` | `/etc/nv_tegra_release` present | `:1.0.0` (L4T TensorRT) | yes | **built on the device** (C4) |
-| `cuda` | `nvidia-smi` works (not Jetson) | `:1.0.0-cuda` (CI) | yes | discrete NVIDIA laptop/PC |
-| `cpu` | no NVIDIA GPU | `:1.0.0-cpu` (CI) | no | dev/low-throughput; Macs too |
+| `jetson` | `/etc/nv_tegra_release` present | `:1.2.0` (L4T TensorRT) | yes | **built on the device** (C6) |
+| `cuda` | `nvidia-smi` works (not Jetson) | `:1.2.0-cuda` (CI) | yes | discrete NVIDIA laptop/PC |
+| `cpu` | no NVIDIA GPU | `:1.2.0-cpu` (CI) | no | dev/low-throughput; Macs too |
 
 `iep1`/`iep2`/`edge-agent` are identical across profiles.
+
+The edge-to-cloud data path is:
+
+`camera RTSP -> IEP1 sampling -> local Redis/tmpfs -> IEP2 detection/tracking/ReID -> private Postgres + private Redis -> IEP3`
+
+This is intentionally the same contract as `reconfig-edge`:
+- EEP gRPC is the control plane that starts/stops cameras.
+- IEP2 writes tracking rows directly to cloud Postgres.
+- IEP2 publishes `batch_complete` directly to cloud Redis for IEP3.
+
+Do not point `SERVER_REDIS_URL` at the EEP hostname. The EKS chart creates
+internal NLBs for Postgres and Redis, reachable only through the Terraform-managed
+WireGuard gateway. Neither database is internet-facing.
 
 ### C0. Prerequisites
 
@@ -437,23 +522,39 @@ The bootstrap **detects the device** and applies the matching kustomize overlay
 - `terraform`, `kubectl`, `helm`, and this repo cloned.
 
 **On the [EDGE] device:**
-- Ubuntu; `git` + `curl`: `sudo apt-get update && sudo apt-get install -y git curl`.
+- Ubuntu; install the bootstrap/verification tools:
+  `sudo apt-get update && sudo apt-get install -y git curl python3 netcat-openbsd`.
 - **jetson**: JetPack/NVIDIA drivers installed (ships `nvidia-container-toolkit`).
   **cuda**: NVIDIA driver + `nvidia-smi` working (bootstrap installs the toolkit).
   **cpu**: nothing extra.
-- Network egress to: `$EEP_HOST:50051` + `:6380`, `ghcr.io`, `get.k3s.io`.
+- Network egress to: `$EEP_HOST:50051`, the private PostgreSQL endpoint on
+  `5432`, the private Redis TLS endpoint on `6380`, `ghcr.io`, and
+  `get.k3s.io`; plus RTSP access to each camera, normally TCP `554`.
 - Root/sudo. The bootstrap installs k3s itself.
-- GHCR images public (or `GHCR_USER`/`GHCR_TOKEN`): `iep1`, `iep2`, `edge-agent`
-  (all profiles); **`yolo`/`reid`** `:1.0.0-cpu` & `:1.0.0-cuda` from CI for those
-  profiles; `yolo`/`reid` `:1.0.0` (Jetson) built on-device in C4.
+- GHCR images public (or `GHCR_USER`/`GHCR_TOKEN`): `iep1` and `iep2`
+  (all profiles); **`yolo`/`reid`** `:1.2.0-cpu` and `:1.2.0-cuda` from CI for
+  those profiles; `yolo`/`reid` `:1.2.0` (Jetson) built on-device in C6.
 
-### C1. [LOCAL] Collect the inputs (agent secret + gRPC CA + store UUID)
+### C1. [LOCAL/CLOUDSHELL] Collect cloud inputs
+
+Read the shared edge token from the running cluster. This works even if the
+Terraform state is not available:
 
 ```bash
-cd ~/path/to/retail-edge/infra/aws
-export AWS_PROFILE=adsal AWS_DEFAULT_REGION=eu-west-1
-terraform output -raw agent_secret        # copy this — the shared secret
-terraform output -raw eep_host            # copy this — edge gRPC hostname
+export AGENT_SECRET="$(kubectl -n retailvision get secret retailvision-secrets -o jsonpath='{.data.agent-secret}' | base64 -d)"
+export EEP_HOST="eep.18.200.72.111.nip.io"
+```
+
+From the repository whose Terraform state owns the EKS deployment:
+
+```bash
+export EEP_HOST="$(terraform -chdir=infra/aws output -raw eep_host)"
+export WG_INSTANCE_ID="$(terraform -chdir=infra/aws output -raw wireguard_instance_id)"
+export WG_ENDPOINT="$(terraform -chdir=infra/aws output -raw wireguard_endpoint)"
+export WG_SERVER_PUBLIC_KEY="$(./scripts/get-wireguard-server-key.sh "$WG_INSTANCE_ID" eu-west-1)"
+export PG_HOST="$(kubectl -n retailvision get svc postgres -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+export REDIS_HOST="$(kubectl -n retailvision get svc redis-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+export POSTGRES_PASSWORD="$(kubectl -n retailvision get secret retailvision-secrets -o jsonpath='{.data.postgres-password}' | base64 -d)"
 ```
 Get the gRPC CA so the edge trusts EEP:
 ```bash
@@ -461,9 +562,11 @@ kubectl -n cert-manager get secret retailvision-ca -o jsonpath='{.data.tls\.crt}
 ```
 Copy the entire `-----BEGIN CERTIFICATE----- … -----END CERTIFICATE-----` block;
 you'll save it as `ca.crt` on the edge in C2. Also have the store **UUID** ready
-(from Part B / the `psql` query).
+(from Part B / the `psql` query). Copy `EEP_HOST`, `WG_ENDPOINT`,
+`WG_SERVER_PUBLIC_KEY`, `PG_HOST`, `REDIS_HOST`, `AGENT_SECRET`, and the
+Postgres password to the edge through your secure commissioning channel.
 
-### C2. [EDGE] Get the code and bootstrap
+### C2. [EDGE] Configure WireGuard
 
 Clone the repo on the device:
 ```bash
@@ -476,14 +579,79 @@ Save the CA you copied in C1:
 sudo mkdir -p /etc/retailvision/certs
 sudo tee /etc/retailvision/certs/ca.crt >/dev/null   # paste the PEM block, then press Ctrl-D
 ```
-Set variables:
+
+Choose a unique tunnel address per edge device. The first store can use
+`10.99.0.2`, the next `10.99.0.3`, and so on:
+
 ```bash
-export EEP_HOST=eep.34.248.161.113.nip.io            # terraform output eep_host
+export EEP_HOST=eep.18.200.72.111.nip.io             # current EEP gRPC hostname
 export STORE=70ed5b0c-6c56-43ac-a9e0-a3a81d0db52f   # the store UUID from Part B
+export WG_ENDPOINT='paste-wireguard-endpoint-from-C1'
+export WG_SERVER_PUBLIC_KEY='paste-server-public-key-from-C1'
+export EDGE_TUNNEL_IP=10.99.0.2
+export PG_HOST='paste-postgres-internal-nlb-hostname-from-C1'
+export REDIS_HOST='paste-redis-internal-nlb-hostname-from-C1'
 
 # AGENT_SECRET = shared token the Edge Agent sends to authenticate to EEP.
-# REQUIRED, same for every edge. Get the value with:  terraform output -raw agent_secret
-export AGENT_SECRET='paste-the-value-from-terraform-output'
+# REQUIRED, same value read from Kubernetes in C1.
+export AGENT_SECRET='paste-the-value-from-C1'
+```
+
+Configure and start the tunnel:
+
+```bash
+sudo bash scripts/bootstrap-edge-wireguard.sh \
+  "$WG_ENDPOINT" "$WG_SERVER_PUBLIC_KEY" "$EDGE_TUNNEL_IP"
+export EDGE_WG_PUBLIC_KEY="$(sudo cat /etc/wireguard/public.key)"
+echo "$EDGE_WG_PUBLIC_KEY"
+```
+
+### C3. [LOCAL/CLOUDSHELL] Register the edge peer
+
+Back in the cloud repository, paste the values printed/selected on the edge,
+then register the peer:
+
+```bash
+export EDGE_WG_PUBLIC_KEY='paste-edge-public-key-from-C2'
+export EDGE_TUNNEL_IP=10.99.0.2
+export WG_INSTANCE_ID="$(terraform -chdir=infra/aws output -raw wireguard_instance_id)"
+
+./scripts/register-edge-wireguard-peer.sh \
+  "$EDGE_WG_PUBLIC_KEY" "$EDGE_TUNNEL_IP" "$WG_INSTANCE_ID" eu-west-1
+```
+
+Each edge must have a unique public key and tunnel IP. Re-running the command
+with the same key updates that peer idempotently.
+
+The gateway server key and enrolled peers are stored on its encrypted root
+volume. Terraform ignores automatic AMI drift to avoid replacing it during
+unrelated updates. If you deliberately replace the gateway, repeat C1-C3 for
+every edge because the server public key changes.
+
+### C4. [EDGE] Verify the tunnel and bootstrap k3s
+
+Verify the handshake and private NLB routes:
+
+```bash
+sudo wg show wg0
+getent ahostsv4 "$PG_HOST"
+getent ahostsv4 "$REDIS_HOST"
+nc -vz "$PG_HOST" 5432
+nc -vz "$REDIS_HOST" 6380
+```
+
+Set the direct data-plane URLs expected by `reconfig-edge`:
+
+```bash
+# Paste the password collected in C1. URL-encode it before placing it in the URL.
+read -rsp "Cloud Postgres password: " PG_PASSWORD; echo
+
+export PG_PASSWORD_ENCODED="$(
+  PG_PASSWORD="$PG_PASSWORD" python3 -c \
+    'import os, urllib.parse; print(urllib.parse.quote(os.environ["PG_PASSWORD"], safe=""))'
+)"
+export DATABASE_URL_SERVER="postgresql://retailvision:${PG_PASSWORD_ENCODED}@${PG_HOST}:5432/retailvision"
+export SERVER_REDIS_URL="rediss://${REDIS_HOST}:6380?ssl_check_hostname=false"
 ```
 GHCR credentials are **only needed if your image packages are PRIVATE**. If you
 made them Public in Part A (A3), skip this. Otherwise uncomment and fill in:
@@ -494,28 +662,54 @@ made them Public in Part A (A3), skip this. Otherwise uncomment and fill in:
 Run the bootstrap (installs k3s + NVIDIA plugin + edge manifests + the Edge Agent
 systemd service):
 ```bash
-sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.0.0 "$EEP_HOST" "$AGENT_SECRET"
+sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.2.0 "$EEP_HOST" "$AGENT_SECRET"
 ```
-Restart the agent so it picks up the CA:
+
+The script refuses to start without `DATABASE_URL_SERVER`,
+`SERVER_REDIS_URL`, and `/etc/retailvision/certs/ca.crt`. It stores the
+credentials in `/etc/retailvision/edge-agent.env` with mode `0600`.
+
+### C5. [EDGE] Verify the runtime
+
 ```bash
-sudo systemctl restart retailvision-edge-agent
+sudo k3s kubectl get nodes
+sudo k3s kubectl get pods -n retailvision
+sudo k3s kubectl exec -n retailvision deploy/redis-edge -- redis-cli ping
+sudo wg show wg0
+sudo systemctl status retailvision-edge-agent --no-pager
+sudo journalctl -u retailvision-edge-agent -n 100 --no-pager
 ```
 
-### C3. [EDGE] Verify
+Expect the node to be `Ready`, local Redis to print `PONG`, both private ports
+to connect, and `redis-edge`, `iep1-daemon`, `yolo-service`, and `reid-service`
+to be `Running`. The agent log must show `Connecting to EEP` without repeated
+authentication or TLS errors.
+
+From a cloud-connected shell:
 
 ```bash
-sudo kubectl get pods -n retailvision
-journalctl -u retailvision-edge-agent -f
+kubectl -n retailvision logs deploy/eep --since=10m | grep "$STORE"
 ```
-**Expect:** `iep1-daemon` `Running` and the journal prints
-`heartbeat sent store_id=<UUID>` every 30s (edge ↔ cloud connected). From
-**[LOCAL]**, `kubectl -n retailvision logs deploy/eep | grep <STORE-UUID>`
-shows it connect. `yolo`/`reid` stay `Pending` until C4 + C5 below.
 
-### C4. [EDGE] Build the GPU images (`yolo`/`reid`) — **`jetson` profile only**, one-time
+After activating a camera schedule/configuration, verify the per-camera IEP2 pod
+and edge-to-cloud batch delivery:
 
-> Skip C4 + C5 for the **`cpu`** and **`cuda`** profiles — their `yolo`/`reid`
-> images (`-cpu`/`-cuda`) are built in CI and pulled automatically. C4/C5 apply
+```bash
+sudo k3s kubectl get deploy,pods -n retailvision -l component=iep2
+sudo k3s kubectl logs -n retailvision -l component=iep2 --tail=100
+```
+
+The IEP2 log should contain `Batch stats` without Postgres, Redis TLS, or CA
+errors. On the cloud, the store's IEP3 log should show the corresponding batch:
+
+```bash
+kubectl -n retailvision logs "statefulset/iep3-${STORE}" --since=10m
+```
+
+### C6. [EDGE] Build the GPU images (`yolo`/`reid`) — **`jetson` profile only**, one-time
+
+> Skip C6 + C7 for the **`cpu`** and **`cuda`** profiles — their `yolo`/`reid`
+> images (`-cpu`/`-cuda`) are built in CI and pulled automatically. C6/C7 apply
 > only to the Jetson L4T/TensorRT images.
 
 The Jetson images are **not** in CI: they use a Jetson L4T base and export a
@@ -537,15 +731,15 @@ Build from the **repo root** and push:
 ```bash
 cd ~/path/to/retail-edge
 echo "$GHCR_TOKEN" | docker login ghcr.io -u salman-719 --password-stdin
-docker build -f services/yolo_service/Dockerfile  -t ghcr.io/salman-719/retailvision/yolo:1.0.0  .
-docker push ghcr.io/salman-719/retailvision/yolo:1.0.0
-docker build -f services/reid_service/Dockerfile -t ghcr.io/salman-719/retailvision/reid:1.0.0 .
-docker push ghcr.io/salman-719/retailvision/reid:1.0.0
+docker build -f services/yolo_service/Dockerfile  -t ghcr.io/salman-719/retailvision/yolo:1.2.0  .
+docker push ghcr.io/salman-719/retailvision/yolo:1.2.0
+docker build -f services/reid_service/Dockerfile -t ghcr.io/salman-719/retailvision/reid:1.2.0 .
+docker push ghcr.io/salman-719/retailvision/reid:1.2.0
 ```
 Then make `retailvision/yolo` and `retailvision/reid` **Public** (GitHub →
 Packages), like the others.
 
-### C5. [EDGE] Expose the GPU to k3s
+### C7. [EDGE] Expose the GPU to k3s
 
 `yolo`/`reid` request `nvidia.com/gpu: 1`; the node must advertise it. k3s uses
 its **own** containerd, so set the nvidia runtime as its default via a template
@@ -572,7 +766,8 @@ plugin config — check the device-plugin pod logs
 ### D0. Release an update end-to-end (after merging reconfig-edge or ANY change)
 
 The canonical sequence to ship **any** change — new upstream code (e.g. a
-`reconfig-edge` merge), config, or chart edits. Pick a new version (e.g. `1.1.0`).
+`reconfig-edge` merge), config, or chart edits. Pick a new version that does not
+already exist in GHCR (e.g. `1.2.1`).
 
 **1. [LOCAL] Bring in changes + reconcile the deploy layer**
 ```bash
@@ -580,7 +775,8 @@ git checkout deploy/aws-eks && git pull
 git fetch origin && git merge origin/reconfig-edge      # only if integrating branch updates
 ```
 - Resolve conflicts keeping **our** deploy logic (bootstrap, `infra/edge/*`, the
-  `*/Dockerfile` build fixes).
+  EKS/WireGuard/private-NLB files, and `*/Dockerfile` build fixes), while keeping
+  the latest `reconfig-edge` **runtime contracts** in IEP1/IEP2/IEP3.
 - **If `services/eep/schema.sql` changed**, re-vendor the Postgres seed copy:
   ```bash
   cp services/eep/schema.sql charts/retailvision/files/schema.sql
@@ -598,7 +794,7 @@ git fetch origin && git merge origin/reconfig-edge      # only if integrating br
   that collides with an upstream one, fixing its `down_revision`.
 - Trigger the image build:
   ```bash
-  git tag v1.2.0 && git push origin v1.2.0     # CI builds all images + -cpu/-cuda variants
+  git tag v1.2.1 && git push origin v1.2.1     # CI builds all images + -cpu/-cuda variants
   ```
   > ⚠️ **Wait for ALL matrix jobs to go green before deploying.** Each service is a
   > separate job; deploying while (say) the `eep` job is still running causes
@@ -629,9 +825,15 @@ kubectl -n retailvision rollout status deploy/eep && kubectl -n retailvision get
 > Tags now come from `values.yaml` (step 2), so no per-image `--set …tag` needed.
 > IEP3/IEP4 are re-provisioned by EEP per active store — no `iep3.stores` flag in
 > normal operation (that's only for `staticProvisioning=true`).
-> ⚠️ **Switching Postgres → TimescaleDB requires a fresh data volume**, and a
-> migration that is **incompatible with existing rows** (e.g. the 2048-dim change,
-> or first-time TimescaleDB adoption) needs the **clean reinstall** (Part E) so
+> Migration note for the `reconfig-edge` ReID alignment: revision `0014` clears
+> only `local_centroids` and `global_embeddings` because old single-centroid rows
+> cannot be converted to packed embedding heaps. It does **not** wipe stores,
+> cameras, `tracking_history`, global trajectories, or analytics tables. After
+> deployment, restart active IEP2/IEP3 workers so they repopulate the new gallery
+> format.
+>
+> ⚠️ **Switching Postgres → TimescaleDB itself requires a fresh data volume**, and
+> first-time TimescaleDB adoption needs the **clean reinstall** (Part E) so
 > Postgres re-seeds. Existing data is lost — back up first if it matters.
 
 **4. [EDGE] Update each store's device** (`git pull` first)
@@ -639,9 +841,9 @@ kubectl -n retailvision rollout status deploy/eep && kubectl -n retailvision get
   and pulls the new `-cpu`/`-cuda` images:
   ```bash
   cd ~/path/to/retail-edge && git pull
-  sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.1.0 "$EEP_HOST" "$AGENT_SECRET"
+  sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.2.1 "$EEP_HOST" "$AGENT_SECRET"
   ```
-- **jetson**: rebuild `yolo`/`reid` on the device at the new tag (C4), then re-run
+- **jetson**: rebuild `yolo`/`reid` on the device at the new tag (C6), then re-run
   the bootstrap.
 - IEP2 (per-camera) uses `IEP2_IMAGE` in `/etc/retailvision/edge-agent.env`; the
   bootstrap rewrites it to the version you pass — the next `StartCamera` uses it.
@@ -691,12 +893,24 @@ The granular variants (D1–D5) below cover individual cases.
 
 ### D3. Update infrastructure (Terraform)
 
-1. **[LOCAL]** edit `infra/aws/*.tf` (or `terraform.tfvars`).
-2. ```bash
-   cd infra/aws && export AWS_PROFILE=adsal
-   terraform plan      # review carefully — see what will change/replace
-   terraform apply
+Run infrastructure updates from the persistent CloudShell checkout/state
+described in A0, not from a fresh `/root` checkout.
+
+1. **[CLOUDSHELL]** pull the deployment branch and review the changes:
+   ```bash
+   cd "$HOME/retail-edge"
+   git pull --ff-only origin deploy/aws-eks
+   cd infra/aws
+   terraform init -reconfigure
+   terraform validate
+   terraform plan -out update.tfplan
+   terraform show update.tfplan
+   terraform apply update.tfplan
    ```
+2. If the commit also changes `charts/retailvision`, re-run A6 after Terraform.
+   Terraform creates AWS resources; Helm applies Kubernetes Services and
+   workloads that use them. The private edge data-plane change requires both.
+
    **Caution:** read the plan before approving. EKS control-plane changes,
    node-group changes, and Karpenter limits can replace or churn capacity. Stateful
    data lives on gp3 PVCs; back up before destructive storage changes.
@@ -712,12 +926,12 @@ kubectl -n retailvision rollout restart statefulset/redis-server
 ### D5. Update an edge device
 
 ```bash
-# [EDGE] update inference services to a new image tag:
-kubectl -n retailvision set image deployment/yolo-service yolo-service=ghcr.io/salman-719/retailvision/yolo:1.0.1
-kubectl -n retailvision set image deployment/reid-service reid-service=ghcr.io/salman-719/retailvision/reid:1.0.1
-# IEP2 (per-camera) uses IEP2_IMAGE from the agent env; bump it then:
-sudo sed -i 's#retailvision/iep2:.*#retailvision/iep2:1.0.1#' /etc/retailvision/edge-agent.env
-sudo systemctl restart retailvision-edge-agent
+# [EDGE] keep DATABASE_URL_SERVER and SERVER_REDIS_URL exported, then re-run
+# the idempotent bootstrap so manifests, images, CA Secret, and agent code all
+# move together:
+cd ~/retail-edge
+git pull --ff-only origin deploy/aws-eks
+sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.2.1 "$EEP_HOST" "$AGENT_SECRET"
 ```
 
 ---
@@ -855,8 +1069,8 @@ kubectl delete namespace retailvision --ignore-not-found --wait=true
 # if finalizers hang). Confirm none remain:
 kubectl get pvc -A | grep retailvision || echo "no retailvision PVCs (good)"
 ```
-Then re-run **A7**. EEP rebuilds the schema via Alembic (0001→0013) on the fresh
-TimescaleDB volume, then you re-create the store (Part B).
+Then re-run **A7**. EEP rebuilds the schema through the current Alembic head on
+the fresh TimescaleDB volume, then you re-create the store (Part B).
 
 ### Rotate a Secrets Manager value (e.g. a password)
 

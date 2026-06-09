@@ -97,8 +97,16 @@ metadata:
   namespace: retailvision
   labels:
     app: redis-server
+  {{- with .Values.redis.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
-  type: ClusterIP
+  type: {{ .Values.redis.service.type }}
+  {{- with .Values.redis.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     app: redis-server
   ports:

@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     # ── Feature flags ────────────────────────────────────────────────────────
     # Explicit false default — never rely on absence of this var.
     DEBUG_MODE: bool = False
+    CANARY_PERCENTAGE: int = Field(default=0, ge=0, le=100)
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

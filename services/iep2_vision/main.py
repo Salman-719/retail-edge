@@ -16,6 +16,13 @@ def main():
         datefmt="%H:%M:%S",
     )
     log = logging.getLogger("iep2.main")
+    try:
+        from services.iep2_vision.metrics import start_metrics_server
+        metrics_port = int(os.environ.get("IEP2_METRICS_PORT", "9201"))
+        start_metrics_server(metrics_port)
+        log.info("IEP2 metrics server started on :%d", metrics_port)
+    except Exception as exc:
+        log.warning("IEP2 metrics server not started: %s", exc)
 
     _here = os.path.dirname(os.path.abspath(__file__))
     if _here not in sys.path:

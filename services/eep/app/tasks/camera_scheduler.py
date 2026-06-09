@@ -15,6 +15,7 @@ from sqlalchemy import text
 from app.core.database import AsyncSessionLocal
 from app.core import orchestrator
 from app.grpc_server import camera_status as _camera_status
+from app.metrics import EEP_ACTIVE_CAMERAS, EEP_SCHEDULER_TICKS
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +27,10 @@ _running_cameras: set[tuple[str, str]] = set()
 # starts. Used as the shift_date when the store's last camera stops (end of
 # shift), so shifts spanning midnight keep their start date (SPEC-004).
 _store_shift_start: dict[str, date] = {}
+
+
+def _update_active_camera_metric() -> None:
+    EEP_ACTIVE_CAMERAS.set(len(_running_cameras))
 
 
 def _stores_running() -> set[str]:
@@ -51,10 +56,12 @@ def _fire_shift_end(store_id: str, shift_date: date) -> None:
 
 def mark_running(store_id: str, camera_config_id: str) -> None:
     _running_cameras.add((str(store_id), str(camera_config_id)))
+    _update_active_camera_metric()
 
 
 def mark_stopped(store_id: str, camera_config_id: str) -> None:
     _running_cameras.discard((str(store_id), str(camera_config_id)))
+    _update_active_camera_metric()
 
 _LOAD_SQL = text("""
 SELECT
@@ -127,6 +134,7 @@ async def rebuild_running_cameras() -> None:
                 "rebuild_running_cameras: error for schedule_id=%s",
                 row.get("schedule_id"),
             )
+    _update_active_camera_metric()
 
 
 async def _load_schedules(session) -> list[dict]:
@@ -280,10 +288,12 @@ async def evaluate_schedules() -> None:
                         continue
                 await _on_camera_start(row)
                 _running_cameras.add(key)
+                _update_active_camera_metric()
 
             elif not should_run and key in _running_cameras:
                 await _on_camera_stop(row)
                 _running_cameras.discard(key)
+                _update_active_camera_metric()
 
         except Exception:
             log.exception(
@@ -308,6 +318,8 @@ async def evaluate_schedules() -> None:
         _fire_shift_end(sid, shift_date)
 
     await _activate_pending_versions(now_utc)
+    _update_active_camera_metric()
+    EEP_SCHEDULER_TICKS.inc()
 
     elapsed = time.monotonic() - tick_start
     from app.core.scheduler import _WINDOW_SECONDS

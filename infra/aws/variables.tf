@@ -54,6 +54,58 @@ variable "node_root_volume_gb" {
   default     = 60
 }
 
+# ── Private edge data-plane access ──────────────────────────────────────────
+variable "wireguard_enabled" {
+  description = "Create the SSM-managed WireGuard gateway used by edge devices to reach private EKS data services."
+  type        = bool
+  default     = true
+}
+
+variable "wireguard_instance_type" {
+  description = "Graviton instance type for the WireGuard gateway."
+  type        = string
+  default     = "t4g.nano"
+}
+
+variable "wireguard_port" {
+  description = "Public UDP port used by WireGuard."
+  type        = number
+  default     = 51820
+
+  validation {
+    condition     = var.wireguard_port >= 1 && var.wireguard_port <= 65535
+    error_message = "wireguard_port must be between 1 and 65535."
+  }
+}
+
+variable "wireguard_client_cidrs" {
+  description = "Internet CIDRs allowed to send WireGuard UDP traffic. 0.0.0.0/0 supports roaming store uplinks; WireGuard still requires an enrolled key."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "wireguard_tunnel_cidr" {
+  description = "WireGuard overlay subnet. Must not overlap the VPC or store LANs."
+  type        = string
+  default     = "10.99.0.0/24"
+
+  validation {
+    condition     = can(cidrhost(var.wireguard_tunnel_cidr, 1)) && endswith(var.wireguard_tunnel_cidr, "/24")
+    error_message = "wireguard_tunnel_cidr must be a valid IPv4 /24 CIDR."
+  }
+}
+
+variable "wireguard_server_address" {
+  description = "WireGuard gateway address inside the overlay subnet, including prefix."
+  type        = string
+  default     = "10.99.0.1/24"
+
+  validation {
+    condition     = can(cidrhost(var.wireguard_server_address, 0)) && endswith(var.wireguard_server_address, "/24")
+    error_message = "wireguard_server_address must be a valid IPv4 address with a /24 prefix."
+  }
+}
+
 # ── Karpenter (elastic worker capacity) ──────────────────────────────────────
 variable "karpenter_version" {
   description = "Karpenter Helm chart version (OCI public.ecr.aws/karpenter)."

@@ -14,10 +14,16 @@ spec:
     metadata:
       labels:
         app: reid-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9401"
     spec:
       containers:
         - name: reid-service
           image: ghcr.io/your-org/retailvision/reid:1.0.0
+          ports:
+            - name: metrics
+              containerPort: 9401
           resources:
             limits:
               nvidia.com/gpu: 1

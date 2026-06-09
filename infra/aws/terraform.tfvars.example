@@ -19,6 +19,17 @@ stable_node_count    = 2
 stable_node_max_count = 4
 node_root_volume_gb  = 60
 
+# ── Private edge data plane ──
+# The gateway has no SSH ingress; manage it through AWS Systems Manager.
+wireguard_enabled       = true
+wireguard_instance_type = "t4g.nano"
+wireguard_port          = 51820
+# Leave open for stores with changing public IPs. Unknown peers cannot complete
+# the WireGuard handshake; narrow this list when stores have static egress IPs.
+wireguard_client_cidrs   = ["0.0.0.0/0"]
+wireguard_tunnel_cidr    = "10.99.0.0/24"
+wireguard_server_address = "10.99.0.1/24"
+
 # ── Karpenter elastic capacity (workers, per-store IEP3/IEP4, IEP5 jobs) ──
 karpenter_cpu_limit = "200"   # max total vCPUs Karpenter may provision
 

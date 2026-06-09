@@ -38,6 +38,31 @@ output "public_subnet_ids" {
   value       = module.vpc.public_subnets
 }
 
+output "vpc_cidr" {
+  description = "VPC CIDR routed through WireGuard from enrolled edge devices."
+  value       = var.vpc_cidr
+}
+
+output "wireguard_instance_id" {
+  description = "SSM-managed WireGuard gateway instance ID."
+  value       = var.wireguard_enabled ? aws_instance.wireguard[0].id : null
+}
+
+output "wireguard_public_ip" {
+  description = "Public WireGuard endpoint address."
+  value       = var.wireguard_enabled ? aws_eip.wireguard[0].public_ip : null
+}
+
+output "wireguard_endpoint" {
+  description = "WireGuard endpoint in host:port form."
+  value       = var.wireguard_enabled ? "${aws_eip.wireguard[0].public_ip}:${var.wireguard_port}" : null
+}
+
+output "wireguard_tunnel_cidr" {
+  description = "Overlay CIDR assigned to enrolled edge devices."
+  value       = var.wireguard_enabled ? var.wireguard_tunnel_cidr : null
+}
+
 output "app_host" {
   description = "Public hostname for the SPA/API."
   value       = local.app_host
@@ -73,6 +98,10 @@ output "helm_install_hint" {
       --set-string 'eep.grpc.serviceAnnotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internet-facing' \
       --set-string 'eep.grpc.serviceAnnotations.service\.beta\.kubernetes\.io/aws-load-balancer-eip-allocations=${join("\\,", aws_eip.grpc[*].id)}' \
       --set-string 'eep.grpc.serviceAnnotations.service\.beta\.kubernetes\.io/aws-load-balancer-subnets=${join("\\,", module.vpc.public_subnets)}' \
+      --set-string 'postgres.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-subnets=${join("\\,", module.vpc.public_subnets)}' \
+      --set-string 'redis.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-subnets=${join("\\,", module.vpc.public_subnets)}' \
+      --set-string 'postgres.service.loadBalancerSourceRanges[0]=${var.vpc_cidr}' \
+      --set-string 'redis.service.loadBalancerSourceRanges[0]=${var.vpc_cidr}' \
       --set s3.bucket=${var.s3_bucket_name} --set s3.region=${var.aws_region} \
       --set monitoring.grafana.host=grafana.${local.ingress_ip}.nip.io \
       --set mlflow.host=mlflow.${local.ingress_ip}.nip.io \

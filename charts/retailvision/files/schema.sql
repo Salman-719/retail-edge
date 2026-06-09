@@ -770,14 +770,20 @@ CREATE INDEX IF NOT EXISTS idx_crs_physical_open
     ON camera_runtime_sessions(physical_camera_id)
     WHERE stopped_at IS NULL;
 
--- 3. local_centroids — per-camera appearance centroid per local track.
+-- 3. local_centroids — per-camera appearance embedding store per local track.
 --    Written by IEP2 after each batch; read by IEP3 for cross-camera matching.
 --    local_id is the same UUID derived by uuid.UUID(int=local_id) in IEP2.
+--    embeddings holds up to MAX_EMBEDDINGS (10) raw float32[2048] vectors
+--    concatenated as BYTEA. embedding_count says how many vectors are present.
+--    quality_scores holds one float32 per embedding. Representative centroids
+--    are computed on demand and never stored.
 CREATE TABLE IF NOT EXISTS local_centroids (
     local_id         UUID        PRIMARY KEY,
     camera_id        TEXT        NOT NULL,
     store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    centroid         BYTEA       NOT NULL,
+    embeddings       BYTEA       NOT NULL,
+    embedding_count  SMALLINT    NOT NULL DEFAULT 0,
+    quality_scores   BYTEA       NOT NULL DEFAULT ''::bytea,
     updated_at_batch INT         NOT NULL,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -838,15 +844,17 @@ CREATE INDEX IF NOT EXISTS idx_glm_local_id
 CREATE INDEX IF NOT EXISTS idx_glm_global_active
     ON global_local_mapping(global_id, is_active);
 
--- 6. global_embeddings — per-camera appearance centroid per GlobalID.
---    centroid is a float32[2048] numpy array stored as raw bytes (.tobytes()).
---    Representative centroid is computed at query time, never stored.
+-- 6. global_embeddings — per-camera appearance embedding store per GlobalID.
+--    Same packed layout as local_centroids. IEP3 merges matched local heaps into
+--    this table after each reconciliation batch.
 CREATE TABLE IF NOT EXISTS global_embeddings (
-    global_id      UUID    NOT NULL
-                   REFERENCES global_identities(global_id) ON DELETE CASCADE,
-    camera_id      TEXT    NOT NULL,
-    centroid       BYTEA   NOT NULL,
-    updated_at_ts  BIGINT  NOT NULL,
+    global_id       UUID     NOT NULL
+                    REFERENCES global_identities(global_id) ON DELETE CASCADE,
+    camera_id       TEXT     NOT NULL,
+    embeddings      BYTEA    NOT NULL,
+    embedding_count SMALLINT NOT NULL DEFAULT 0,
+    quality_scores  BYTEA    NOT NULL DEFAULT ''::bytea,
+    updated_at_ts   BIGINT   NOT NULL,
     PRIMARY KEY (global_id, camera_id)
 );
 
@@ -949,3 +957,17 @@ CREATE TABLE IF NOT EXISTS agent_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_alerts_store_ts
     ON agent_alerts(store_id, created_at DESC);
+
+-- ─── IEP3 debug trace (Redis-gated, optional) ───────────────────────────────
+CREATE SCHEMA IF NOT EXISTS debug;
+CREATE TABLE IF NOT EXISTS debug.recon_trace (
+    id           BIGSERIAL    PRIMARY KEY,
+    store_id     UUID         NOT NULL,
+    batch_number BIGINT       NOT NULL,
+    event_type   VARCHAR(20)  NOT NULL
+                 CHECK (event_type IN ('graph', 'spatial_vote', 'reid_fallback', 'selection')),
+    detail       JSONB,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_recon_trace_store_batch
+    ON debug.recon_trace(store_id, batch_number);

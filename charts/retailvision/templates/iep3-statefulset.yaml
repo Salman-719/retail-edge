@@ -53,12 +53,22 @@ spec:
                 secretKeyRef:
                   name: retailvision-secrets
                   key: redis-url
-            - name: REID_THRESHOLD
-              value: "0.85"   # tuned for resnet50_msmt17 (2048-dim); was 0.75 for OSNet
+            - name: VOTE_DISTANCE_THRESHOLD_M
+              value: {{ $.Values.iep3.matcher.voteDistanceThresholdM | quote }}
+            - name: MIN_VOTE_RATE
+              value: {{ $.Values.iep3.matcher.minVoteRate | quote }}
+            - name: MIN_VOTES
+              value: {{ $.Values.iep3.matcher.minVotes | quote }}
+            - name: TEMPORAL_TOLERANCE_MS
+              value: {{ $.Values.iep3.matcher.temporalToleranceMs | quote }}
+            - name: AMBIGUITY_MARGIN
+              value: {{ $.Values.iep3.matcher.ambiguityMargin | quote }}
+            - name: REID_FALLBACK_THRESHOLD
+              value: {{ $.Values.iep3.matcher.reidFallbackThreshold | quote }}
+            - name: MAX_EMBEDDINGS
+              value: {{ $.Values.iep3.matcher.maxEmbeddings | quote }}
             - name: GRACE_SECONDS
               value: "300"
-            - name: MAX_SPEED_MPS
-              value: "1.5"
             - name: POSITION_WEIGHT_AREA
               value: "0.7"
             - name: POSITION_WEIGHT_CONF

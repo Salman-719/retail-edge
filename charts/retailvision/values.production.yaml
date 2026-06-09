@@ -47,10 +47,26 @@ iep6:
 
 postgres:
   storage: 50Gi
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    loadBalancerSourceRanges:
+      - 10.20.0.0/16
 
 redis:
   maxmemory: "1gb"
   memoryLimit: "1536Mi"
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    loadBalancerSourceRanges:
+      - 10.20.0.0/16
 
 # Set the real public hostname (DNS A/ALIAS -> the ingress NLB) before deploy.
 ingress:

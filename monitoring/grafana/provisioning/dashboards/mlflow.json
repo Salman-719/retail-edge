@@ -1,0 +1,183 @@
+{
+  "title": "RetailVision -- MLflow Experiments",
+  "uid": "retailvision-mlflow",
+  "tags": ["retailvision", "mlflow", "ml-lifecycle"],
+  "timezone": "browser",
+  "refresh": "5m",
+  "schemaVersion": 38,
+  "description": "MLflow experiment runs, model accuracy, and drift signals. Requires MLflow server running at http://localhost:5000.",
+  "templating": {"list": []},
+  "panels": [
+    {
+      "type": "row",
+      "title": "MLflow Experiment Browser",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 1
+    },
+    {
+      "type": "text",
+      "title": "MLflow UI",
+      "description": "Direct link to the MLflow experiment tracking UI. Use this to compare runs, view metrics, and register models.",
+      "gridPos": {"h": 2, "w": 24, "x": 0, "y": 1},
+      "id": 2,
+      "options": {
+        "mode": "markdown",
+        "content": "**[Open MLflow UI in new tab](http://localhost:5000)**  --  Tracks detection eval, tracking eval, and reid eval experiments. Register winning models in the Model Registry."
+      }
+    },
+    {
+      "type": "iframe",
+      "title": "MLflow Experiments",
+      "gridPos": {"h": 20, "w": 24, "x": 0, "y": 3},
+      "id": 3,
+      "options": {
+        "url": "http://localhost:5000"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Model Drift Signals (Prometheus)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23},
+      "id": 10,
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "ReID cosine similarity p50 (drift proxy)",
+      "description": "Sustained drop below 0.6 indicates ReID model degradation or distribution shift. Alert fires at < 0.55 for 10m.",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 11,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {"fillOpacity": 10},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.55},
+              {"color": "green", "value": 0.65}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "job:iep3_cosine_p50:rate5m",
+          "legendFormat": "Cosine sim p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "job:iep3_cosine_p95:rate5m",
+          "legendFormat": "Cosine sim p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Detector confidence p50 (input drift proxy)",
+      "description": "Sustained drop below 0.40 indicates the detector is less certain -- possible camera angle change, lens issue, or lighting shift.",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 12,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {"fillOpacity": 10},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.40},
+              {"color": "green", "value": 0.55}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "job:detector_confidence_p50:rate5m",
+          "legendFormat": "Confidence p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "job:detector_confidence_p25:rate5m",
+          "legendFormat": "Confidence p25",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "ReID embedding norm p50 (model health)",
+      "description": "Healthy range: 10--30. Drop below 5.0 triggers EmbeddingNormCollapse alert (possible TRT engine failure).",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "id": 13,
+      "options": {"tooltip": {"mode": "multi"}},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 5}, {"color": "green", "value": 10}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "job:reid_embedding_norm_p50:rate5m",
+          "legendFormat": "Norm p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "job:reid_embedding_norm_p95:rate5m",
+          "legendFormat": "Norm p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "ReID match rate (cross-camera identity matching)",
+      "description": "Fraction of LocalIDs matched to a GlobalID. Alert fires at < 30% while pipeline is active.",
+      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "id": 14,
+      "options": {"tooltip": {"mode": "multi"}},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.30}, {"color": "green", "value": 0.60}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "expr": "iep3_reid_match_rate",
+          "legendFormat": "Match rate",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "time": {"from": "now-1h", "to": "now"}
+}

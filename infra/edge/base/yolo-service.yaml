@@ -14,10 +14,16 @@ spec:
     metadata:
       labels:
         app: yolo-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9400"
     spec:
       containers:
         - name: yolo-service
           image: ghcr.io/your-org/retailvision/yolo:1.0.0
+          ports:
+            - name: metrics
+              containerPort: 9400
           resources:
             limits:
               nvidia.com/gpu: 1

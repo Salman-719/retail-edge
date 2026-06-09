@@ -34,6 +34,7 @@ eep:
   grpc:
     serviceType: ClusterIP
     serviceAnnotations: {}
+  canaryPercentage: 0
   # Public hostname edge devices dial for gRPC; must match the cert SAN and the
   # EEP_HOST passed to bootstrap-edge-k3s.sh. Override per environment.
   grpcHost: eep.retailvision.example.com
@@ -61,6 +62,14 @@ eep:
 iep3:
   image:
     tag: "1.2.0"
+  matcher:
+    voteDistanceThresholdM: "1.0"
+    minVoteRate: "0.6"
+    minVotes: "10"
+    temporalToleranceMs: "150"
+    ambiguityMargin: "0.15"
+    reidFallbackThreshold: "0.55"
+    maxEmbeddings: "10"
   # staticProvisioning: when false (default), EEP provisions IEP3 StatefulSets
   # dynamically via iep3_manager.py on store version activation (RBAC in rbac.yaml).
   # Set true only as an emergency escape hatch (requires iep3.stores populated).
@@ -139,6 +148,10 @@ postgres:
   user: retailvision
   database: retailvision
   storage: 20Gi
+  service:
+    type: ClusterIP
+    annotations: {}
+    loadBalancerSourceRanges: []
   resources:
     requests:
       cpu: "250m"
@@ -160,12 +173,17 @@ redis:
   image:
     tag: "7.2.4"
   tls: true
+  service:
+    type: ClusterIP
+    annotations: {}
+    loadBalancerSourceRanges: []
   maxmemory: "512mb"      # redis units (feeds redis.conf)
   memoryLimit: "768Mi"    # k8s container memory limit (headroom over maxmemory)
 
 # ── Observability: Prometheus + Grafana + exporters ─────────────────────────
-# Scrapes IEP3 (:9300), YOLO (:9400), and redis/postgres/node exporters. Sized
-# for a single small node; bump resources / move to a dedicated node as you grow.
+# Scrapes EEP, annotated cloud workers such as IEP3 (:9300), and redis/postgres/
+# node exporters. Edge YOLO/ReID/IEP1/IEP2 expose metrics ports but are not
+# federated into cloud Prometheus by default.
 monitoring:
   enabled: false   # production overlay enables it
   prometheus:
@@ -175,6 +193,12 @@ monitoring:
     resources:
       requests: { cpu: "100m", memory: "256Mi" }
       limits:   { cpu: "500m", memory: "1Gi" }
+  alertmanager:
+    enabled: true
+    image: "prom/alertmanager:v0.27.0"
+    resources:
+      requests: { cpu: "25m", memory: "64Mi" }
+      limits:   { cpu: "100m", memory: "128Mi" }
   grafana:
     image: "grafana/grafana:10.4.1"
     host: ""        # e.g. grafana.<INGRESS_EIP>.nip.io ; blank = no ingress (port-forward)

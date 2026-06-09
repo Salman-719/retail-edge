@@ -23,13 +23,18 @@ _SERVER_REDIS_URL = os.environ.get("SERVER_REDIS_URL", "")
 
 _WINDOW_SECONDS                   = os.environ.get("WINDOW_SECONDS",                   "60")
 _DATABASE_URL_SERVER               = os.environ.get("DATABASE_URL_SERVER",               "")
-_REID_THRESHOLD                   = os.environ.get("REID_THRESHOLD",                   "0.75")
 _GRACE_SECONDS                    = os.environ.get("GRACE_SECONDS",                    "300.0")
-_MAX_SPEED_MPS                    = os.environ.get("MAX_SPEED_MPS",                    "1.5")
 _POSITION_WEIGHT_AREA             = os.environ.get("POSITION_WEIGHT_AREA",             "0.7")
 _POSITION_WEIGHT_CONF             = os.environ.get("POSITION_WEIGHT_CONF",             "0.3")
 _ORPHAN_SWEEP_INTERVAL_BATCHES    = os.environ.get("ORPHAN_SWEEP_INTERVAL_BATCHES",    "50")
 _EXPECTED_CAMERAS_REFRESH_BATCHES = os.environ.get("EXPECTED_CAMERAS_REFRESH_BATCHES", "10")
+_VOTE_DISTANCE_THRESHOLD_M        = os.environ.get("VOTE_DISTANCE_THRESHOLD_M",        "1.0")
+_MIN_VOTE_RATE                    = os.environ.get("MIN_VOTE_RATE",                    "0.6")
+_MIN_VOTES                        = os.environ.get("MIN_VOTES",                        "10")
+_TEMPORAL_TOLERANCE_MS            = os.environ.get("TEMPORAL_TOLERANCE_MS",            "150")
+_AMBIGUITY_MARGIN                 = os.environ.get("AMBIGUITY_MARGIN",                 "0.15")
+_REID_FALLBACK_THRESHOLD          = os.environ.get("REID_FALLBACK_THRESHOLD",          "0.55")
+_MAX_EMBEDDINGS                   = os.environ.get("MAX_EMBEDDINGS",                   "10")
 
 _apps_v1 = None
 _core_v1 = None
@@ -114,13 +119,18 @@ def apply_iep3(store_id: str) -> None:
         k8s.V1EnvVar(name="STORE_ID",                         value=store_id),
         k8s.V1EnvVar(name="WINDOW_SECONDS",                   value=_WINDOW_SECONDS),
         k8s.V1EnvVar(name="DATABASE_URL_SERVER",              value=_DATABASE_URL_SERVER),
-        k8s.V1EnvVar(name="REID_THRESHOLD",                   value=_REID_THRESHOLD),
         k8s.V1EnvVar(name="GRACE_SECONDS",                    value=_GRACE_SECONDS),
-        k8s.V1EnvVar(name="MAX_SPEED_MPS",                    value=_MAX_SPEED_MPS),
         k8s.V1EnvVar(name="POSITION_WEIGHT_AREA",             value=_POSITION_WEIGHT_AREA),
         k8s.V1EnvVar(name="POSITION_WEIGHT_CONF",             value=_POSITION_WEIGHT_CONF),
         k8s.V1EnvVar(name="ORPHAN_SWEEP_INTERVAL_BATCHES",    value=_ORPHAN_SWEEP_INTERVAL_BATCHES),
         k8s.V1EnvVar(name="EXPECTED_CAMERAS_REFRESH_BATCHES", value=_EXPECTED_CAMERAS_REFRESH_BATCHES),
+        k8s.V1EnvVar(name="VOTE_DISTANCE_THRESHOLD_M",        value=_VOTE_DISTANCE_THRESHOLD_M),
+        k8s.V1EnvVar(name="MIN_VOTE_RATE",                    value=_MIN_VOTE_RATE),
+        k8s.V1EnvVar(name="MIN_VOTES",                        value=_MIN_VOTES),
+        k8s.V1EnvVar(name="TEMPORAL_TOLERANCE_MS",            value=_TEMPORAL_TOLERANCE_MS),
+        k8s.V1EnvVar(name="AMBIGUITY_MARGIN",                 value=_AMBIGUITY_MARGIN),
+        k8s.V1EnvVar(name="REID_FALLBACK_THRESHOLD",          value=_REID_FALLBACK_THRESHOLD),
+        k8s.V1EnvVar(name="MAX_EMBEDDINGS",                   value=_MAX_EMBEDDINGS),
         # SERVER_REDIS_URL pulled from k8s secret — matches Helm template.
         k8s.V1EnvVar(
             name="SERVER_REDIS_URL",
@@ -199,13 +209,18 @@ def _apply_iep3_docker(store_id: str) -> None:
         "WINDOW_SECONDS":                   _WINDOW_SECONDS,
         "DATABASE_URL_SERVER":              _DATABASE_URL_SERVER,
         "SERVER_REDIS_URL":                 _SERVER_REDIS_URL,
-        "REID_THRESHOLD":                   _REID_THRESHOLD,
         "GRACE_SECONDS":                    _GRACE_SECONDS,
-        "MAX_SPEED_MPS":                    _MAX_SPEED_MPS,
         "POSITION_WEIGHT_AREA":             _POSITION_WEIGHT_AREA,
         "POSITION_WEIGHT_CONF":             _POSITION_WEIGHT_CONF,
         "ORPHAN_SWEEP_INTERVAL_BATCHES":    _ORPHAN_SWEEP_INTERVAL_BATCHES,
         "EXPECTED_CAMERAS_REFRESH_BATCHES": _EXPECTED_CAMERAS_REFRESH_BATCHES,
+        "VOTE_DISTANCE_THRESHOLD_M":        _VOTE_DISTANCE_THRESHOLD_M,
+        "MIN_VOTE_RATE":                    _MIN_VOTE_RATE,
+        "MIN_VOTES":                        _MIN_VOTES,
+        "TEMPORAL_TOLERANCE_MS":            _TEMPORAL_TOLERANCE_MS,
+        "AMBIGUITY_MARGIN":                 _AMBIGUITY_MARGIN,
+        "REID_FALLBACK_THRESHOLD":          _REID_FALLBACK_THRESHOLD,
+        "MAX_EMBEDDINGS":                   _MAX_EMBEDDINGS,
     }
 
     try:

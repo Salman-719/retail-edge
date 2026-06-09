@@ -110,3 +110,48 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  observability-config:
+    name: Observability Config
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.4
+
+      - name: Install promtool
+        run: |
+          PROM_VERSION="2.51.0"
+          curl -sSL \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin \
+              prometheus-${PROM_VERSION}.linux-amd64/promtool
+          promtool --version
+
+      - name: Validate Prometheus rules and dashboards
+        run: |
+          promtool check rules monitoring/alert_rules.yml
+          promtool check rules monitoring/recording_rules.yml
+          for f in monitoring/grafana/provisioning/dashboards/*.json charts/retailvision/files/grafana/dashboards/*.json; do
+            jq empty "$f"
+          done
+
+      - name: Render Kubernetes manifests
+        run: |
+          helm lint charts/retailvision -f charts/retailvision/values.production.yaml
+          helm template retailvision charts/retailvision \
+            -f charts/retailvision/values.production.yaml \
+            --set global.imageRegistry=ghcr.io/example/retailvision \
+            --set ingress.appHost=app.example.com \
+            --set eep.grpcHost=eep.example.com \
+            --set monitoring.grafana.host=grafana.example.com \
+            --set mlflow.host=mlflow.example.com >/tmp/retailvision-rendered.yaml
+          kubectl kustomize infra/edge/base >/tmp/retailvision-edge-base.yaml
+          kubectl kustomize infra/edge/overlays/jetson >/tmp/retailvision-edge-jetson.yaml

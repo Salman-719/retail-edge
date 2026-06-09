@@ -14,6 +14,12 @@ import time
 import cv2
 import redis.asyncio as aioredis
 
+from services.iep1_ingestion.app.metrics import (
+    IEP1_ENCODE_ERRORS,
+    IEP1_FRAMES,
+    IEP1_FRAMES_DROPPED,
+    IEP1_PUBLISH_LATENCY,
+)
 from services.iep1_ingestion.app.window import WindowAccumulator
 
 logger = logging.getLogger(__name__)
@@ -34,12 +40,17 @@ def _write_to_tmpfs(camera_id: str, ts_ms: int, frame) -> str | None:
         ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
     )
     if not success or buf is None:
+        IEP1_ENCODE_ERRORS.labels(camera_id=camera_id).inc()
         logger.warning("Frame encode failed camera=%s ts=%d", camera_id, ts_ms)
         return None
     path = f"{TMPFS_ROOT}/{camera_id}/{ts_ms}.jpg"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as fh:
-        fh.write(buf.tobytes())
+    try:
+        with open(path, "wb") as fh:
+            fh.write(buf.tobytes())
+    except OSError:
+        IEP1_ENCODE_ERRORS.labels(camera_id=camera_id).inc()
+        raise
     return path
 
 
@@ -137,8 +148,10 @@ class CameraWorker:
         def _enqueue(q=self._frame_queue, it=item):
             try:
                 q.put_nowait(it)
+                IEP1_FRAMES.labels(camera_id=self._config.camera_id).inc()
             except asyncio.QueueFull:
                 self._frames_dropped += 1
+                IEP1_FRAMES_DROPPED.labels(camera_id=self._config.camera_id).inc()
                 if self._frames_dropped % 100 == 0:
                     logger.warning(
                         "camera=%s dropped %d frames (queue full)",
@@ -281,7 +294,8 @@ class CameraWorker:
         payload = self._manifest_to_dict(manifest)
         for attempt in range(3):
             try:
-                await self._xadd(payload)
+                with IEP1_PUBLISH_LATENCY.time():
+                    await self._xadd(payload)
                 return
             except Exception as exc:
                 logger.warning(

@@ -1,34 +1,74 @@
 global:
-  scrape_interval: 15s          # how often to pull every target
+  scrape_interval: 15s
 
 rule_files:
-  - alert_rules.yml             # RetailVision alerting rules
+  - alert_rules.yml
+  - recording_rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
-  - job_name: prometheus        # Prometheus scraping itself (sanity)
+  - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
 
-  - job_name: eep               # EEP FastAPI app (/metrics via instrumentator)
+  - job_name: eep
     static_configs:
       - targets: ["eep:8000"]
 
-  - job_name: iep3              # IEP3 reconciliation daemon (the "brain")
+  - job_name: iep1
+    static_configs:
+      - targets: ["iep1-daemon:9200"]
+
+  - job_name: iep2
+    static_configs:
+      - targets: ["iep2_vision:9201"]
+
+  - job_name: iep3
     static_configs:
       - targets: ["iep3_reconciliation:9300"]
 
-  - job_name: detector         # Detector service (RT-DETR-x prod / YOLO11n dev), Tier 2
+  - job_name: iep4
+    static_configs:
+      - targets: ["iep4_alerts:8004"]
+
+  - job_name: iep5
+    static_configs:
+      - targets: ["iep5_analytics:8005"]
+
+  - job_name: iep6
+    static_configs:
+      - targets: ["iep6_agent:8006"]
+
+  - job_name: live_bridge
+    static_configs:
+      - targets: ["live_bridge:8010"]
+
+  - job_name: detector
+    scrape_timeout: 10s
     static_configs:
       - targets: ["yolo-service:9400"]
 
-  - job_name: redis            # Redis via redis_exporter (zero-code stream metrics)
+  - job_name: reid
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["reid-service:9401"]
+
+  - job_name: redis
     static_configs:
       - targets: ["redis_exporter:9121"]
 
-  - job_name: postgres         # Postgres via postgres_exporter
+  - job_name: postgres
     static_configs:
       - targets: ["postgres_exporter:9187"]
 
-  - job_name: node             # Host CPU/RAM via node_exporter
+  - job_name: node
     static_configs:
       - targets: ["node_exporter:9100"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]

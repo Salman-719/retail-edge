@@ -17,6 +17,7 @@ from services.iep1_ingestion.app.grpc_generated import (
     iep1_control_pb2 as _pb2,
     iep1_control_pb2_grpc as _grpc,
 )
+from services.iep1_ingestion.app.metrics import IEP1_ACTIVE_CAMERAS
 from services.iep1_ingestion.app.worker import CameraWorker
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class _Iep1ControlServicer(_grpc.Iep1ControlServicer):
             worker = CameraWorker(request)
             await worker.start(self._redis)
             self._workers[camera_id] = worker
+            IEP1_ACTIVE_CAMERAS.set(len(self._workers))
             logger.info("AddCamera camera=%s", camera_id)
             return _pb2.AddCameraResponse(success=True)
         except Exception as exc:
@@ -60,6 +62,7 @@ class _Iep1ControlServicer(_grpc.Iep1ControlServicer):
         if worker is None:
             return _pb2.RemoveCameraResponse(success=False)
         await worker.stop()
+        IEP1_ACTIVE_CAMERAS.set(len(self._workers))
         logger.info("RemoveCamera camera=%s", camera_id)
         return _pb2.RemoveCameraResponse(success=True)
 
@@ -110,6 +113,7 @@ async def run_daemon() -> None:
         # stop all active workers gracefully
         for worker in list(servicer._workers.values()):
             await worker.stop()
+        IEP1_ACTIVE_CAMERAS.set(0)
         await redis_client.aclose()
         await health_server.stop(grace=2)
         logger.info("IEP1 daemon stopped")

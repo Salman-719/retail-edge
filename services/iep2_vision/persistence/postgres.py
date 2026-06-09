@@ -89,13 +89,14 @@ class PostgresPersistence:
         self,
         records: list[dict],
     ) -> None:
-        """UPSERT appearance centroids for all active local_ids at batch close.
+        """UPSERT the appearance embedding store for all active local_ids at batch close.
 
         records: list of dicts with keys:
             local_id (str UUID), camera_id (str), store_id (str UUID),
-            centroid (bytes), updated_at_batch (int)
-        UPSERT on local_id primary key — one row per local_id, always the latest centroid.
-        Safe to call with an empty list — returns immediately.
+            embeddings (bytes), embedding_count (int), quality_scores (bytes),
+            updated_at_batch (int)
+        UPSERT on local_id primary key — one row per local_id, always the latest
+        top-quality embedding heap. Safe to call with an empty list.
         """
         if not records:
             return
@@ -104,10 +105,14 @@ class PostgresPersistence:
             await conn.executemany(
                 """
                 INSERT INTO local_centroids
-                    (local_id, camera_id, store_id, centroid, updated_at_batch, updated_at)
-                VALUES ($1::uuid, $2, $3::uuid, $4, $5, now())
+                    (local_id, camera_id, store_id,
+                     embeddings, embedding_count, quality_scores,
+                     updated_at_batch, updated_at)
+                VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, now())
                 ON CONFLICT (local_id) DO UPDATE
-                    SET centroid         = EXCLUDED.centroid,
+                    SET embeddings       = EXCLUDED.embeddings,
+                        embedding_count  = EXCLUDED.embedding_count,
+                        quality_scores   = EXCLUDED.quality_scores,
                         updated_at_batch = EXCLUDED.updated_at_batch,
                         updated_at       = now()
                 """,
@@ -116,12 +121,36 @@ class PostgresPersistence:
                         r["local_id"],
                         r["camera_id"],
                         r["store_id"],
-                        r["centroid"],
+                        r["embeddings"],
+                        r["embedding_count"],
+                        r["quality_scores"],
                         r["updated_at_batch"],
                     )
                     for r in records
                 ],
             )
+
+    async def load_local_embeddings(
+        self,
+        local_id,
+    ) -> tuple[bytes, int, bytes] | None:
+        """Load a persisted embedding heap for restart / post-TTL recovery.
+
+        Returns (embeddings_bytes, embedding_count, quality_scores_bytes) or None
+        when no row exists. `local_id` is a uuid.UUID.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT embeddings, embedding_count, quality_scores
+                FROM local_centroids
+                WHERE local_id = $1
+                """,
+                local_id,
+            )
+        if row is None or not row["embedding_count"]:
+            return None
+        return (bytes(row["embeddings"]), int(row["embedding_count"]), bytes(row["quality_scores"]))
 
     async def insert_detection(
         self,

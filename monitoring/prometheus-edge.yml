@@ -1,0 +1,75 @@
+# Edge Prometheus — runs on each Jetson edge device, managed by k3s.
+# Scrapes IEP1 (daemon, static), yolo_service and reid_service (static),
+# and IEP2 pods dynamically via kubernetes_sd_configs.
+#
+# NOT publicly exposed: deployed as a ClusterIP-only k3s Service.
+# Cloud Prometheus federates from this instance via VPN.
+
+global:
+  scrape_interval: 15s
+  external_labels:
+    cluster: edge
+    # store_id is injected at deploy time via --set or ConfigMap patch.
+    store_id: "${STORE_ID}"
+
+rule_files:
+  - alert_rules.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ── Static edge services ──────────────────────────────────────────────────────
+  # IEP1 daemon: one per device, always on port 9200.
+  - job_name: iep1
+    static_configs:
+      - targets: ["iep1-daemon:9200"]
+
+  # YOLO inference service: one per device, always on port 9400.
+  - job_name: detector
+    static_configs:
+      - targets: ["yolo-service:9400"]
+
+  # ReID embedding service: one per device, always on port 9401.
+  - job_name: reid
+    static_configs:
+      - targets: ["reid-service:9401"]
+
+  # ── IEP2 pods (dynamic, k3s-managed) ─────────────────────────────────────────
+  # IEP2 is launched and terminated per camera by the Edge Agent via k3s.
+  # Pods are annotated with:
+  #   prometheus.io/scrape: "true"
+  #   prometheus.io/port:   "9201"
+  # This job picks up all such pods automatically without manual config changes.
+  - job_name: iep2
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: ["retailvision"]
+    relabel_configs:
+      # Only scrape pods that opt in via annotation
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      # Use the annotated port (9201) instead of the first container port
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        target_label: __address__
+        regex: (.+)
+        replacement: "${__meta_kubernetes_pod_ip}:${1}"
+      # Carry camera_id label from pod label for per-camera dashboards
+      - source_labels: [__meta_kubernetes_pod_label_camera_id]
+        target_label: camera_id
+      - source_labels: [__meta_kubernetes_pod_label_store_id]
+        target_label: store_id
+      # Use /metrics path (default)
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+
+  # ── Node metrics ──────────────────────────────────────────────────────────────
+  - job_name: node
+    static_configs:
+      - targets: ["localhost:9100"]

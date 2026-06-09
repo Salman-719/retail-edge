@@ -143,9 +143,19 @@ def _build_iep2_deployment(camera_id: str) -> k8s.V1Deployment:
             type="DirectoryOrCreate",
         ),
     )
+    cloud_ca_vol = k8s.V1Volume(
+        name="cloud-ca",
+        secret=k8s.V1SecretVolumeSource(
+            secret_name="edge-cloud-ca",
+            items=[k8s.V1KeyToPath(key="ca.crt", path="ca.crt")],
+        ),
+    )
     container = k8s.V1Container(
         name="iep2",
         image=IEP2_IMAGE,
+        ports=[
+            k8s.V1ContainerPort(name="metrics", container_port=9201),
+        ],
         env_from=[
             k8s.V1EnvFromSource(
                 config_map_ref=k8s.V1ConfigMapEnvSource(
@@ -160,6 +170,11 @@ def _build_iep2_deployment(camera_id: str) -> k8s.V1Deployment:
         volume_mounts=[
             k8s.V1VolumeMount(name="ipc-sockets", mount_path="/tmp/sockets"),
             k8s.V1VolumeMount(name="frame-store",  mount_path="/dev/shm/frames"),
+            k8s.V1VolumeMount(
+                name="cloud-ca",
+                mount_path="/etc/retailvision/certs",
+                read_only=True,
+            ),
         ],
         liveness_probe=k8s.V1Probe(
             _exec=k8s.V1ExecAction(
@@ -186,11 +201,15 @@ def _build_iep2_deployment(camera_id: str) -> k8s.V1Deployment:
             ),
             template=k8s.V1PodTemplateSpec(
                 metadata=k8s.V1ObjectMeta(
-                    labels={"app": "iep2", "camera-id": camera_id, "component": "iep2"}
+                    labels={"app": "iep2", "camera-id": camera_id, "component": "iep2"},
+                    annotations={
+                        "prometheus.io/scrape": "true",
+                        "prometheus.io/port": "9201",
+                    },
                 ),
                 spec=k8s.V1PodSpec(
                     containers=[container],
-                    volumes=[ipc_vol, frame_vol],
+                    volumes=[ipc_vol, frame_vol, cloud_ca_vol],
                 ),
             ),
         ),

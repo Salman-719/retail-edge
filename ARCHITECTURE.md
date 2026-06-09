@@ -73,23 +73,23 @@ IEP2  Vision         per camera: RT-DETR detect → BoTSORT → resnet50_msmt17 
    │                 → homography (pixel → floor coords) → tracking_history
    │                 → publish batch_complete
    ▼
-IEP3  Reconciliation cross-camera: cosine ReID match → global identities
+IEP3  Reconciliation cross-camera: spatial voting + ReID fallback → global identities
    │                 → canonical per-person floor trajectory
    ▼
 IEP4/5/6             alerts (IEP4) · end-of-shift analytics (IEP5) · AI agent (IEP6, NL queries)
 ```
 
-> **Observability + MLOps:** Prometheus + Grafana + exporters scrape the cloud
-> services; MLflow provides experiment tracking + a model registry (artifacts in
-> S3). PostgreSQL is **TimescaleDB** (hypertables power the IEP5 analytics rollups).
-> See `docs/PROMETHEUS_GRAFANA_GUIDE.md`, `docs/MLFLOW_GUIDE.md`,
-> `docs/MLOPS_PIPELINE.md`.
+> **Observability + MLOps:** Prometheus, Alertmanager, Grafana, and exporters
+> watch the cloud services; edge services expose metrics ports for local scrape
+> or future federation. MLflow provides experiment tracking + a model registry
+> with artifacts in S3. PostgreSQL is **TimescaleDB** (hypertables power the
+> IEP5 analytics rollups). See `docs/observability.md` and `mlops/README.md`.
 
 | Stage | Where it runs | Cardinality | Responsibility |
 |---|---|---|---|
 | **IEP1 — Ingestion** | Edge | 1 daemon per device (all cameras) | Pull RTSP/video, sample at `target_fps`, write JPEG frames to tmpfs, emit a 60 s **window manifest** to edge-local Redis. |
 | **IEP2 — Vision** | Edge | 1 deployment **per camera** | Read the manifest, run **RT-DETR** person detection → **BoTSORT** in-frame tracking (ReID off) → **resnet50_msmt17** ReID embeddings → **homography** projection to floor coordinates. Writes `tracking_history`, publishes `batch_complete`. |
-| **IEP3 — Reconciliation** | Cloud | 1 per store | The brain. Consumes every camera's `batch_complete`, waits for all cameras in a window, then **cosine-matches embeddings across cameras** to merge local tracks into **global identities** and picks one canonical floor position per person per timestamp. Manages identity state (ACTIVE → LOST → EXITED). |
+| **IEP3 — Reconciliation** | Cloud | 1 per store | The brain. Consumes every camera's `batch_complete`, waits for all cameras in a window, then uses camera-overlap spatial voting plus ReID appearance fallback to merge local tracks into **global identities** and pick one canonical floor position per person per timestamp. Manages identity state (ACTIVE → LOST → EXITED). |
 | **IEP4 — Alerts** | Cloud | 1 per store (provisioned by EEP) | Rule/threshold alerts (queue buildup, staff zone/employee) with cooldown + SMTP delivery. See `docs/services/IEP4_ALERTS.md`. |
 | **IEP5 — Analytics** | Cloud | 1 Job per (store, shift) | End-of-shift aggregation of global trajectories (visits, dwell, occupancy, heatmaps) into TimescaleDB rollups. See `docs/services/IEP5_ANALYTICS.md`. |
 | **IEP6 — Agent** | Cloud | 1 | Natural-language analytics agent (OpenAI) over the data. See `docs/services/IEP6_AGENT.md`. |
@@ -102,7 +102,8 @@ IEP4/5/6             alerts (IEP4) · end-of-shift analytics (IEP5) · AI agent 
 - **`local_id`** — a stable identity *within one camera*, minted by IEP2 using an
   atomic Redis counter. Survives across batches and IEP2 restarts.
 - **`global_id`** — a *cross-camera* identity created/maintained by IEP3 by
-  linking together one or more `local_id`s that ReID believes are the same person.
+  linking together one or more `local_id`s that agree spatially in the shared
+  floor plane, with ReID used as the appearance fallback for ambiguous matches.
 - **Homography** — a per-camera calibration matrix mapping image pixels to a
   shared store floor plane (`floor_x`, `floor_y`). Until a camera is calibrated,
   floor coordinates and zone assignment are `NULL`.
@@ -118,6 +119,8 @@ CLOUD (Amazon EKS)
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Ingress NLB(EIP) → ingress-nginx → React Frontend → /api → EEP      │
 │  gRPC NLB(EIP) :50051 → eep-grpc Service → EEP pod TLS/mTLS          │
+│  Internal NLBs :5432/:6380 → Postgres/Redis (WireGuard only)          │
+│  WireGuard gateway(EIP) → private VPC data-plane route                │
 │                                                                        │
 │  Stable on-demand node pool (tainted workload=stable)                 │
 │    TimescaleDB/Postgres · Redis · Prometheus · Grafana · MLflow       │
@@ -128,7 +131,7 @@ CLOUD (Amazon EKS)
 │                                                                        │
 │  S3 objects + MLflow artifacts · AWS Secrets Manager · gp3 PVCs       │
 └──────────────────────┬─────────────────────────────────────────────────┘
-                       │ gRPC TLS :50051  (edge dials OUT; stream stays open)
+                       │ gRPC TLS :50051 + WireGuard private data route
 ┌──────────────────────▼─────────────────────────────────────────────────┐
 │  EDGE DEVICE (k3s / Jetson)                                            │
 │                                                                        │
@@ -143,7 +146,7 @@ CLOUD (Amazon EKS)
 │    INSERT tracking_history → XADD stream:iep2:batch_complete           │
 │                                                                        │
 │  YOLO service + ReID service (GPU, ZMQ unix-socket IPC)               │
-│  Edge-local Redis (loopback-only, ephemeral)                           │
+│  Edge-local Redis Service (k3s-only, ephemeral)                        │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -153,11 +156,11 @@ The system deliberately runs **two separate Redis instances**:
 
 | Redis | Location | Streams | Lifetime |
 |---|---|---|---|
-| **Edge-local** | `127.0.0.1:6379` on the edge device | `stream:iep1:{camera_id}` (IEP1 → IEP2), `iep2:id_counter:{camera_id}` | Ephemeral — bound to the store, loopback-only |
-| **Server** | `redis:6379` in the cloud | `stream:iep2:batch_complete` (IEP2 → IEP3), `stream:iep2:live:{cam}` (live view) | Persistent |
+| **Edge-local** | `redis-edge:6379` inside edge k3s | `stream:iep1:{camera_id}` (IEP1 → IEP2), `iep2:id_counter:{camera_id}` | Ephemeral — bound to the store and not externally exposed |
+| **Server** | `redis-server:6380` in EKS, plus an internal NLB reachable over WireGuard | `stream:iep2:batch_complete` (IEP2 → IEP3), `stream:iep2:live:{cam}` (live view) | Persistent |
 
 This keeps high-frequency frame traffic local to the device and only sends compact
-batch-complete signals across the WAN.
+tracking rows and batch-complete signals across the encrypted private tunnel.
 
 ### The inference micro-services (YOLO / ReID)
 
@@ -250,7 +253,7 @@ then calibrates homography per camera.
 | Table | Key columns |
 |---|---|
 | `tracking_history` | `camera_id`, `local_id`, `timestamp_ms`, `floor_x/y`, `zone_id`, `bbox_confidence`, `bbox_area` |
-| `local_centroids` | `local_id` PK, `store_id`, `centroid` (float32[2048] ReID embedding) |
+| `local_centroids` | `local_id` PK, `store_id`, packed top-quality ReID embeddings (`embeddings`, `embedding_count`, `quality_scores`) |
 | `camera_schedules` | active windows per camera config |
 | `edge_agents` | `store_id` UNIQUE, `status`, `last_heartbeat_at`, `agent_version` |
 | `camera_runtime_sessions` | start/stop bookkeeping per camera run |
@@ -261,7 +264,7 @@ then calibrates homography per camera.
 |---|---|
 | `global_identities` | `global_id` PK, `store_id`, `state` (active/lost/exited), first/last seen, last floor pos, entry/exit zone |
 | `global_local_mapping` | links `global_id` ↔ `local_id` ↔ `camera_id` (`is_active`) |
-| `global_embeddings` | `(global_id, camera_id)` PK, per-camera centroid |
+| `global_embeddings` | `(global_id, camera_id)` PK, packed per-camera global ReID gallery |
 | `global_tracking_history` | canonical per-person floor trajectory (`batch_number`, `timestamp_ms`, `floor_x/y`, `source_camera`, `selection_score`) |
 
 ---
@@ -304,7 +307,7 @@ retail-edge/
 ├── infra/
 │   ├── edge/base/                             # k3s edge manifests
 │   ├── pgbouncer/                             # PgBouncer config
-│   └── redis-local.conf                       # edge-local Redis (loopback)
+│   └── edge/base/redis-edge.yaml              # edge-local Redis Service
 ├── proto/                                     # agent.proto, iep1_control.proto
 ├── scripts/                                   # cert gen, edge bootstrap, proto gen
 ├── frontend/                                  # React 18 SPA (Vite)
