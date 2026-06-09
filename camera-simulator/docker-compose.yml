@@ -27,4 +27,4 @@ services:
       - ${STREAMS_FILE_HOST:-./streams.csv}:/config/streams.csv:ro
       - ./scripts/publish-streams.sh:/app/publish-streams.sh:ro
       - ./logs:/logs
-    command: ["/bin/sh", "/app/publish-streams.sh"]
+    entrypoint: ["/bin/sh", "/app/publish-streams.sh"]
