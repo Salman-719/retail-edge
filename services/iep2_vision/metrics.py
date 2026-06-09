@@ -13,7 +13,14 @@ and updates these on the per-frame hot path. main.py starts the server.
 """
 from __future__ import annotations
 
+import os
+
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+# Set at container startup from MODEL_VERSION env var (default "production").
+# A canary deployment sets MODEL_VERSION=canary so Prometheus automatically
+# separates production and canary time-series for ML-signal metrics.
+_MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
 
 # Total frames processed by this IEP2 instance. Rate == 0 means the pipeline
 # has stalled for this camera.
@@ -56,7 +63,7 @@ IEP2_DETECTIONS_PER_FRAME = Histogram(
 IEP2_DETECTION_CONFIDENCE = Histogram(
     "iep2_detection_confidence",
     "Confidence score of each YOLO person detection per camera (ML signal)",
-    ["camera_id"],
+    ["camera_id", "model_version"],
     buckets=[0.25, 0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0],
 )
 
@@ -67,7 +74,7 @@ IEP2_DETECTION_CONFIDENCE = Histogram(
 IEP2_TRACK_AGE = Histogram(
     "iep2_track_age_frames",
     "Number of frames a BoTSORT track survived before being dropped (ML signal)",
-    ["camera_id"],
+    ["camera_id", "model_version"],
     buckets=[1, 2, 3, 5, 10, 20, 50, 100, 200],
 )
 

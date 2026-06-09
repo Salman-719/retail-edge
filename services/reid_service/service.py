@@ -45,6 +45,13 @@ EMBEDDING_DIM     = 2048
 
 # ── Prometheus metrics ────────────────────────────────────────────────────────
 # Scraped on :9401, job "reid".
+#
+# model_version label: set at container startup from MODEL_VERSION env var
+# (default "production"). Only metrics that reflect model output quality carry
+# this label; pipeline throughput/health metrics (crops, errors, batch_size)
+# do not — they measure the serving infrastructure, not the model itself.
+
+_MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
 
 REID_CROPS = Counter(
     "reid_crops_processed_total",
@@ -57,6 +64,7 @@ REID_ERRORS = Counter(
 REID_INFERENCE = Histogram(
     "reid_inference_seconds",
     "Wall-clock time for one TRT ReID batch inference call",
+    ["model_version"],
     buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
 )
 REID_BATCH_SIZE = Histogram(
@@ -71,6 +79,7 @@ REID_BATCH_SIZE = Histogram(
 REID_EMBEDDING_NORM = Histogram(
     "reid_embedding_norm",
     "L2 norm of raw ResNet50 embeddings before normalisation (2048-dim)",
+    ["model_version"],
     buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0],
 )
 
@@ -190,7 +199,7 @@ def _infer_and_pack(engine, batch_items: list[dict]) -> list[dict]:
 
     t0 = time.monotonic()
     embeddings = _infer_batch(engine, batch)          # [B, 2048] fp32
-    REID_INFERENCE.observe(time.monotonic() - t0)
+    REID_INFERENCE.labels(model_version=_MODEL_VERSION).observe(time.monotonic() - t0)
     REID_BATCH_SIZE.observe(len(batch_items))
     REID_CROPS.inc(len(batch_items))
 
@@ -199,7 +208,7 @@ def _infer_and_pack(engine, batch_items: list[dict]) -> list[dict]:
         # R6: assert dimension is correct.
         assert emb.shape == (EMBEDDING_DIM,), f"Expected ({EMBEDDING_DIM},), got {emb.shape}"
         # ML signal: record raw norm before L2 normalisation.
-        REID_EMBEDDING_NORM.observe(float(np.linalg.norm(emb)))
+        REID_EMBEDDING_NORM.labels(model_version=_MODEL_VERSION).observe(float(np.linalg.norm(emb)))
         emb = _l2_normalize(emb)                      # R5
         responses.append({
             "request_id":   item["request_id"],

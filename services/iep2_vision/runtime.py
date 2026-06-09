@@ -39,6 +39,7 @@ from services.iep2_vision.metrics import (
     IEP2_IDENTITY_SWITCHES,
     IEP2_TRACK_AGE,
     IEP2_TRACKS_ACTIVE,
+    _MODEL_VERSION,
 )
 
 try:
@@ -378,7 +379,7 @@ class IEP2Runtime:
                 IEP2_FRAME_LATENCY.labels(camera_id=cam).observe(time.monotonic() - _t0)
                 IEP2_DETECTIONS_PER_FRAME.labels(camera_id=cam).observe(len(detections))
                 for det in detections:
-                    IEP2_DETECTION_CONFIDENCE.labels(camera_id=cam).observe(
+                    IEP2_DETECTION_CONFIDENCE.labels(camera_id=cam, model_version=_MODEL_VERSION).observe(
                         float(det.get("confidence", det.get("conf", 0.0)))
                     )
 
@@ -387,7 +388,7 @@ class IEP2Runtime:
                 for tid in list(_track_birth):
                     if tid not in active_ids:
                         age = frame_index - _track_birth.pop(tid)
-                        IEP2_TRACK_AGE.labels(camera_id=cam).observe(age)
+                        IEP2_TRACK_AGE.labels(camera_id=cam, model_version=_MODEL_VERSION).observe(age)
                 for t in enriched:
                     _track_birth.setdefault(t["track_id"], frame_index)
                 IEP2_TRACKS_ACTIVE.labels(camera_id=cam).set(len(active_ids))
@@ -535,7 +536,7 @@ class IEP2Runtime:
                     for tid in list(_track_birth):
                         if tid not in active_ids:
                             age = frame_index - _track_birth.pop(tid)
-                            IEP2_TRACK_AGE.labels(camera_id=cam).observe(age)
+                            IEP2_TRACK_AGE.labels(camera_id=cam, model_version=_MODEL_VERSION).observe(age)
                     for t in enriched:
                         if t["track_id"] in seen_ids and t["track_id"] not in _track_birth:
                             IEP2_IDENTITY_SWITCHES.labels(camera_id=cam).inc()

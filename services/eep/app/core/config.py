@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     # Explicit false default — never rely on absence of this var.
     DEBUG_MODE: bool = False
 
+    # ── Canary traffic splitting ──────────────────────────────────────────────
+    # Integer 0-100.  0 = canary completely off (default, production-safe).
+    # At N > 0, N% of requests are tagged model_version=canary; the rest get
+    # model_version=production.  When 0 the middleware is unconditionally inert.
+    CANARY_PERCENTAGE: int = Field(default=0, ge=0, le=100)
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

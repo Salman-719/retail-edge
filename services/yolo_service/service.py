@@ -47,6 +47,15 @@ BATCH_TIMEOUT_MS      = float(os.environ.get("YOLO_BATCH_TIMEOUT_MS", "20"))
 
 # ── Prometheus metrics ────────────────────────────────────────────────────────
 # Scraped on :9400, job "detector" — port already declared in docker-compose expose.
+#
+# model_version label: set at container startup from MODEL_VERSION env var
+# (default "production").  A canary deployment sets MODEL_VERSION=canary so
+# Prometheus automatically separates production and canary time-series.
+# Only metrics that reflect model output quality carry this label; pipeline
+# throughput/health metrics (frames, errors, batch_size) do not — they measure
+# the serving infrastructure, not the model itself.
+
+_MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
 
 DETECTOR_FRAMES = Counter(
     "detector_frames_total",
@@ -55,6 +64,7 @@ DETECTOR_FRAMES = Counter(
 DETECTOR_DETECTIONS = Counter(
     "detector_detections_total",
     "Person detections returned across all batches",
+    ["model_version"],
 )
 DETECTOR_ERRORS = Counter(
     "detector_errors_total",
@@ -63,6 +73,7 @@ DETECTOR_ERRORS = Counter(
 DETECTOR_INFERENCE = Histogram(
     "detector_inference_seconds",
     "Wall-clock time for one TRT batch inference call",
+    ["model_version"],
     buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
 )
 DETECTOR_BATCH_SIZE = Histogram(
@@ -75,12 +86,14 @@ DETECTOR_BATCH_SIZE = Histogram(
 DETECTOR_CONFIDENCE = Histogram(
     "detector_detection_confidence",
     "Confidence score of each accepted person detection (class 0)",
+    ["model_version"],
     buckets=[0.25, 0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0],
 )
 # ML signal: mean confidence of the last batch as a simple time-series line.
 DETECTOR_CONF_MEAN = Gauge(
     "detector_inference_confidence_mean",
     "Mean confidence of all person detections in the most recent inference batch",
+    ["model_version"],
 )
 
 # ── Per-camera result sockets ─────────────────────────────────────────────────
@@ -152,7 +165,7 @@ def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
         conf=YOLO_CONF_THRESHOLD,
         iou=YOLO_IOU_THRESHOLD,
     )
-    DETECTOR_INFERENCE.observe(time.monotonic() - t0)
+    DETECTOR_INFERENCE.labels(model_version=_MODEL_VERSION).observe(time.monotonic() - t0)
     DETECTOR_BATCH_SIZE.observe(len(batch_items))
     DETECTOR_FRAMES.inc(len(batch_items))
 
@@ -172,9 +185,9 @@ def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
                     "bbox_xyxy":  [float(x) for x in xyxy],
                     "confidence": float(conf),
                 })
-                DETECTOR_CONFIDENCE.observe(float(conf))
+                DETECTOR_CONFIDENCE.labels(model_version=_MODEL_VERSION).observe(float(conf))
                 all_confs.append(float(conf))
-        DETECTOR_DETECTIONS.inc(len(detections))
+        DETECTOR_DETECTIONS.labels(model_version=_MODEL_VERSION).inc(len(detections))
         responses.append({
             "request_id":   item["request_id"],
             "camera_id":    item["camera_id"],
@@ -183,7 +196,7 @@ def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
         })
 
     if all_confs:
-        DETECTOR_CONF_MEAN.set(sum(all_confs) / len(all_confs))
+        DETECTOR_CONF_MEAN.labels(model_version=_MODEL_VERSION).set(sum(all_confs) / len(all_confs))
 
     return responses
 

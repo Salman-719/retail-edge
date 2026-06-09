@@ -137,6 +137,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Canary traffic-splitting middleware — inert when CANARY_PERCENTAGE=0.
+# Must be added after CORS so it runs on already-decoded requests.
+from app.core.canary import CanaryMiddleware
+from app.core.config import settings as _settings
+app.add_middleware(CanaryMiddleware, canary_percentage=_settings.CANARY_PERCENTAGE)
+
 
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError):
