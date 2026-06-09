@@ -94,7 +94,7 @@ CREATE TABLE audit_logs (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     store_id     UUID REFERENCES stores(id) ON DELETE SET NULL,
     user_id      UUID REFERENCES users(id) ON DELETE SET NULL,
-    action       VARCHAR(50) NOT NULL,
+    action       VARCHAR(50) NOT NULL,  -- validated in app: app/core/audit_actions.py (AUDIT_ACTIONS)
     entity_type  VARCHAR(50),
     entity_id    UUID,
     before_state JSONB,
@@ -366,6 +366,9 @@ CREATE TABLE shift_instances (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT scheduled_end_after_start CHECK (scheduled_end > scheduled_start)
 );
+
+-- alert_configs retired (D5): per-rule config lives in alert_rules; the old
+-- store-wide defaults now live in app/core/alert_defaults.py (RULE_DEFAULTS).
 
 CREATE TABLE alerts (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -652,16 +655,17 @@ CREATE INDEX IF NOT EXISTS idx_tracking_history_store_ts
     ON tracking_history(store_id, timestamp_ms);
 
 
-CREATE TABLE IF NOT EXISTS camera_schedules (
-    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    camera_config_id UUID        NOT NULL REFERENCES camera_configs(id) ON DELETE CASCADE,
-    days_of_week     INTEGER[]   NOT NULL,
-    start_time       TIME        NOT NULL,
-    end_time         TIME        NOT NULL,
-    is_active        BOOLEAN     NOT NULL DEFAULT true,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+-- Store operating hours — the master clock (C2). Per weekday (0=Mon..6=Sun);
+-- cameras of the store's ACTIVE config version inherit these hours. Overnight
+-- windows wrap when close_time <= open_time. Replaces per-camera camera_schedules.
+CREATE TABLE IF NOT EXISTS store_operating_hours (
+    store_id    UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    day_of_week SMALLINT    NOT NULL CHECK (day_of_week >= 0 AND day_of_week <= 6),
+    is_open     BOOLEAN     NOT NULL DEFAULT FALSE,
+    open_time   TIME,
+    close_time  TIME,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (store_id, day_of_week)
 );
 
 
@@ -756,9 +760,10 @@ CREATE INDEX IF NOT EXISTS idx_crs_physical_open
 --    Written by IEP2 after each batch; read by IEP3 for cross-camera matching.
 --    local_id is the same UUID derived by uuid.UUID(int=local_id) in IEP2.
 --    embeddings holds up to MAX_EMBEDDINGS (10) raw float32[2048] vectors
---    concatenated as BYTEA. embedding_count says how many vectors are present.
---    quality_scores holds one float32 per embedding. Representative centroids
---    are computed on demand and never stored.
+--    concatenated (8192 bytes each); embedding_count is how many are present;
+--    quality_scores holds one float32 per embedding (4 bytes each). See
+--    migration 0013_embedding_store. Representative centroid is recomputed on
+--    demand, never stored.
 CREATE TABLE IF NOT EXISTS local_centroids (
     local_id         UUID        PRIMARY KEY,
     camera_id        TEXT        NOT NULL,
@@ -791,6 +796,9 @@ CREATE TABLE IF NOT EXISTS global_identities (
     lost_since_ts  BIGINT,
     entry_zone_id  UUID             REFERENCES zones(id) ON DELETE SET NULL,
     exit_zone_id   UUID             REFERENCES zones(id) ON DELETE SET NULL,
+    -- Employee linking (specs/employee-linking). is_employee is read by IEP4's
+    -- GET_DELTA; employee_id is the specific punch-in link. Both set by the EEP
+    -- punch_resolver. (Migration 0013 mirrors this for existing databases.)
     is_employee    BOOLEAN          NOT NULL DEFAULT FALSE,
     employee_id    UUID             REFERENCES employees(id) ON DELETE SET NULL
 );
@@ -805,6 +813,54 @@ CREATE INDEX IF NOT EXISTS idx_global_identities_employee
 CREATE INDEX IF NOT EXISTS idx_global_identities_lost
     ON global_identities(state, lost_since_ts)
     WHERE state = 'lost';
+
+-- ── Employee linking (specs/employee-linking) ────────────────────────────────
+-- Defined here (after global_identities) because punch_events FK-references it.
+-- Migration 0013 mirrors these for existing databases.
+
+-- punch_in_stations — one per config version: the camera that sees the punch
+-- machine and the machine's floor position (world metres) + match radius.
+CREATE TABLE IF NOT EXISTS punch_in_stations (
+    id               UUID             PRIMARY KEY DEFAULT gen_random_uuid(),
+    version_id       UUID             NOT NULL
+                     REFERENCES store_config_versions(id) ON DELETE CASCADE,
+    store_id         UUID             NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    camera_config_id UUID             NOT NULL
+                     REFERENCES camera_configs(id) ON DELETE CASCADE,
+    world_x          DOUBLE PRECISION NOT NULL,
+    world_y          DOUBLE PRECISION NOT NULL,
+    radius_m         DOUBLE PRECISION NOT NULL DEFAULT 1.5,
+    created_at       TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    CONSTRAINT uq_punch_station_per_version UNIQUE (version_id),
+    CONSTRAINT positive_radius CHECK (radius_m > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_punch_stations_version
+    ON punch_in_stations(version_id);
+
+-- punch_events — ingested punch-in records; resolved by the EEP punch_resolver.
+CREATE TABLE IF NOT EXISTS punch_events (
+    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    employee_id      UUID        NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    punched_at_ms    BIGINT      NOT NULL,
+    source           VARCHAR(20) NOT NULL DEFAULT 'device'
+                     CHECK (source IN ('device', 'simulated')),
+    status           VARCHAR(20) NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending', 'linked', 'unmatched', 'expired')),
+    linked_global_id UUID        REFERENCES global_identities(global_id) ON DELETE SET NULL,
+    match_distance_m DOUBLE PRECISION,
+    attempts         INTEGER     NOT NULL DEFAULT 0,
+    last_attempt_at  TIMESTAMPTZ,
+    resolved_at      TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_punch_events_pending
+    ON punch_events(store_id, punched_at_ms) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_punch_events_employee
+    ON punch_events(employee_id, punched_at_ms DESC);
 
 -- 5. global_local_mapping — maps per-camera LocalIDs to GlobalIDs.
 --    All timestamps are epoch ms. Partial unique index enforces one active
@@ -832,8 +888,10 @@ CREATE INDEX IF NOT EXISTS idx_glm_global_active
     ON global_local_mapping(global_id, is_active);
 
 -- 6. global_embeddings — per-camera appearance embedding store per GlobalID.
---    Same packed layout as local_centroids. IEP3 merges matched local heaps into
---    this table after each reconciliation batch.
+--    Same packed layout as local_centroids: up to MAX_EMBEDDINGS (10) raw
+--    float32[2048] vectors (8192 bytes each) in embeddings, embedding_count of
+--    them, and one float32 quality score each in quality_scores. Merged from the
+--    matched local_centroids heaps by IEP3 (Stage 8). See migration 0013.
 CREATE TABLE IF NOT EXISTS global_embeddings (
     global_id       UUID     NOT NULL
                     REFERENCES global_identities(global_id) ON DELETE CASCADE,
@@ -916,45 +974,3 @@ ALTER TABLE calibrations
 ALTER TABLE calibrations
     ADD CONSTRAINT calibrations_method_check
     CHECK (method IN ('homography', 'calibration_files', 'pnp', 'tps'));
-
--- ─── IEP6 agent (AI analytics agent) ────────────────────────────────────────
--- Stored insight reports and AI-detected alerts (see alembic 0013).
-CREATE TABLE IF NOT EXISTS agent_insights (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_id    UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    kind        VARCHAR(40) NOT NULL DEFAULT 'daily_summary',
-    title       TEXT NOT NULL,
-    body        TEXT NOT NULL,
-    metrics     JSONB,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_agent_insights_store_ts
-    ON agent_insights(store_id, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS agent_alerts (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_id     UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    kind         VARCHAR(40) NOT NULL,
-    severity     VARCHAR(10) NOT NULL DEFAULT 'info'
-                 CHECK (severity IN ('info', 'warning', 'critical')),
-    message      TEXT NOT NULL,
-    details      JSONB,
-    resolved_at  TIMESTAMPTZ,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_agent_alerts_store_ts
-    ON agent_alerts(store_id, created_at DESC);
-
--- ─── IEP3 debug trace (Redis-gated, optional) ───────────────────────────────
-CREATE SCHEMA IF NOT EXISTS debug;
-CREATE TABLE IF NOT EXISTS debug.recon_trace (
-    id           BIGSERIAL    PRIMARY KEY,
-    store_id     UUID         NOT NULL,
-    batch_number BIGINT       NOT NULL,
-    event_type   VARCHAR(20)  NOT NULL
-                 CHECK (event_type IN ('graph', 'spatial_vote', 'reid_fallback', 'selection')),
-    detail       JSONB,
-    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_recon_trace_store_batch
-    ON debug.recon_trace(store_id, batch_number);
