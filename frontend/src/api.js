@@ -167,6 +167,14 @@ export const getDevTracking = (cameraId, limit = 50, sinceTs = null) =>
 export const getDevIep3 = (storeId, limit = 50) =>
   api.get('/debug/dev/iep3', { params: { store_id: storeId, limit } }).then(r => r.data)
 
+export const getDevLocalGlobal = (storeId, limit = 500) =>
+  api.get('/debug/dev/iep3/local-global', { params: { store_id: storeId, limit } }).then(r => r.data)
+
+export const getDevReconTrace = (storeId, batchNumber = null, limit = 1000) =>
+  api.get('/debug/dev/iep3/trace', {
+    params: { store_id: storeId, limit, ...(batchNumber != null ? { batch_number: batchNumber } : {}) },
+  }).then(r => r.data)
+
 export const getDevGpuStatus = () =>
   api.get('/debug/dev/gpu-status').then(r => r.data)
 
@@ -279,6 +287,14 @@ export const projectPoint = (slug, configId, framePx, framePy) =>
 export const getCalibrations = (slug, configId) =>
   api.get(`/store/${slug}/draft/camera-configs/${configId}/calibrations`).then(r => r.data)
 
+// ─── Punch-in station (draft, employee-linking S2) ────────────────────────────
+
+export const getDraftPunchStation = (slug) =>
+  api.get(`/store/${slug}/draft/punch-station`).then(r => r.data)
+
+export const putDraftPunchStation = (slug, body) =>
+  api.put(`/store/${slug}/draft/punch-station`, body).then(r => r.data)
+
 // ─── Activation ───────────────────────────────────────────────────────────────
 
 export const activateDraft = (slug, body) =>
@@ -293,13 +309,24 @@ export const getSyncEvent = (slug, eventId) =>
 export const requestDraftDiscard = (slug) =>
   api.post(`/store/${slug}/members/draft-discard-request`).then(r => r.data)
 
-// ─── Live Monitoring ─────────────────────────────────────────────────────────
+// ─── Live Monitoring (F1/F2) ─────────────────────────────────────────────────
 
 export const getLiveOverview = (slug) =>
   api.get(`/store/${slug}/live/overview`).then(r => r.data)
 
 export const getCameraHealth = (slug) =>
   api.get(`/store/${slug}/cameras/health`).then(r => r.data)
+
+// ─── Store Setup (C1) ────────────────────────────────────────────────────────
+
+export const getOperatingHours = (slug) =>
+  api.get(`/store/${slug}/operating-hours`).then(r => r.data)
+
+export const putOperatingHours = (slug, body) =>
+  api.put(`/store/${slug}/operating-hours`, body).then(r => r.data)
+
+export const getActivePunchStation = (slug) =>
+  api.get(`/store/${slug}/punch-station`).then(r => r.data)
 
 export const getActiveAlerts = (slug) =>
   api.get(`/store/${slug}/alerts/active`).then(r => r.data)
@@ -310,17 +337,13 @@ export const resolveAlert = (slug, alertId) =>
 export const getAlertHistory = (slug, params) =>
   api.get(`/store/${slug}/alerts/history`, { params }).then(r => r.data)
 
-export const getAlertTimeseries = (slug, params) =>
-  api.get(`/store/${slug}/alerts/timeseries`, { params }).then(r => r.data)
+// ─── Alert rules (D3) ────────────────────────────────────────────────────────
 
 export const listAlertRules = (slug) =>
   api.get(`/store/${slug}/alert-rules`).then(r => r.data)
 
 export const getAlertRule = (slug, ruleId) =>
   api.get(`/store/${slug}/alert-rules/${ruleId}`).then(r => r.data)
-
-export const getAlertRuleDefaults = (slug) =>
-  api.get(`/store/${slug}/alert-rules/defaults`).then(r => r.data)
 
 export const createAlertRule = (slug, body) =>
   api.post(`/store/${slug}/alert-rules`, body).then(r => r.data)
@@ -329,7 +352,7 @@ export const updateAlertRule = (slug, ruleId, body) =>
   api.patch(`/store/${slug}/alert-rules/${ruleId}`, body).then(r => r.data)
 
 export const deleteAlertRule = (slug, ruleId) =>
-  api.delete(`/store/${slug}/alert-rules/${ruleId}`)
+  api.delete(`/store/${slug}/alert-rules/${ruleId}`).then(r => r.data)
 
 // ─── Analytics (E1/E3) ───────────────────────────────────────────────────────
 // All return the envelope { store_id, grain, from, to, rows } (heatmap: cells).
@@ -439,6 +462,12 @@ export const getSettings = (slug) =>
 
 export const patchSettings = (slug, body) =>
   api.patch(`/store/${slug}/settings`, body).then(r => r.data)
+
+export const getAlertRuleDefaults = (slug) =>
+  api.get(`/store/${slug}/alert-rules/defaults`).then(r => r.data)
+
+export const getAlertTimeseries = (slug, params) =>
+  api.get(`/store/${slug}/alerts/timeseries`, { params }).then(r => r.data)
 
 // ─── Audit (Phase 7+) ────────────────────────────────────────────────────────
 
