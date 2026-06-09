@@ -6,22 +6,6 @@ import {
 import api from '../api'
 import { usePageTitle } from '../components/PageMeta'
 
-// ─── Mock data ────────────────────────────────────────────────────────────────
-
-// MOCK: replace with GET /store/{slug}/agent/reports?type=daily
-const MOCK_DAILY_REPORTS = [
-  { id: 'd1', date: '2026-05-27', title: 'Daily Summary — May 27', body: 'Total visitors: 214. Peak hour: 14:00–15:00 (42 people). Checkout zone had the longest average dwell time at 4.2 min. 2 queue alerts triggered, both resolved within 5 minutes.' },
-  { id: 'd2', date: '2026-05-26', title: 'Daily Summary — May 26', body: 'Total visitors: 189. Quieter Monday — traffic 12% below weekly average. Entrance zone saw highest throughput. No alerts triggered.' },
-  { id: 'd3', date: '2026-05-25', title: 'Daily Summary — May 25', body: 'Total visitors: 301. Sunday peak — busiest day of the week. Overcrowding alert at 16:30 in Produce zone, lasted 8 minutes. Staff coverage adequate.' },
-  { id: 'd4', date: '2026-05-24', title: 'Daily Summary — May 24', body: 'Total visitors: 267. Saturday. Strong afternoon traffic 13:00–17:00. Checkout queue alerts ×3. Average resolution time: 3 min.' },
-]
-
-// MOCK: replace with GET /store/{slug}/agent/reports?type=weekly
-const MOCK_WEEKLY_REPORTS = [
-  { id: 'w1', date: '2026-05-19 – 2026-05-25', title: 'Weekly Summary — Week 21', body: 'Total weekly visitors: 1,482. Busiest day: Sunday (301). Slowest day: Monday (189). Zone with highest dwell time: Checkout (avg 4.1 min). 7 alerts total, avg resolution 4.2 min. Staff coverage score: 94%.' },
-  { id: 'w2', date: '2026-05-12 – 2026-05-18', title: 'Weekly Summary — Week 20', body: 'Total weekly visitors: 1,339. Down 6% vs prior week. Notable: CAM-03 offline Wednesday–Thursday, reduced coverage. Entrance zone throughput highest at 38% of total traffic.' },
-]
-
 // Fallback when the agent API is unreachable
 const FALLBACK_RESPONSE = "I'm currently unavailable. Please try again later."
 
@@ -62,12 +46,36 @@ function ReportModal({ report, onClose }) {
 
 // ─── Report panel ─────────────────────────────────────────────────────────────
 
-function ReportPanel() {
+function ReportPanel({ slug }) {
   const [tab, setTab] = useState('daily')
   const [viewing, setViewing] = useState(null)
-  const [demoBanner, setDemoBanner] = useState(true)
+  const [reports, setReports] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
-  const reports = tab === 'daily' ? MOCK_DAILY_REPORTS : MOCK_WEEKLY_REPORTS
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError('')
+    api.get(`/store/${slug}/agent/reports`, { params: { type: tab } })
+      .then(({ data }) => {
+        if (cancelled) return
+        setReports((data.reports || []).map(report => ({
+          ...report,
+          date: new Date(report.created_at).toLocaleString(),
+        })))
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setReports([])
+          setError('Reports are currently unavailable.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [slug, tab])
 
   return (
     <div className="flex flex-col h-full">
@@ -88,17 +96,13 @@ function ReportPanel() {
         ))}
       </div>
 
-      {/* Demo data banner */}
-      {demoBanner && (
-        <div className="bg-amber-50 border-b border-amber-200 text-amber-800 text-xs px-4 py-2 flex items-center justify-between shrink-0">
-          <span>Showing sample reports.</span>
-          <button onClick={() => setDemoBanner(false)} className="ml-3 text-amber-600 hover:text-amber-900 leading-none">✕</button>
-        </div>
-      )}
-
       {/* Report list */}
-      {/* MOCK: replace with GET /store/{slug}/agent/reports?type={tab} */}
       <div className="flex-1 overflow-y-auto divide-y divide-gray-100">
+        {loading && <p className="px-4 py-6 text-sm text-gray-500">Loading reports...</p>}
+        {!loading && error && <p className="px-4 py-6 text-sm text-red-600">{error}</p>}
+        {!loading && !error && reports.length === 0 && (
+          <p className="px-4 py-6 text-sm text-gray-500">No {tab} reports yet.</p>
+        )}
         {reports.map(r => (
           <div key={r.id} className="px-4 py-3 hover:bg-gray-50 transition-colors">
             <p className="text-sm font-medium text-gray-900 leading-snug">{r.title}</p>
@@ -317,7 +321,7 @@ export default function AIAgent() {
             <div className="px-4 pt-4 pb-2 shrink-0">
               <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Reports</h2>
             </div>
-            <ReportPanel />
+            <ReportPanel slug={slug} />
           </div>
 
           {/* Right: Chat — 70% */}

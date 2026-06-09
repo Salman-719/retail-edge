@@ -19,11 +19,17 @@ def start() -> None:
         args=[AsyncSessionLocal], id="daily_insights", replace_existing=True,
     )
     _scheduler.add_job(
+        insights.run_all_weekly_insights,
+        CronTrigger(day_of_week="mon", hour=settings.INSIGHTS_CRON_HOUR, minute=15),
+        args=[AsyncSessionLocal], id="weekly_insights", replace_existing=True,
+    )
+    _scheduler.add_job(
         insights.run_all_alerts, IntervalTrigger(seconds=settings.ALERT_POLL_INTERVAL_S),
         args=[AsyncSessionLocal], id="alert_poll", replace_existing=True,
     )
     _scheduler.start()
-    log.info("IEP6 scheduler started (insights @%02d:00 UTC, alerts every %ds)",
+    log.info("IEP6 scheduler started (daily @%02d:00 UTC, weekly Mon @%02d:15, alerts every %ds)",
+             settings.INSIGHTS_CRON_HOUR,
              settings.INSIGHTS_CRON_HOUR, settings.ALERT_POLL_INTERVAL_S)
 
 

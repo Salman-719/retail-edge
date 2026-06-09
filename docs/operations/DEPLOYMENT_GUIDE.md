@@ -359,13 +359,17 @@ Confirm observability/MLOps:
 ```bash
 kubectl -n retailvision get deploy prometheus grafana alertmanager mlflow
 kubectl -n retailvision get cm prometheus-config grafana-dashboards alertmanager-config
+kubectl -n retailvision get ingress grafana mlflow
+kubectl -n retailvision get certificate grafana-tls mlflow-tls
+kubectl -n retailvision get endpoints grafana mlflow iep6
 kubectl -n retailvision port-forward svc/prometheus 9090:9090 >/tmp/rv-prometheus.log 2>&1 &
 sleep 2
 curl -fsS "http://localhost:9090/-/ready"
 curl -fsS "http://localhost:9090/api/v1/rules" | jq '.data.groups | length'
+curl -fsS "http://localhost:9090/api/v1/query?query=up%7Bjob%3D%22iep6%22%7D" | jq '.data.result'
 ```
 **Expect:** all four deployments available, Prometheus ready, and a non-zero
-rules group count.
+rules group count. The IEP6 query should return value `1`.
 
 Grafana and MLflow URLs, when set in Helm:
 ```bash
@@ -377,6 +381,27 @@ Grafana password:
 kubectl -n retailvision get secret retailvision-secrets \
   -o jsonpath='{.data.grafana-admin-password}' | base64 -d; echo
 ```
+
+Check the public UIs:
+```bash
+curl -fsSI "https://grafana.$INGRESS_EIP.nip.io/login" | head -1
+curl -fsS "https://mlflow.$INGRESS_EIP.nip.io/health"
+```
+**Expect:** Grafana returns `HTTP/2 200` or `302`; MLflow returns `OK`.
+
+IEP6 is routed through the frontend nginx and now validates the same JWT plus
+store membership used by EEP. Confirm an unauthenticated request is rejected:
+```bash
+curl -sk -o /dev/null -w "%{http_code}\n" \
+  "https://$APP_HOST/api/store/example/agent/reports?type=daily"
+```
+**Expect:** `401`. The AI Assistant page uses the browser access token and reads
+persisted daily and weekly reports from `agent_insights`; it no longer displays
+sample reports. Weekly summaries run each Monday at 15 minutes past the configured
+daily insight hour.
+IEP6 stays at one replica while its scheduled insight/alert jobs run in-process.
+Do not enable its HPA unless `iep6.schedulerEnabled=false` and scheduling is
+moved to a separately managed worker.
 
 Run an MLOps smoke check from the repo root:
 ```bash
@@ -390,6 +415,13 @@ python mlops/run_promotion.py --model-name retailvision --dry-run
 ```
 `check_state.py` may warn if no model has been registered yet; that is normal on
 a fresh deployment.
+
+CI runs the same MLflow server image and smoke-tests `compare_shadow.py` plus
+the dry-run promotion orchestrator on pushes and pull requests targeting
+`deploy/aws-eks`, `development`, or `production`. Tagged releases still build
+and push the multi-architecture `mlflow` image through `build-images.yml`.
+Registry promotion remains an explicit operator action; it does not silently
+change a production detector image.
 
 ### A8. [LOCAL] Verify autoscaling
 

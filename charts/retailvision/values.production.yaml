@@ -41,9 +41,11 @@ frontend:
 
 iep6:
   hpa:
-    enabled: true
+    # IEP6 currently runs its report/alert scheduler in-process. Keep one
+    # scheduler-enabled replica to avoid duplicate scheduled writes.
+    enabled: false
     minReplicas: 1
-    maxReplicas: 4
+    maxReplicas: 1
 
 postgres:
   storage: 50Gi

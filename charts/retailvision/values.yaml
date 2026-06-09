@@ -25,7 +25,7 @@ database:
 
 eep:
   image:
-    tag: "1.2.0"
+    tag: "1.2.2"
   replicas: 2
   grpcPort: 50051
   httpPort: 8000
@@ -61,7 +61,7 @@ eep:
 
 iep3:
   image:
-    tag: "1.2.0"
+    tag: "1.2.2"
   matcher:
     voteDistanceThresholdM: "1.0"
     minVoteRate: "0.6"
@@ -89,15 +89,15 @@ iep3:
 # by the managers. Tags feed EEP's IEP4_IMAGE/IEP5_IMAGE env (see eep-deployment).
 iep4:
   image:
-    tag: "1.2.0"
+    tag: "1.2.2"
 iep5:
   image:
-    tag: "1.2.0"
+    tag: "1.2.2"
 
 frontend:
   enabled: true
   image:
-    tag: "1.2.0"
+    tag: "1.2.2"
   replicas: 2
   resources:
     requests:
@@ -116,11 +116,12 @@ frontend:
 iep6:
   enabled: true
   image:
-    tag: "1.2.0"
+    tag: "1.2.2"
   replicas: 1
   openaiModel: "gpt-4o-mini"
   enableRawSql: false      # guarded ad-hoc SELECT tool (off by default)
   enableEepActions: false  # state-changing actions via EEP (off = read-only)
+  schedulerEnabled: true   # in-process scheduler; keep one replica unless disabled
   resources:
     requests:
       cpu: "100m"
@@ -129,9 +130,9 @@ iep6:
       cpu: "500m"
       memory: "512Mi"
   hpa:
-    enabled: true
+    enabled: false
     minReplicas: 1
-    maxReplicas: 4
+    maxReplicas: 1
     targetCPUUtilizationPercentage: 70
 
 # In-cluster PostgreSQL (cheapest option). For managed RDS instead, set
@@ -219,7 +220,7 @@ monitoring:
 mlflow:
   enabled: false   # production overlay enables it
   image:
-    tag: "1.2.0"
+    tag: "1.2.2"
   host: ""          # e.g. mlflow.<INGRESS_EIP>.nip.io ; blank = no ingress (port-forward)
   artifactPrefix: "mlflow"   # S3 key prefix inside s3.bucket
   storage: 5Gi      # PVC for the SQLite backend store

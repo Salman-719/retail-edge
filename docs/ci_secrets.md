@@ -1,8 +1,9 @@
 # CI/CD Secrets Reference
 
-The current production path is EKS + Helm. CI is responsible for building GHCR
-images and optional offline MLOps checks; Terraform/Helm deployment is still run
-explicitly from the operator shell or CloudShell.
+The current production path is EKS + Helm. CI validates the Helm/observability
+configuration, builds and health-checks the MLflow server image, smoke-tests the
+offline promotion tools, and publishes tagged GHCR images. Terraform/Helm
+deployment is still run explicitly from the operator shell or CloudShell.
 
 ## Required For Image Publishing
 
@@ -20,6 +21,18 @@ ghcr.io/<owner>/retailvision/<service>:<tag>
 The production Helm chart pulls `eep`, `frontend`, `iep3`, `iep4`, `iep5`,
 `iep6`, and `mlflow`. These packages must be public or the cluster must be given
 an image pull secret.
+
+## MLOps CI/CD Boundary
+
+The normal CI workflow starts a local MLflow server and runs:
+
+- `mlops/compare_shadow.py --smoke`
+- `mlops/run_promotion.py --model-name retailvision --dry-run`
+
+The tagged-image workflow publishes
+`ghcr.io/<owner>/retailvision/mlflow:<tag>`. Production registry promotion is
+manual by design because changing an MLflow stage alone does not deploy a new
+detector or ReID runtime image.
 
 ## Optional MLOps Variables
 

@@ -56,6 +56,8 @@ spec:
               value: {{ .Values.iep6.enableRawSql | quote }}
             - name: ENABLE_EEP_ACTIONS
               value: {{ .Values.iep6.enableEepActions | quote }}
+            - name: ENABLE_SCHEDULER
+              value: {{ .Values.iep6.schedulerEnabled | quote }}
             - name: WINDOW_SECONDS
               value: {{ .Values.windowSeconds | quote }}
           resources: {{ toYaml .Values.iep6.resources | nindent 12 }}

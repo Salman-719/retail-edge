@@ -61,6 +61,12 @@ data:
       - job_name: eep
         static_configs:
           - targets: ["eep-http:{{ .Values.eep.httpPort }}"]
+      {{- if .Values.iep6.enabled }}
+      - job_name: iep6
+        metrics_path: /metrics/
+        static_configs:
+          - targets: ["iep6:8006"]
+      {{- end }}
       {{- if .Values.monitoring.exporters.redis.enabled }}
       - job_name: redis
         static_configs:

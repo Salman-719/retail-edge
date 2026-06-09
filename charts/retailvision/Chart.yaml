@@ -2,8 +2,8 @@ apiVersion: v2
 name: retailvision
 description: RetailVision — server-side retail analytics platform (EEP, IEP3 reconciliation, IEP4 alerts, IEP5 analytics, IEP6 agent, monitoring, MLflow)
 type: application
-version: 0.2.0
-appVersion: "1.2.0"
+version: 0.2.1
+appVersion: "1.2.2"
 kubeVersion: ">=1.26.0-0"
 keywords:
   - retailvision

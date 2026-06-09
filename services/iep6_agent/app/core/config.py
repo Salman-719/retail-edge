@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # ── Schedules ─────────────────────────────────────────────────────────────
     INSIGHTS_CRON_HOUR: int = 6        # daily insight report hour (UTC)
     ALERT_POLL_INTERVAL_S: int = 300   # proactive-alert poll cadence
+    ENABLE_SCHEDULER: bool = True      # keep one scheduler-enabled replica
 
     WINDOW_SECONDS: float = 60.0
     DEBUG_MODE: bool = False
