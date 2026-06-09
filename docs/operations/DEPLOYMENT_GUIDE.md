@@ -92,7 +92,10 @@ make cloud-eks-prereqs
 
 The script detects Linux `x86_64` vs `arm64` and installs the correct binaries for
 Terraform, Helm, and kubectl. It also installs basic packages like `jq`, `curl`,
-`git`, and `make` using `yum`, `dnf`, or `apt-get`. On macOS it uses Homebrew.
+`git`, and `make` using `yum`, `dnf`, or `apt-get`, and installs AWS CLI v2 when
+missing. It installs only missing commands. On Amazon Linux it preserves the
+preinstalled `curl-minimal` package instead of requesting conflicting full
+`curl`; never add `--allowerasing` for this setup. On macOS it uses Homebrew.
 
 Verify manually:
 
@@ -1252,6 +1255,7 @@ sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SE
 | Symptom | Cause | Fix |
 |---|---|---|
 | `aws ... InvalidClientTokenId` | profile region not enabled (opt-in) | `aws configure set region eu-west-1 --profile adsal` |
+| `dnf`/`yum` suggests `--allowerasing` because `curl` conflicts with `curl-minimal` | an older prerequisite script requested full `curl` on Amazon Linux | do not use `--allowerasing`; pull the latest branch and rerun `make cloud-eks-prereqs`, which preserves `curl-minimal` and installs only missing packages |
 | zsh `command not found: --flag` | multi-line paste mangled | paste **one line** at a time |
 | Terraform `aws-load-balancer-webhook-service ... no endpoints` | an older deployment installed add-ons in parallel before the controller webhook had endpoints | pull the latest branch and rerun `make cloud-eks-deploy`; it removes the failed release, installs the controller first, and gates every other add-on on a live webhook endpoint |
 | Terraform `AddressLimitExceeded` | the deployment needs five EIPs, but old or unrelated addresses consume the regional quota | stop; run the reset workflow below for old RetailVision resources, then release only confirmed-unused unrelated EIPs or request a quota increase |
