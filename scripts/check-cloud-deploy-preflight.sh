@@ -14,6 +14,7 @@ trap 'report_error "$LINENO" "$BASH_COMMAND"' ERR
 AWS_REGION="${AWS_REGION:-${REGION:-eu-west-1}}"
 ENVIRONMENT="${ENVIRONMENT:-production}"
 CLUSTER_NAME="retailvision-${ENVIRONMENT}"
+export AWS_PAGER=""
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 BUCKET="${BUCKET:-retailvision-prod-objects-${ACCOUNT_ID}}"
 
@@ -115,57 +116,13 @@ if aws sqs get-queue-url \
   conflict "SQS queue Karpenter-${CLUSTER_NAME} exists outside the active Terraform state."
 fi
 
-EIP_STATE_LIVE_COUNT=0
-while IFS= read -r eip_address; do
-  [[ -z "$eip_address" ]] && continue
-  eip_state="$(terraform -chdir=infra/aws state show -no-color "$eip_address" 2>/dev/null || true)"
-  allocation_id="$(awk '$1 == "id" && $2 == "=" && !found {print $3; found=1}' <<<"$eip_state")"
-  if [[ -n "$allocation_id" ]] &&
-    aws ec2 describe-addresses \
-      --region "$AWS_REGION" \
-      --allocation-ids "$allocation_id" \
-      >/dev/null 2>&1; then
-    EIP_STATE_LIVE_COUNT=$((EIP_STATE_LIVE_COUNT + 1))
-  fi
-done < <(grep -E '^aws_eip\.(ingress|grpc|wireguard)' <<<"$STATE" || true)
-
-EIP_REQUIRED=$((5 - EIP_STATE_LIVE_COUNT))
-((EIP_REQUIRED < 0)) && EIP_REQUIRED=0
-EIP_USED="$(aws ec2 describe-addresses --region "$AWS_REGION" --query 'length(Addresses)' --output text)"
-EIP_QUOTA="$(aws service-quotas get-service-quota \
-  --service-code ec2 \
-  --quota-code L-0263D0A3 \
-  --region "$AWS_REGION" \
-  --query 'Quota.Value' \
-  --output text 2>/dev/null || echo 5)"
-if [[ ! "$EIP_QUOTA" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-  EIP_QUOTA=5
-fi
-EIP_QUOTA="${EIP_QUOTA%.*}"
-EIP_AVAILABLE=$((EIP_QUOTA - EIP_USED))
-EIP_CAPACITY_ERROR=0
-
-if ((EIP_REQUIRED > EIP_AVAILABLE)); then
-  EIP_CAPACITY_ERROR=1
-  conflict "Elastic IP capacity is insufficient: quota=$EIP_QUOTA used=$EIP_USED available=$EIP_AVAILABLE required=$EIP_REQUIRED."
-fi
-
 if ((${#CONFLICTS[@]} > 0)); then
   echo
-  echo "ERROR: this is not a clean AWS account/state for a scratch deployment."
+  echo "ERROR: AWS and the active Terraform state disagree."
   echo "Terraform state and AWS contain different RetailVision resources:"
   for item in "${CONFLICTS[@]}"; do
     echo "  - $item"
   done
-  if ((EIP_CAPACITY_ERROR == 1)); then
-    echo
-    echo "Current regional Elastic IP allocations:"
-    # shellcheck disable=SC2016
-    aws ec2 describe-addresses \
-      --region "$AWS_REGION" \
-      --query 'Addresses[].{IP:PublicIp,AllocationId:AllocationId,AssociationId:AssociationId,Name:Tags[?Key==`Name`]|[0].Value}' \
-      --output table || true
-  fi
   echo
   echo "Do not rerun terraform apply yet."
   echo "For the approved wipe-and-redeploy path, run from the repo root:"
@@ -178,4 +135,3 @@ if ((${#CONFLICTS[@]} > 0)); then
 fi
 
 echo "AWS/Terraform preflight passed."
-echo "Elastic IP capacity: quota=$EIP_QUOTA used=$EIP_USED available=$EIP_AVAILABLE required=$EIP_REQUIRED"

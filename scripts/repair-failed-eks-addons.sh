@@ -4,6 +4,7 @@ set -euo pipefail
 AWS_REGION="${AWS_REGION:-${REGION:-eu-west-1}}"
 ENVIRONMENT="${ENVIRONMENT:-production}"
 CLUSTER_NAME="retailvision-${ENVIRONMENT}"
+export AWS_PAGER=""
 
 if ! aws eks describe-cluster \
   --name "$CLUSTER_NAME" \

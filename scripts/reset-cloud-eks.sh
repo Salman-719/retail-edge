@@ -4,6 +4,7 @@ set -euo pipefail
 AWS_REGION="${AWS_REGION:-${REGION:-eu-west-1}}"
 ENVIRONMENT="${ENVIRONMENT:-production}"
 CLUSTER_NAME="retailvision-${ENVIRONMENT}"
+export AWS_PAGER=""
 
 if [[ "${CONFIRM_RESET:-}" != "$CLUSTER_NAME" ]]; then
   echo "ERROR: this command permanently deletes the ${CLUSTER_NAME} cloud deployment." >&2

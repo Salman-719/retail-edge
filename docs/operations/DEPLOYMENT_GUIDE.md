@@ -199,8 +199,11 @@ The script:
   table, then writes an ignored `infra/aws/backend.tf`;
 - runs `terraform init`, `validate`, `plan`, and `apply`;
 - runs a mandatory AWS/state preflight before planning. It stops if an EKS
-  cluster, S3 bucket, IAM resources, secrets, KMS alias, log group, or required
-  EIPs exist outside the active remote state;
+  cluster, S3 bucket, IAM resources, secrets, KMS alias, or log group exists
+  outside the active remote state;
+- calculates EIP demand from the generated Terraform plan. A resumed deployment
+  with five existing state-owned EIPs requires zero new EIPs; a fresh deployment
+  requires five. It compares only planned creates against remaining quota;
 - removes Terraform-managed add-on Helm releases left in `failed` or
   `pending-*` state by an interrupted earlier apply;
 - installs the AWS Load Balancer Controller first and waits for both its
@@ -1257,6 +1260,7 @@ sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SE
 | `aws ... InvalidClientTokenId` | profile region not enabled (opt-in) | `aws configure set region eu-west-1 --profile adsal` |
 | `dnf`/`yum` suggests `--allowerasing` because `curl` conflicts with `curl-minimal` | an older prerequisite script requested full `curl` on Amazon Linux | do not use `--allowerasing`; pull the latest branch and rerun `make cloud-eks-prereqs`, which preserves `curl-minimal` and installs only missing packages |
 | `make cloud-eks-deploy` exits `141` immediately after `Success! The configuration is valid.` | an older preflight used early-closing shell pipelines under `pipefail`, so a successful producer received SIGPIPE | pull the latest branch and rerun `make cloud-eks-deploy`; the preflight no longer uses those pipelines and now prints the failing command and line for any real error |
+| EIP preflight reports `used=5 available=0 required=5`, while the table lists exactly the five `retailvision-production-*` EIPs | an older guard tried to infer planned EIPs by parsing state text | do not release or reset those EIPs; pull the latest branch and rerun. EIP demand is now read directly from the generated Terraform plan, so a partial resume correctly requires zero new addresses |
 | zsh `command not found: --flag` | multi-line paste mangled | paste **one line** at a time |
 | Terraform `aws-load-balancer-webhook-service ... no endpoints` | an older deployment installed add-ons in parallel before the controller webhook had endpoints | pull the latest branch and rerun `make cloud-eks-deploy`; it removes the failed release, installs the controller first, and gates every other add-on on a live webhook endpoint |
 | Terraform `AddressLimitExceeded` | the deployment needs five EIPs, but old or unrelated addresses consume the regional quota | stop; run the reset workflow below for old RetailVision resources, then release only confirmed-unused unrelated EIPs or request a quota increase |

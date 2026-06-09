@@ -67,6 +67,7 @@ done
 export AWS_REGION="${AWS_REGION:-${REGION:-eu-west-1}}"
 export REGION="$AWS_REGION"
 export OWNER="${OWNER:-salman-719}"
+export AWS_PAGER=""
 export AWS_SDK_LOAD_CONFIG="${AWS_SDK_LOAD_CONFIG:-1}"
 export AWS_EC2_METADATA_DISABLED="${AWS_EC2_METADATA_DISABLED:-true}"
 
@@ -187,7 +188,9 @@ bash scripts/repair-failed-eks-addons.sh
 pushd infra/aws >/dev/null
 terraform plan -out eks.tfplan
 
-PROTECTED_DELETIONS="$(terraform show -json eks.tfplan | jq -r '
+PLAN_JSON="$(terraform show -json eks.tfplan)"
+
+PROTECTED_DELETIONS="$(jq -r '
   .resource_changes[]? |
   select(
     .address == "module.eks.aws_eks_cluster.this[0]" or
@@ -199,7 +202,7 @@ PROTECTED_DELETIONS="$(terraform show -json eks.tfplan | jq -r '
   ) |
   select(.change.actions | index("delete")) |
   .address
-')"
+' <<<"$PLAN_JSON")"
 
 if [[ -n "$PROTECTED_DELETIONS" && "${ALLOW_CORE_REPLACEMENT:-0}" != "1" ]]; then
   echo
@@ -209,6 +212,42 @@ if [[ -n "$PROTECTED_DELETIONS" && "${ALLOW_CORE_REPLACEMENT:-0}" != "1" ]]; the
   done <<<"$PROTECTED_DELETIONS"
   echo "Normal deployment will not apply this plan." >&2
   echo "Use make cloud-eks-reset for an intentional rebuild." >&2
+  exit 1
+fi
+
+EIP_CREATES="$(jq '
+  [
+    .resource_changes[]? |
+    select(.type == "aws_eip") |
+    select(.change.actions | index("create"))
+  ] | length
+' <<<"$PLAN_JSON")"
+
+EIP_USED="$(aws ec2 describe-addresses \
+  --region "$AWS_REGION" \
+  --query 'length(Addresses)' \
+  --output text)"
+EIP_QUOTA="$(aws service-quotas get-service-quota \
+  --service-code ec2 \
+  --quota-code L-0263D0A3 \
+  --region "$AWS_REGION" \
+  --query 'Quota.Value' \
+  --output text 2>/dev/null || true)"
+if [[ ! "$EIP_QUOTA" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  EIP_QUOTA=5
+fi
+EIP_QUOTA="${EIP_QUOTA%.*}"
+EIP_AVAILABLE=$((EIP_QUOTA - EIP_USED))
+
+echo "Elastic IP plan check: quota=${EIP_QUOTA}, used=${EIP_USED}, available=${EIP_AVAILABLE}, planned creates=${EIP_CREATES}"
+if ((EIP_CREATES > EIP_AVAILABLE)); then
+  echo "ERROR: the Terraform plan creates ${EIP_CREATES} Elastic IPs, but only ${EIP_AVAILABLE} are available." >&2
+  echo "Current regional Elastic IP allocations:" >&2
+  # shellcheck disable=SC2016
+  aws ec2 describe-addresses \
+    --region "$AWS_REGION" \
+    --query 'Addresses[].{IP:PublicIp,AllocationId:AllocationId,AssociationId:AssociationId,Name:Tags[?Key==`Name`]|[0].Value}' \
+    --output table >&2 || true
   exit 1
 fi
 
