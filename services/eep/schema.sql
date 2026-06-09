@@ -94,16 +94,7 @@ CREATE TABLE audit_logs (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     store_id     UUID REFERENCES stores(id) ON DELETE SET NULL,
     user_id      UUID REFERENCES users(id) ON DELETE SET NULL,
-    action       VARCHAR(50) NOT NULL CHECK (action IN (
-                     'login', 'logout',
-                     'config_edited', 'version_activated', 'version_rolled_back',
-                     'member_invited', 'member_removed', 'member_role_changed',
-                     'permission_changed', 'password_reset',
-                     'employee_created', 'employee_updated', 'employee_deleted',
-                     'shift_created', 'shift_updated', 'shift_deleted',
-                     'store_created', 'store_updated',
-                     'draft_created', 'draft_discarded', 'draft_expired'
-                 )),
+    action       VARCHAR(50) NOT NULL,  -- validated in app: app/core/audit_actions.py (AUDIT_ACTIONS)
     entity_type  VARCHAR(50),
     entity_id    UUID,
     before_state JSONB,
