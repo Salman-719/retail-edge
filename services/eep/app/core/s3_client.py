@@ -1,6 +1,7 @@
 import boto3
 from botocore.exceptions import ClientError
 from app.core.config import settings
+from app.core.resilience import s3_config
 
 
 def _client():
@@ -9,6 +10,7 @@ def _client():
         endpoint_url=settings.S3_ENDPOINT_URL,
         aws_access_key_id=settings.S3_ACCESS_KEY,
         aws_secret_access_key=settings.S3_SECRET_KEY,
+        config=s3_config(),
     )
 
 
@@ -20,6 +22,7 @@ def _public_client():
         endpoint_url=public_url,
         aws_access_key_id=settings.S3_ACCESS_KEY,
         aws_secret_access_key=settings.S3_SECRET_KEY,
+        config=s3_config(),
     )
 
 

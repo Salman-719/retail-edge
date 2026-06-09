@@ -101,6 +101,14 @@ class TestAssignModelVersion:
 
 # ── Group 2: model_version label on EEP_REQUESTS ──────────────────────────────
 
+def _counter_value(child):
+    """Read a counter child value across the fake stub (._val) and real
+    prometheus_client (._value.get())."""
+    if hasattr(child, "_val"):
+        return child._val
+    return child._value.get()
+
+
 class TestEEPRequestsLabel:
     """EEP_REQUESTS Counter is incremented with the correct model_version label."""
 
@@ -112,16 +120,16 @@ class TestEEPRequestsLabel:
     def test_counter_increments_production_label(self):
         from app.core.canary import EEP_REQUESTS
         child = EEP_REQUESTS.labels(route="/test-prod", model_version="production")
-        before = child._val
+        before = _counter_value(child)
         child.inc()
-        assert child._val == before + 1
+        assert _counter_value(child) == before + 1
 
     def test_counter_increments_canary_label(self):
         from app.core.canary import EEP_REQUESTS
         child = EEP_REQUESTS.labels(route="/test-canary", model_version="canary")
-        before = child._val
+        before = _counter_value(child)
         child.inc()
-        assert child._val == before + 1
+        assert _counter_value(child) == before + 1
 
 
 # ── Group 3: Canary eval pass/fail ────────────────────────────────────────────

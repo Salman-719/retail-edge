@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
 from app.core.database import get_db
+from app.core.ratelimit import check_upload_size, MAX_IMAGE_UPLOAD_BYTES, MAX_XML_UPLOAD_BYTES
 from app.core import s3_client, orchestrator
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
 from app.tasks.camera_scheduler import mark_running, mark_stopped
@@ -517,6 +518,7 @@ async def upload_floor_plan(
     _require_draft_access(draft, ctx)
 
     content = await file.read()
+    check_upload_size(content, MAX_IMAGE_UPLOAD_BYTES)
     width, height = _decode_image(content)
 
     ext = (file.filename or "image.jpg").rsplit(".", 1)[-1].lower()
@@ -1580,6 +1582,7 @@ async def upload_camera_frame(
         raise HTTPException(status_code=404, detail={"error": "Camera config not found", "code": "NOT_FOUND"})
 
     content = await file.read()
+    check_upload_size(content, MAX_IMAGE_UPLOAD_BYTES)
     _decode_image(content)  # validate image
 
     ext = (file.filename or "frame.jpg").rsplit(".", 1)[-1].lower()
@@ -2135,6 +2138,7 @@ async def upload_calibration_files(
         raise HTTPException(status_code=404, detail={"error": "Camera config not found", "code": "NOT_FOUND"})
 
     intrinsic_content = await intrinsic.read()
+    check_upload_size(intrinsic_content, MAX_XML_UPLOAD_BYTES)
     try:
         intrinsic_data = parse_intrinsic_xml(intrinsic_content)
     except Exception as exc:
@@ -2144,6 +2148,7 @@ async def upload_calibration_files(
     extrinsic_s3_key: str | None = None
     if extrinsic:
         extrinsic_content = await extrinsic.read()
+        check_upload_size(extrinsic_content, MAX_XML_UPLOAD_BYTES)
         try:
             extrinsic_data = parse_extrinsic_xml(extrinsic_content)
         except Exception as exc:

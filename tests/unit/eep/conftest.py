@@ -87,29 +87,39 @@ def _make_fake_prometheus():
     return mod
 
 
-if "prometheus_client" not in sys.modules:
+# Stub ONLY when the real package is genuinely absent (bare CI). When the real
+# package is installed — as it is wherever tests/requirements.txt is applied —
+# use it, so tests that need real FastAPI/TestClient (e.g. the error-envelope
+# suite) work and stubbed tests still run in the bare environment.
+try:
+    import prometheus_client  # noqa: F401
+except ImportError:
     sys.modules["prometheus_client"] = _make_fake_prometheus()
 
 # ── fastapi / starlette stub ──────────────────────────────────────────────────
 # canary.py imports Request, BaseHTTPMiddleware, ASGIApp.
 
-if "fastapi" not in sys.modules:
+try:
+    import fastapi  # noqa: F401
+except ImportError:
     fastapi_mod = ModuleType("fastapi")
     fastapi_mod.Request = MagicMock
     sys.modules["fastapi"] = fastapi_mod
 
-if "starlette" not in sys.modules:
-    starlette_mod = ModuleType("starlette")
-    sys.modules["starlette"] = starlette_mod
-
-for _sub in ("starlette.middleware", "starlette.middleware.base", "starlette.types"):
-    if _sub not in sys.modules:
-        _m = ModuleType(_sub)
-        if _sub == "starlette.middleware.base":
-            _m.BaseHTTPMiddleware = object  # canary inherits from this
-        if _sub == "starlette.types":
-            _m.ASGIApp = object
-        sys.modules[_sub] = _m
+try:
+    import starlette.middleware.base  # noqa: F401
+    import starlette.types  # noqa: F401
+except ImportError:
+    if "starlette" not in sys.modules:
+        sys.modules["starlette"] = ModuleType("starlette")
+    for _sub in ("starlette.middleware", "starlette.middleware.base", "starlette.types"):
+        if _sub not in sys.modules:
+            _m = ModuleType(_sub)
+            if _sub == "starlette.middleware.base":
+                _m.BaseHTTPMiddleware = object  # canary inherits from this
+            if _sub == "starlette.types":
+                _m.ASGIApp = object
+            sys.modules[_sub] = _m
 
 # ── mlflow stub ───────────────────────────────────────────────────────────────
 # canary_eval.py imports mlflow lazily (inside functions), but the test env

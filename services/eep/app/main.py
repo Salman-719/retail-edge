@@ -194,17 +194,27 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(RequestValidationError)
-async def validation_error_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(
-        status_code=422,
-        content={"error": str(exc.errors()), "code": "VALIDATION_ERROR"},
-    )
+# Canonical error envelope + handlers: every error becomes
+# {"detail": {"error", "code"}}, and no unhandled exception leaks a stack trace.
+from app.core.errors import register_error_handlers
+register_error_handlers(app)
+
+# Rate limiting (slowapi) + request-size limits. Global per-IP default on every
+# route (auth routes add tighter limits via @limiter.limit); Redis-backed +
+# fail-open. 429 and 413 emit the error envelope.
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from app.core.ratelimit import limiter, rate_limit_handler, BodySizeLimitMiddleware
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
+app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(BodySizeLimitMiddleware)
 
 
 register_routers(app)
 
 
 @app.get("/health")
+@limiter.exempt
 async def health():
     return {"service": "eep", "status": "ok"}
