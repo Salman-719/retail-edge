@@ -53,11 +53,19 @@ async def generate_insight(
 
 
 async def check_alerts(session: AsyncSession, store_id: str) -> list[dict]:
-    """Threshold-based proactive alerts (reuses alert_configs thresholds)."""
+    """Threshold-based proactive alerts.
+
+    The queue threshold now comes from alert_rules (the queue_buildup type) —
+    alert_configs was retired (0018_drop_alert_configs; thresholds moved onto
+    alert_rules). Use the tightest (MIN) people_threshold across the store's
+    active queue_buildup rules; default 10 when no such rule exists.
+    """
     cfg = (await session.execute(
-        text("SELECT queue_people_threshold FROM alert_configs WHERE store_id = CAST(:sid AS uuid)"),
+        text("SELECT MIN(people_threshold) AS queue_people_threshold FROM alert_rules "
+             "WHERE store_id = CAST(:sid AS uuid) AND type = 'queue_buildup' "
+             "AND is_active = TRUE AND people_threshold IS NOT NULL"),
         {"sid": store_id})).mappings().first()
-    threshold = (cfg or {}).get("queue_people_threshold", 10)
+    threshold = (cfg or {}).get("queue_people_threshold") or 10
     active = (await tools.get_metrics(session, "active_visitors", store_id))["rows"]
     count = active[0]["active"] if active else 0
     fired = []
