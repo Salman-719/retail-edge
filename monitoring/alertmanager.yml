@@ -2,23 +2,34 @@ global:
   resolve_timeout: 5m
 
 route:
-  receiver: default-null
-  group_by: ["alertname", "severity", "job"]
+  receiver: telegram-retailvision
+  group_by: ["alertname", "severity"]
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
   routes:
     - matchers:
         - severity="critical"
-      receiver: default-null
+      receiver: telegram-retailvision
       group_wait: 0s
       repeat_interval: 1h
 
 receivers:
-  # Safe production default: alerts are evaluated and visible in Prometheus /
-  # Grafana, but no external notifications are sent until a receiver is added
-  # from Kubernetes/AWS Secrets.
-  - name: default-null
+  - name: telegram-retailvision
+    telegram_configs:
+      - bot_token: "8693973586:AAGTILKv4Y8xcDf884uqz4Vc4pVJ22bvQx8"
+        chat_id: 7946649314
+        send_resolved: true
+        message: |
+          {{ if eq .Status "firing" }}🔴{{ else }}✅{{ end }} *[RetailVision] {{ .Status | toUpper }}*
+          {{ range .Alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Severity:* {{ .Labels.severity }}
+          *Summary:* {{ .Annotations.summary }}
+          *Detail:* {{ .Annotations.description }}
+          *Since:* {{ .StartsAt.Format "2006-01-02 15:04 UTC" }}
+          {{ end }}
+        parse_mode: "Markdown"
 
 inhibit_rules:
   - source_matchers:

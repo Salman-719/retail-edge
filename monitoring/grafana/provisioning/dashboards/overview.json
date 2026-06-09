@@ -23,7 +23,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -88,7 +88,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"eep\"}",
           "legendFormat": "EEP",
@@ -97,7 +97,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"iep1\"}",
           "legendFormat": "IEP1",
@@ -106,7 +106,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"iep3\"}",
           "legendFormat": "IEP3",
@@ -115,7 +115,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"iep4\"}",
           "legendFormat": "IEP4",
@@ -124,7 +124,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"iep5\"}",
           "legendFormat": "IEP5",
@@ -133,7 +133,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"iep6\"}",
           "legendFormat": "IEP6",
@@ -142,7 +142,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"live_bridge\"}",
           "legendFormat": "Live Bridge",
@@ -151,7 +151,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"detector\"}",
           "legendFormat": "YOLO",
@@ -160,7 +160,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"reid\"}",
           "legendFormat": "ReID",
@@ -169,7 +169,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"redis\"}",
           "legendFormat": "Redis",
@@ -178,7 +178,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"postgres\"}",
           "legendFormat": "Postgres",
@@ -187,7 +187,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"node\"}",
           "legendFormat": "Node",
@@ -196,7 +196,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "up{job=\"alertmanager\"}",
           "legendFormat": "Alertmanager",
@@ -219,7 +219,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -261,7 +261,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "eep_active_cameras",
           "refId": "A"
@@ -271,7 +271,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -317,7 +317,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "eep_grpc_connections_active",
           "refId": "A"
@@ -327,7 +327,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -365,7 +365,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "rate(eep_scheduler_ticks_total[1m]) * 60",
           "legendFormat": "ticks/min",
@@ -388,7 +388,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -426,7 +426,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "rate(detector_frames_total[5m])",
           "legendFormat": "YOLO frames/s",
@@ -435,7 +435,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "rate(reid_crops_processed_total[5m])",
           "legendFormat": "ReID crops/s",
@@ -444,7 +444,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "rate(iep3_batches_processed_total[5m])",
           "legendFormat": "IEP3 batches/s",
@@ -455,7 +455,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -493,7 +493,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "histogram_quantile(0.95, sum by (le) (rate(detector_inference_seconds_bucket[5m])))",
           "legendFormat": "YOLO p95",
@@ -502,7 +502,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "histogram_quantile(0.95, sum by (le) (rate(reid_inference_seconds_bucket[5m])))",
           "legendFormat": "ReID p95",
@@ -525,7 +525,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -565,7 +565,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "detector_inference_confidence_mean",
           "legendFormat": "mean confidence",
@@ -576,7 +576,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -616,7 +616,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "iep3_reid_match_rate",
           "legendFormat": "match rate",
@@ -627,7 +627,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -665,7 +665,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
+            "uid": "${DS_PROMETHEUS}"
           },
           "expr": "histogram_quantile(0.50, sum by (le) (rate(reid_embedding_norm_bucket[5m])))",
           "legendFormat": "p50 norm",

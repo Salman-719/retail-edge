@@ -45,7 +45,7 @@
       "type": "timeseries",
       "title": "ReID cosine similarity p50 (drift proxy)",
       "description": "Sustained drop below 0.6 indicates ReID model degradation or distribution shift. Alert fires at < 0.55 for 10m.",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
       "id": 11,
       "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
@@ -68,13 +68,13 @@
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "job:iep3_cosine_p50:rate5m",
           "legendFormat": "Cosine sim p50",
           "refId": "A"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "job:iep3_cosine_p95:rate5m",
           "legendFormat": "Cosine sim p95",
           "refId": "B"
@@ -85,7 +85,7 @@
       "type": "timeseries",
       "title": "Detector confidence p50 (input drift proxy)",
       "description": "Sustained drop below 0.40 indicates the detector is less certain -- possible camera angle change, lens issue, or lighting shift.",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
       "id": 12,
       "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
@@ -108,13 +108,13 @@
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "job:detector_confidence_p50:rate5m",
           "legendFormat": "Confidence p50",
           "refId": "A"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "job:detector_confidence_p25:rate5m",
           "legendFormat": "Confidence p25",
           "refId": "B"
@@ -125,7 +125,7 @@
       "type": "timeseries",
       "title": "ReID embedding norm p50 (model health)",
       "description": "Healthy range: 10--30. Drop below 5.0 triggers EmbeddingNormCollapse alert (possible TRT engine failure).",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
       "id": 13,
       "options": {"tooltip": {"mode": "multi"}},
@@ -139,13 +139,13 @@
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "job:reid_embedding_norm_p50:rate5m",
           "legendFormat": "Norm p50",
           "refId": "A"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "job:reid_embedding_norm_p95:rate5m",
           "legendFormat": "Norm p95",
           "refId": "B"
@@ -156,7 +156,7 @@
       "type": "timeseries",
       "title": "ReID match rate (cross-camera identity matching)",
       "description": "Fraction of LocalIDs matched to a GlobalID. Alert fires at < 30% while pipeline is active.",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
       "id": 14,
       "options": {"tooltip": {"mode": "multi"}},
@@ -171,7 +171,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "iep3_reid_match_rate",
           "legendFormat": "Match rate",
           "refId": "A"

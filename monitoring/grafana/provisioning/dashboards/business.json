@@ -17,7 +17,7 @@
     {
       "type": "stat",
       "title": "Unique customers (last hour)",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 5, "w": 6, "x": 0, "y": 1},
       "id": 2,
       "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
@@ -30,7 +30,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "iep5_unique_customers_total",
           "legendFormat": "Unique customers",
           "refId": "A"
@@ -40,7 +40,7 @@
     {
       "type": "stat",
       "title": "Avg dwell time (seconds)",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 5, "w": 6, "x": 6, "y": 1},
       "id": 3,
       "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
@@ -53,7 +53,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "iep5_avg_dwell_time_seconds",
           "legendFormat": "Avg dwell",
           "refId": "A"
@@ -63,7 +63,7 @@
     {
       "type": "stat",
       "title": "Active visitors (now)",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 5, "w": 6, "x": 12, "y": 1},
       "id": 4,
       "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
@@ -76,7 +76,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "iep5_active_visitors",
           "legendFormat": "Active visitors",
           "refId": "A"
@@ -86,14 +86,14 @@
     {
       "type": "stat",
       "title": "Footfall rate (visitors/hour)",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 5, "w": 6, "x": 18, "y": 1},
       "id": 5,
       "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "rate(iep5_unique_customers_total[1h]) * 3600",
           "legendFormat": "Visitors/hour",
           "refId": "A"
@@ -103,20 +103,20 @@
     {
       "type": "timeseries",
       "title": "Footfall over time (unique customers per 5m window)",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 6},
       "id": 6,
       "options": {"tooltip": {"mode": "single"}, "legend": {"displayMode": "list", "placement": "bottom"}},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0, "custom": {"fillOpacity": 15}}, "overrides": []},
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "increase(iep5_unique_customers_total[5m])",
           "legendFormat": "New customers (5m)",
           "refId": "A"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "iep5_active_visitors",
           "legendFormat": "Active visitors",
           "refId": "B"
@@ -132,20 +132,20 @@
     {
       "type": "timeseries",
       "title": "Dwell time p50 / p95 over time",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 8, "w": 14, "x": 0, "y": 15},
       "id": 11,
       "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
       "fieldConfig": {"defaults": {"unit": "s", "min": 0, "custom": {"fillOpacity": 5}}, "overrides": []},
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "histogram_quantile(0.50, sum by (le) (rate(iep5_dwell_time_seconds_bucket[5m])))",
           "legendFormat": "p50 dwell",
           "refId": "A"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "histogram_quantile(0.95, sum by (le) (rate(iep5_dwell_time_seconds_bucket[5m])))",
           "legendFormat": "p95 dwell",
           "refId": "B"
@@ -156,14 +156,14 @@
       "type": "stat",
       "title": "Short visits (< 30s)",
       "description": "Visitors who left in under 30 seconds -- possible browsing without engagement.",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 4, "w": 5, "x": 14, "y": 15},
       "id": 12,
       "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "iep5_dwell_time_seconds_bucket{le=\"30\"}",
           "legendFormat": "< 30s",
           "refId": "A"
@@ -174,7 +174,7 @@
       "type": "stat",
       "title": "Long visits (> 5min)",
       "description": "Visitors who stayed over 5 minutes -- high engagement signal.",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 4, "w": 5, "x": 19, "y": 15},
       "id": 13,
       "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
@@ -187,7 +187,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "iep5_unique_customers_total - iep5_dwell_time_seconds_bucket{le=\"300\"}",
           "legendFormat": "> 5min",
           "refId": "A"
@@ -203,14 +203,14 @@
     {
       "type": "timeseries",
       "title": "Zone occupancy over time",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 8, "w": 14, "x": 0, "y": 24},
       "id": 21,
       "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "iep5_zone_visitors{zone_id=~\".+\"}",
           "legendFormat": "Zone {{zone_id}}",
           "refId": "A"
@@ -220,7 +220,7 @@
     {
       "type": "bargauge",
       "title": "Visitors per zone (now)",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 8, "w": 10, "x": 14, "y": 24},
       "id": 22,
       "options": {
@@ -237,7 +237,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "iep5_zone_visitors{zone_id=~\".+\"}",
           "legendFormat": "{{zone_id}}",
           "refId": "A"
@@ -248,14 +248,14 @@
       "type": "timeseries",
       "title": "Conversion events over time",
       "description": "IEP5 conversion events (defined per business use-case, e.g. entry into checkout zone).",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
       "id": 23,
       "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0, "custom": {"fillOpacity": 20}}, "overrides": []},
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "rate(iep5_conversion_events_total[5m]) * 60",
           "legendFormat": "{{event_type}} /min",
           "refId": "A"
@@ -271,14 +271,14 @@
     {
       "type": "timeseries",
       "title": "IEP5 HTTP request rate",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 41},
       "id": 31,
       "options": {"tooltip": {"mode": "multi"}},
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "rate(http_requests_total{job=\"iep5\"}[1m])",
           "legendFormat": "{{method}} {{handler}} {{status_code}}",
           "refId": "A"
@@ -288,14 +288,14 @@
     {
       "type": "timeseries",
       "title": "IEP5 HTTP latency p95",
-      "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 41},
       "id": 32,
       "options": {"tooltip": {"mode": "multi"}},
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "DS_PROMETHEUS"},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "expr": "histogram_quantile(0.95, sum by (le, handler) (rate(http_request_duration_seconds_bucket{job=\"iep5\"}[5m])))",
           "legendFormat": "p95 {{handler}}",
           "refId": "A"
