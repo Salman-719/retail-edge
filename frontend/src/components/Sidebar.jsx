@@ -12,7 +12,6 @@ const NAV_GROUPS = [
     label: null,
     items: [
       { label: 'Live Monitoring', path: 'live',      Icon: Radio },
-      { label: 'Live View',       path: 'live-view', Icon: Video },
       { label: 'Analytics',       path: 'analytics', Icon: BarChart2 },
       { label: 'Alerts',          path: 'alerts',    Icon: Bell },
       { label: 'AI Assistant',    path: 'agent',     Icon: Bot },
@@ -21,7 +20,7 @@ const NAV_GROUPS = [
   {
     label: 'Management',
     items: [
-      { label: 'Store Config', path: 'config',    Icon: Store },
+      { label: 'Store Setup',  path: 'config',    Icon: Store },
       { label: 'Employees',    path: 'employees', Icon: Users },
       { label: 'Shifts',       path: 'shifts',    Icon: Calendar },
       { label: 'Members',      path: 'members',   Icon: UserCheck },

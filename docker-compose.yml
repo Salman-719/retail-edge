@@ -406,37 +406,6 @@ services:
       - minio
     restart: unless-stopped
 
-  # ─── IEP2 Vision Debug Console (dev-only) ────────────────────────────────
-  # Runs the FastAPI upload+WebSocket server on :8002.
-  # The frontend /dev/vision page connects to VITE_IEP2_DEV_API_URL (default http://localhost:8002).
-  # Start alongside the main stack:  docker compose --profile dev up -d iep2_dev
-  iep2_dev:
-    build:
-      context: ./services/iep2_vision
-      dockerfile: Dockerfile
-    ports:
-      - "8002:8002"
-    environment:
-      <<: *shared-config
-      YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
-      REID_INPUT_SOCK: "ipc:///tmp/sockets/reid_input.sock"
-      LOCAL_REDIS_URL: "redis://redis:6379/0"
-      SERVER_REDIS_URL: "redis://redis:6379/0"
-    volumes:
-      - ./testing-data:/workspace/testing-data:ro
-      - ipc-sockets:/tmp/sockets
-      - frame-store:/dev/shm/frames
-    command: ["python", "-m", "uvicorn", "services.iep2_vision.app.main:app", "--host", "0.0.0.0", "--port", "8002"]
-    depends_on:
-      pgbouncer:
-        condition: service_healthy
-      yolo-service:
-        condition: service_started
-      reid-service:
-        condition: service_started
-    profiles:
-      - dev
-
   # ─── Edge Agent (dev-only) ────────────────────────────────────────────────
   # In production the Edge Agent runs on the physical edge device, not here.
   # This entry lets you test the full gRPC loop on a single machine.

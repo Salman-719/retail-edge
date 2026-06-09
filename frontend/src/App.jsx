@@ -15,7 +15,8 @@ import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
 import OwnerDashboard from './pages/OwnerDashboard'
 
-import StoreConfig from './pages/StoreConfig'
+import StoreSetup from './pages/StoreSetup'
+import StorePunchEditor from './pages/StorePunchEditor'
 import StoreConfigEdit from './pages/StoreConfigEdit'
 import LiveMonitoring from './pages/LiveMonitoring'
 import Analytics from './pages/Analytics'
@@ -26,7 +27,6 @@ import Members from './pages/Members'
 import Audit from './pages/Audit'
 import AIAgent from './pages/AIAgent'
 import Settings from './pages/Settings'
-import LiveView from './pages/LiveView'
 
 export default function App() {
   return (
@@ -46,10 +46,10 @@ export default function App() {
         <Route path="/store/:slug" element={<PrivateRoute><StoreLayout /></PrivateRoute>}>
           <Route index element={<Navigate to="live" replace />} />
           <Route path="dashboard" element={<Navigate to="live" replace />} />
-          <Route path="config" element={<StoreConfig />} />
+          <Route path="config" element={<StoreSetup />} />
           <Route path="config/edit" element={<StoreConfigEdit />} />
+          <Route path="config/punch" element={<StorePunchEditor />} />
           <Route path="live" element={<LiveMonitoring />} />
-          <Route path="live-view" element={<LiveView />} />
           <Route path="analytics" element={<Analytics />} />
           <Route path="alerts" element={<Alerts />} />
           <Route path="agent" element={<AIAgent />} />

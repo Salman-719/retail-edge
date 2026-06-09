@@ -279,6 +279,14 @@ export const projectPoint = (slug, configId, framePx, framePy) =>
 export const getCalibrations = (slug, configId) =>
   api.get(`/store/${slug}/draft/camera-configs/${configId}/calibrations`).then(r => r.data)
 
+// ─── Punch-in station (draft, employee-linking S2) ────────────────────────────
+
+export const getDraftPunchStation = (slug) =>
+  api.get(`/store/${slug}/draft/punch-station`).then(r => r.data)
+
+export const putDraftPunchStation = (slug, body) =>
+  api.put(`/store/${slug}/draft/punch-station`, body).then(r => r.data)
+
 // ─── Activation ───────────────────────────────────────────────────────────────
 
 export const activateDraft = (slug, body) =>
@@ -300,6 +308,17 @@ export const getLiveOverview = (slug) =>
 
 export const getCameraHealth = (slug) =>
   api.get(`/store/${slug}/cameras/health`).then(r => r.data)
+
+// ─── Store Setup (C1) ────────────────────────────────────────────────────────
+
+export const getOperatingHours = (slug) =>
+  api.get(`/store/${slug}/operating-hours`).then(r => r.data)
+
+export const putOperatingHours = (slug, body) =>
+  api.put(`/store/${slug}/operating-hours`, body).then(r => r.data)
+
+export const getActivePunchStation = (slug) =>
+  api.get(`/store/${slug}/punch-station`).then(r => r.data)
 
 export const getActiveAlerts = (slug) =>
   api.get(`/store/${slug}/alerts/active`).then(r => r.data)
