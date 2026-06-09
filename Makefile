@@ -1,4 +1,4 @@
-.PHONY: proto cloud-eks-deploy camera-sim-up camera-sim-down camera-sim-status
+.PHONY: proto cloud-eks-prereqs cloud-eks-reset cloud-eks-deploy camera-sim-up camera-sim-down camera-sim-status
 
 # Regenerate gRPC stubs from proto/agent.proto and sync service proto dirs.
 # On Unix: creates symlinks. On Windows (Git Bash / WSL): copies the file.
@@ -12,6 +12,12 @@ else
 	ln -sf ../../proto/agent.proto services/edge_agent/proto/agent.proto
 endif
 	bash scripts/generate_protos.sh
+
+cloud-eks-prereqs:
+	bash scripts/install-cloud-deploy-tools.sh
+
+cloud-eks-reset:
+	bash scripts/reset-cloud-eks.sh
 
 cloud-eks-deploy:
 	bash scripts/deploy-cloud-eks-from-scratch.sh

@@ -5,8 +5,10 @@ to run it, the **exact command**, and the **expected result**. Follow top to
 bottom; do not skip.
 
 ### Where commands run
-- **[LOCAL]** your workstation/laptop (has `aws`, `terraform`, `kubectl`, `helm`,
-  and the git repo).
+- **[LOCAL]** your workstation/laptop. Do **not** assume tools are installed; run
+  the prerequisite check below first.
+- **[CLOUDSHELL/EC2]** an AWS shell/server. Do **not** assume tools are installed;
+  run the prerequisite check below first.
 - **[CLOUD]** Amazon EKS, reached from local after `aws eks update-kubeconfig`.
 - **[EDGE]** an in-store Jetson device.
 
@@ -57,12 +59,102 @@ bottom; do not skip.
 
 ## PART A — Cloud deployment on EKS (from scratch)
 
-### A0. Recommended smooth path
+### A0. [LOCAL/CLOUDSHELL/EC2] Install and verify prerequisites first
+
+Run this before **any** deployment command. The deployment requires:
+
+- `aws`
+- `terraform`
+- `kubectl`
+- `helm`
+- `jq`
+- `curl`
+- `git`
+- `make`
+- valid AWS credentials for account `692461731658`
+- network access to GitHub/GHCR, AWS APIs, and Terraform/Helm release hosts
+- an EC2 Elastic IP quota with room for **five** addresses in the deployment
+  region: two for ingress, two for gRPC, and one for WireGuard
+
+From the repo root:
+
+```bash
+cd "$HOME/retail-edge"
+bash scripts/install-cloud-deploy-tools.sh
+```
+
+Or:
+
+```bash
+cd "$HOME/retail-edge"
+make cloud-eks-prereqs
+```
+
+The script detects Linux `x86_64` vs `arm64` and installs the correct binaries for
+Terraform, Helm, and kubectl. It also installs basic packages like `jq`, `curl`,
+`git`, and `make` using `yum`, `dnf`, or `apt-get`. On macOS it uses Homebrew.
+
+Verify manually:
+
+```bash
+export PATH="/usr/local/bin:$PATH"
+hash -r
+
+command -v aws
+command -v terraform
+command -v kubectl
+command -v helm
+command -v jq
+command -v curl
+command -v git
+command -v make
+
+aws --version
+terraform version
+kubectl version --client
+helm version
+jq --version
+```
+
+AWS credentials must work before continuing:
+
+```bash
+export AWS_REGION=eu-west-1
+
+# Local laptop only. In AWS CloudShell/EC2 with an IAM role, leave AWS_PROFILE unset.
+# export AWS_PROFILE=adsal
+
+aws sts get-caller-identity
+
+aws service-quotas get-service-quota \
+  --service-code ec2 \
+  --quota-code L-0263D0A3 \
+  --region "$AWS_REGION" \
+  --query 'Quota.Value' \
+  --output text
+
+aws ec2 describe-addresses \
+  --region "$AWS_REGION" \
+  --query 'Addresses[].{IP:PublicIp,AllocationId:AllocationId,Name:Tags[?Key==`Name`]|[0].Value}' \
+  --output table
+```
+
+Expected account:
+
+```text
+692461731658
+```
+
+If any command is missing, stop and fix prerequisites. Do not run
+`make cloud-eks-deploy` until every command above works.
+
+### A1. Recommended smooth path
 
 Use this path for a fresh deployment or after intentionally tearing down the old
 cloud. It avoids the mistakes we already hit: missing Helm locally, wrong
 architecture Terraform binary, stale plans, lost CloudShell state, missing image
-tags, private GHCR packages, dropped gRPC NLB annotations, and `--reuse-values`
+tags, private GHCR packages, state drift, duplicate fixed-name AWS resources,
+Elastic IP exhaustion, dropped gRPC NLB annotations, and `--reuse-values`
 carrying broken old values into a first install.
 
 Run from a machine that has AWS access and the repo. **AWS CloudShell in
@@ -71,10 +163,12 @@ Run from a machine that has AWS access and the repo. **AWS CloudShell in
 
 ```bash
 cd "$HOME"
-git clone https://github.com/Salman-719/retail-edge.git
+git clone https://github.com/Salman-719/retail-edge.git 2>/dev/null || true
 cd "$HOME/retail-edge"
 git checkout deploy/aws-eks
 git pull --ff-only origin deploy/aws-eks
+
+bash scripts/install-cloud-deploy-tools.sh
 
 export AWS_REGION=eu-west-1
 export OWNER=salman-719
@@ -101,6 +195,10 @@ The script:
 - creates an encrypted/versioned S3 Terraform state bucket and DynamoDB lock
   table, then writes an ignored `infra/aws/backend.tf`;
 - runs `terraform init`, `validate`, `plan`, and `apply`;
+- runs a mandatory AWS/state preflight before planning. It stops if an EKS
+  cluster, S3 bucket, IAM resources, secrets, KMS alias, log group, or required
+  EIPs exist outside the active remote state;
+- pauses after showing the Terraform plan and requires typing `APPLY`;
 - configures `kubectl`;
 - writes `retailvision/openai-api-key` if `OPENAI_API_KEY` is set;
 - runs `helm lint` and `helm template`;
@@ -110,13 +208,32 @@ The script:
   `REDIS_HOST`;
 - writes the cloud CA certificate to `/tmp/retailvision-ca.crt` for edge setup.
 
-If the old cloud still exists and you are intentionally wiping it, run the
-teardown in **Part F** first. If old local Terraform state is already lost, do not
-guess with a fresh local-state checkout: recover/import state or delete the old
-AWS resources from the console before running a fresh deployment with the same
-names. New deployments created by `make cloud-eks-deploy` use S3 remote state.
+If the preflight reports old resources outside state or insufficient EIP
+capacity, **do not rerun `terraform apply` and do not reuse a saved plan**. For
+the approved wipe-and-redeploy workflow:
 
-### A1. [LOCAL] Install tools & fix the AWS profile
+```bash
+cd "$HOME/retail-edge"
+export AWS_REGION=eu-west-1
+export CONFIRM_RESET=retailvision-production
+make cloud-eks-reset
+unset CONFIRM_RESET
+make cloud-eks-deploy
+```
+
+`cloud-eks-reset` first destroys anything represented by the remote state, then
+removes scoped RetailVision orphans from earlier lost-state deployments,
+including versioned S3 objects, fixed-name secrets/IAM resources, NLBs, and
+RetailVision-tagged EIPs. It retains the Terraform backend bucket and lock table.
+It refuses to finish unless the deployment state is empty, then runs the AWS
+preflight. Both checks must pass before a new apply begins.
+
+If the reset finishes but reports fewer than five EIPs available, unrelated
+addresses are consuming the regional quota. Release unused addresses or request
+an EC2-VPC Elastic IP quota increase. Do not remove an address used by another
+system.
+
+### A2. [LOCAL] Manual macOS prerequisites
 
 ```bash
 brew install awscli terraform
@@ -136,7 +253,7 @@ aws sts get-caller-identity --profile adsal
 > CloudShell clones from GitHub, commit and push the current `deploy/aws-eks`
 > branch before using it.
 
-### A2. [LOCAL] Get the code
+### A3. [LOCAL] Get the code
 
 ```bash
 git clone https://github.com/Salman-719/retail-edge.git
@@ -144,7 +261,7 @@ cd retail-edge
 git checkout deploy/aws-eks
 ```
 
-### A3. [LOCAL] Build & publish the images (GHCR)
+### A4. [LOCAL] Build & publish the images (GHCR)
 
 ```bash
 git tag "v$VERSION"
@@ -173,14 +290,23 @@ done
 ```
 Do not install Helm until every required cloud image prints `OK`.
 
-### A4. [LOCAL] Provision EKS infrastructure (Terraform)
+### A5. [LOCAL/CLOUDSHELL] Provision EKS infrastructure
 
-```bash
-cd infra/aws
-cp terraform.tfvars.example terraform.tfvars
-```
-Open `terraform.tfvars` and set these. Leave `app_host`/`eep_host` empty for
-`nip.io`, or set real hostnames and Route53 values.
+For the first deployment, use `make cloud-eks-deploy` from A1. Do not start a
+first deployment with bare `terraform init/plan/apply`: the wrapper creates and
+selects the persistent S3 backend, checks AWS/state consistency and EIP capacity,
+then creates a fresh plan.
+
+The generated input file is `infra/aws/terraform.tfvars` and the generated,
+ignored backend declaration is `infra/aws/backend.tf`. Inspect them if needed,
+but keep the wrapper as the deployment entry point.
+
+For later infrastructure changes, use Part D3 so the same remote state is
+selected before planning.
+
+The wrapper writes these effective values. Leave `app_host`/`eep_host` empty for
+`nip.io`, or set real hostnames and Route53 values when using the manual
+Terraform variables.
 ```hcl
 aws_region            = "eu-west-1"
 environment           = "production"
@@ -195,20 +321,11 @@ karpenter_cpu_limit   = "200"
 wireguard_enabled     = true
 wireguard_instance_type = "t4g.nano"
 ```
-Apply:
-```bash
-export AWS_PROFILE=adsal
-terraform init -upgrade -reconfigure
-terraform fmt -check -recursive
-terraform validate
-terraform plan -out eks.tfplan
-terraform apply eks.tfplan
-```
 **Expect:** an EKS cluster, two stable on-demand nodes, Karpenter, KEDA, AWS Load
 Balancer Controller, ingress-nginx, cert-manager, External Secrets,
 metrics-server, gp3 StorageClass, Secrets Manager entries, and an S3 bucket.
 
-### A4a. [AWS CloudShell] Alternative when local provider downloads are geo-blocked
+### A5a. [AWS CloudShell] Alternative when local provider downloads are geo-blocked
 
 Use this path if local `curl -I https://releases.hashicorp.com/...` returns
 `x-amzn-waf-reason: geo`.
@@ -230,25 +347,11 @@ local Terraform state under `/root` can lose the state when CloudShell restarts.
 The commands below install tools into `/usr/local/bin`, but the repository and
 state must remain under `$HOME`.
 
-Install the deploy tools:
+Install the deploy tools. This is the same prerequisite installer used by the
+smooth path:
 ```bash
-sudo yum install -y unzip tar gzip git jq
-
-curl -fsSL https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip -o /tmp/terraform.zip
-unzip -o /tmp/terraform.zip -d /tmp
-sudo install -m 0755 /tmp/terraform /usr/local/bin/terraform
-
-curl -fsSL https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz -o /tmp/helm.tgz
-tar -xzf /tmp/helm.tgz -C /tmp
-sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
-
-curl -fsSL https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-05-12/bin/linux/amd64/kubectl -o /tmp/kubectl
-sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
-
-hash -r
-terraform version
-helm version
-kubectl version --client
+cd "$HOME/retail-edge"
+bash scripts/install-cloud-deploy-tools.sh
 ```
 
 Clone the repo:
@@ -257,54 +360,25 @@ cd "$HOME"
 git clone https://github.com/Salman-719/retail-edge.git
 cd "$HOME/retail-edge"
 git checkout deploy/aws-eks
-cd infra/aws
-cp terraform.tfvars.example terraform.tfvars
-```
-
-Edit `terraform.tfvars` in CloudShell:
-```bash
-nano terraform.tfvars
-```
-
-Use at least:
-```hcl
-aws_region            = "eu-west-1"
-environment           = "production"
-letsencrypt_email     = "ali.salman@edgebot.com"
-s3_bucket_name        = "retailvision-prod-objects-692461731658"
-cluster_version       = "1.30"
-stable_instance_type  = "t4g.large"
-stable_node_count     = 2
-stable_node_max_count = 4
-node_root_volume_gb   = 60
-karpenter_cpu_limit   = "200"
 ```
 
 Deploy:
 ```bash
-terraform init -upgrade -reconfigure
-terraform fmt -check -recursive
-terraform validate
-terraform plan -out eks.tfplan
-terraform apply eks.tfplan
+export AWS_REGION=eu-west-1
+export OWNER=salman-719
+export VERSION=1.3.1
+export LETSENCRYPT_EMAIL=aas145@mail.aub.edu
+make cloud-eks-deploy
 ```
 
-Configure kubectl and record outputs:
+The wrapper configures `kubectl` and writes reusable outputs to
+`/tmp/retailvision-cloud.env`. Load them with:
+
 ```bash
-aws eks update-kubeconfig --name "$(terraform output -raw cluster_name)" --region eu-west-1
-export INGRESS_EIP="$(terraform output -raw ingress_eip)"
-export GRPC_EIP="$(terraform output -raw grpc_eip)"
-export APP_HOST="$(terraform output -raw app_host)"
-export EEP_HOST="$(terraform output -raw eep_host)"
-export AGENT_SECRET="$(terraform output -raw agent_secret)"
-export GRPC_EIP_ALLOCATIONS="$(terraform output -json grpc_eip_allocation_ids | jq -r 'join("\\,")')"
-export PUBLIC_SUBNET_IDS="$(terraform output -json public_subnet_ids | jq -r 'join("\\,")')"
-export VPC_CIDR="$(terraform output -raw vpc_cidr)"
-export WG_INSTANCE_ID="$(terraform output -raw wireguard_instance_id)"
-export WG_ENDPOINT="$(terraform output -raw wireguard_endpoint)"
+. /tmp/retailvision-cloud.env
 ```
 
-### A4b. [LOCAL] Set the OpenAI API key (IEP6 agent)
+### A5b. [LOCAL] Set the OpenAI API key (IEP6 agent)
 
 Terraform created a **placeholder** `retailvision/openai-api-key`. Set the real
 key so the IEP6 agent works (it's read via External Secrets after install):
@@ -316,7 +390,7 @@ aws secretsmanager put-secret-value --profile adsal --region eu-west-1 \
 > raw-SQL and EEP-action tools are off by default (`iep6.enableRawSql`,
 > `iep6.enableEepActions`).
 
-### A5. [LOCAL] Verify cluster add-ons
+### A6. [LOCAL] Verify cluster add-ons
 
 ```bash
 kubectl get nodes -L workload
@@ -342,7 +416,7 @@ export WG_SERVER_PUBLIC_KEY="$(./scripts/get-wireguard-server-key.sh "$WG_INSTAN
 echo "$WG_SERVER_PUBLIC_KEY"
 ```
 
-### A6. [LOCAL] Install the application (Helm)
+### A7. [LOCAL] Install the application (Helm)
 
 Terraform prints `helm_install_hint`; use it, or run the equivalent command:
 ```bash
@@ -393,7 +467,7 @@ For later `helm upgrade` commands, either re-run this full command or include
 `--reuse-values`; otherwise Helm will drop the gRPC NLB service annotations that
 were supplied by `--set-string`.
 
-### A7. [LOCAL] Verify the platform is live
+### A8. [LOCAL] Verify the platform is live
 
 ```bash
 kubectl -n retailvision get pods -o wide
@@ -527,7 +601,7 @@ and push the multi-architecture `mlflow` image through `build-images.yml`.
 Registry promotion remains an explicit operator action; it does not silently
 change a production detector image.
 
-### A8. [LOCAL] Verify autoscaling
+### A9. [LOCAL] Verify autoscaling
 
 ```bash
 kubectl -n retailvision scale deploy/frontend --replicas=20
@@ -540,7 +614,7 @@ pods become Running, and idle nodes consolidate later. Restore:
 kubectl -n retailvision scale deploy/frontend --replicas=2
 ```
 
-### A9. [LOCAL] Open the app
+### A10. [LOCAL] Open the app
 
 Browse to **`https://$APP_HOST`**. Use **`$EEP_HOST:50051`** for the Jetson edge
 bootstrap in Part C. **Cloud is done.**
@@ -579,7 +653,7 @@ workers via the k8s API — no Helm change needed:
 - **IEP4** (alerts) — a StatefulSet `iep4-<short>`.
 
 (This is why the `eep` ServiceAccount has the `eep-pipeline-manager` Role, and why
-the `iep3`/`iep4`/`iep5` images must be Public — see A3.)
+the `iep3`/`iep4`/`iep5` images must be Public — see A4.)
 
 **[LOCAL]** Verify after activation:
 ```bash
@@ -862,7 +936,7 @@ export DATABASE_URL_SERVER="postgresql://retailvision:${PG_PASSWORD_ENCODED}@${P
 export SERVER_REDIS_URL="rediss://${REDIS_HOST}:6380?ssl_check_hostname=false"
 ```
 GHCR credentials are **only needed if your image packages are PRIVATE**. If you
-made them Public in Part A (A3), skip this. Otherwise uncomment and fill in:
+made them Public in Part A (A4), skip this. Otherwise uncomment and fill in:
 ```bash
 # export GHCR_USER=salman-719          # your GitHub username
 # export GHCR_TOKEN=ghp_xxxxxxxxxxxx   # GitHub Personal Access Token, scope: read:packages
@@ -1075,7 +1149,7 @@ the bootstrap with the same release tag used by the cloud.
 
 **5. Verify**: `kubectl -n retailvision get pods` (cloud + each edge) all `Running`;
 hit `https://$APP_HOST`, then verify Live Monitoring, Analytics, and Alerts.
-For releases containing migrations, also run the live API/migration checks in A7.
+For releases containing migrations, also run the live API/migration checks in A8.
 
 The granular variants (D1–D5) below cover individual cases.
 
@@ -1114,28 +1188,29 @@ The granular variants (D1–D5) below cover individual cases.
 ### D2. Update chart/config only (no new image)
 
 1. **[LOCAL]** edit the chart or `values.production.yaml`, commit & push.
-2. **[LOCAL]** `git pull` then re-run the **A6** helm command (without
+2. **[LOCAL]** `git pull` then re-run the **A7** helm command (without
    `--create-namespace`). Helm applies only what changed.
 
 ### D3. Update infrastructure (Terraform)
 
-Run infrastructure updates from the persistent CloudShell checkout/state
-described in A0, not from a fresh `/root` checkout.
+Use the same deployment wrapper for infrastructure updates. It reconnects to the
+S3 backend, runs the state/AWS preflight, creates a new plan, applies it, and
+reconciles Helm afterward.
 
 1. **[CLOUDSHELL]** pull the deployment branch and review the changes:
    ```bash
    cd "$HOME/retail-edge"
    git pull --ff-only origin deploy/aws-eks
-   cd infra/aws
-   terraform init -reconfigure
-   terraform validate
-   terraform plan -out update.tfplan
-   terraform show update.tfplan
-   terraform apply update.tfplan
+   make cloud-eks-prereqs
+   export AWS_REGION=eu-west-1
+   export OWNER=salman-719
+   export VERSION=1.3.1
+   export LETSENCRYPT_EMAIL=aas145@mail.aub.edu
+   make cloud-eks-deploy
    ```
-2. If the commit also changes `charts/retailvision`, re-run A6 after Terraform.
-   Terraform creates AWS resources; Helm applies Kubernetes Services and
-   workloads that use them. The private edge data-plane change requires both.
+2. Review the Terraform plan shown by the wrapper before approving it. Do not
+   apply an old `.tfplan` after any other Terraform operation or manual AWS
+   cleanup; generate a new plan by rerunning the wrapper.
 
    **Caution:** read the plan before approving. EKS control-plane changes,
    node-group changes, and Karpenter limits can replace or churn capacity. Stateful
@@ -1168,14 +1243,16 @@ sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SE
 |---|---|---|
 | `aws ... InvalidClientTokenId` | profile region not enabled (opt-in) | `aws configure set region eu-west-1 --profile adsal` |
 | zsh `command not found: --flag` | multi-line paste mangled | paste **one line** at a time |
-| Terraform `aws-load-balancer-webhook-service ... no endpoints` | AWS Load Balancer Controller webhook was registered before its pod became Ready | wait for `kubectl -n kube-system rollout status deploy/aws-load-balancer-controller`, verify endpoints, then rerun `terraform apply eks.tfplan` |
-| Terraform `secret ... scheduled for deletion` | old k3s destroy scheduled Secrets Manager secrets for deletion; names cannot be recreated yet | restore or force-delete the old secrets, then rerun `terraform apply eks.tfplan` |
-| Terraform `secret ... already exists` | one old secret still exists outside current state | import it or delete it; for clean redeploy, force-delete it with the same secrets cleanup command below |
+| Terraform `aws-load-balancer-webhook-service ... no endpoints` | AWS Load Balancer Controller webhook was registered before its pod became Ready | wait for the controller rollout and endpoints, then rerun `make cloud-eks-deploy` so Terraform creates a fresh plan |
+| Terraform `AddressLimitExceeded` | the deployment needs five EIPs, but old or unrelated addresses consume the regional quota | stop; run the reset workflow below for old RetailVision resources, then release only confirmed-unused unrelated EIPs or request a quota increase |
+| Terraform `ResourceExistsException`, `EntityAlreadyExists`, `BucketAlreadyOwnedByYou`, log group already exists, or KMS alias already exists | AWS contains resources from an older deployment that are absent from the active remote Terraform state | do not rerun apply; use `CONFIRM_RESET=retailvision-production make cloud-eks-reset` for the approved wipe, or import every resource when preserving it |
+| Terraform `secret ... scheduled for deletion` | an older teardown scheduled a fixed-name Secrets Manager secret for deletion | use the approved reset workflow and wait for its final preflight; do not apply a stale plan |
+| Terraform preflight says fewer than five EIPs are available | RetailVision or unrelated EIPs still occupy the regional quota | inspect `aws ec2 describe-addresses`; reset old RetailVision addresses, then release unused unrelated addresses or request quota |
 | Terraform warns `Helm uninstall ... resources were kept due to resource policy` for cert-manager CRDs | Helm preserves cert-manager CRDs by design across reinstall/retry | safe to ignore if the final Terraform apply completes successfully |
 | Helm `chart requires kubeVersion ... incompatible with Kubernetes v1.30.x-eks-...` | EKS reports a provider-suffixed Kubernetes version; Helm treats it like a prerelease unless the chart allows `-0` | chart `kubeVersion` must be `>=1.26.0-0`; pull latest `deploy/aws-eks` or patch `charts/retailvision/Chart.yaml` before installing |
 | Public app returns nginx `503 Service Temporarily Unavailable` | ingress/NLB is reachable, but the `frontend` Service has no Ready pod endpoints | inspect `kubectl -n retailvision get pods,endpoints`, events, and `describe pod`; fix Pending/ImagePull/secret/migration failures before retrying the URL |
-| Public app returns nginx `504`, while `curl http://frontend/` works inside the namespace | ingress-nginx and the frontend pods are on different nodes, but the EKS node security group blocks the frontend container port (`80`) between nodes | pull the Terraform fix that adds `node_security_group_additional_rules.ingress_nodes_all`, then run `terraform plan` and `terraform apply` from the CloudShell directory that owns the Terraform state |
-| `helm ... namespaces "retailvision" not found` on first try | namespace race | include `--create-namespace` (step A6) |
+| Public app returns nginx `504`, while `curl http://frontend/` works inside the namespace | ingress-nginx and the frontend pods are on different nodes, but the EKS node security group blocks the frontend container port (`80`) between nodes | pull the Terraform fix that adds `node_security_group_additional_rules.ingress_nodes_all`, then rerun `make cloud-eks-deploy` with the normal exports |
+| `helm ... namespaces "retailvision" not found` on first try | namespace race | include `--create-namespace` (step A7) |
 | Pod `ImagePullBackOff`: GHCR `not found` | the chart tag was never built/pushed | trigger **Build & Push Images** with tag `1.3.0` or push Git tag `v1.3.0`; wait for all required jobs to pass, then restart affected deployments |
 | Pod `ImagePullBackOff`: GHCR `403 Forbidden` | the GHCR package is private | make the package Public, or configure an `imagePullSecret`; for the current public-image deployment, make all cloud packages Public |
 | `ImagePullBackOff` on a **freshly-tagged** image (e.g. `eep:1.1.0`) right after a release | that service's CI job hasn't finished (or failed); other images already pushed | wait for **all** matrix jobs green (check per-image tag in Packages); then `kubectl -n retailvision delete pod -l app=<svc>` to retry. Confirm which tags exist: `curl -s "https://ghcr.io/token?scope=repository:<owner>/retailvision/<svc>:pull&service=ghcr.io"` then query `/v2/.../tags/list` |
@@ -1186,7 +1263,7 @@ sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SE
 | EEP log `Error 111 ... redis-server:6380` | Redis still starting | transient; clears once `redis-server-0` is `Running` |
 | `curl /api/...` → `404` | wrong path; real routes are `/api/auth`, `/api/stores`, … | test `/api/stores` (expect `401`) |
 | GUI says `Showing demo data — live backend not connected` | an old frontend image is still deployed; current production pages contain no demo fallback | verify the new frontend tag exists, update `frontend.image.tag`, run `helm upgrade`, and wait for `kubectl -n retailvision rollout status deploy/frontend` |
-| Live/Analytics/Alerts returns `404` after frontend update | frontend and EEP image tags are out of sync | deploy the matching EEP tag, confirm Alembic reaches `0019`, and inspect the OpenAPI paths using the A7 commands |
+| Live/Analytics/Alerts returns `404` after frontend update | frontend and EEP image tags are out of sync | deploy the matching EEP tag, confirm Alembic reaches `0019`, and inspect the OpenAPI paths using the A8 commands |
 | Live Monitoring loads but shows zero people | no fresh reconciled identities exist inside `eep.liveStaleMs`, or IEP3/IEP4 is not running | activate the store version, verify edge camera status and per-store IEP3/IEP4 pods, then inspect `global_identities` and `active_person_state` |
 | `certificate retailvision-app-tls` not Ready | Let's Encrypt rate-limited nip.io | re-run A7 with `--set ingress.clusterIssuer=retailvision-ca-issuer` |
 | **[EDGE]** bootstrap aborts: `Packages were downgraded ... without --allow-downgrades` (nvidia-container-toolkit) | JetPack already has a newer toolkit | already fixed (script skips it if present) — `git pull` then re-run the bootstrap |
@@ -1201,23 +1278,22 @@ sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SE
 
 ### Recover a Cross-Node Ingress 504
 
-Apply the node security-group fix from the CloudShell checkout that owns the live
-Terraform state:
+Apply the node security-group fix through the guarded deployment wrapper:
 
 ```bash
 export PATH="/usr/local/bin:$PATH"
 export AWS_REGION=eu-west-1
+export OWNER=salman-719
+export VERSION=1.3.1
+export LETSENCRYPT_EMAIL=aas145@mail.aub.edu
 cd "$HOME/retail-edge"
 git pull --ff-only origin deploy/aws-eks
-cd infra/aws
-terraform init -reconfigure
-terraform plan -out node-sg-fix.tfplan
-terraform apply node-sg-fix.tfplan
+make cloud-eks-deploy
 curl -I https://app.52.17.97.51.nip.io
 ```
 
-The plan should add the node security-group self-ingress rule. Review the plan and
-do not apply it if it proposes unrelated destructive changes.
+The plan should add the node security-group self-ingress rule. Review it and do
+not approve if it proposes unrelated destructive changes.
 
 If that checkout or its `terraform.tfstate` no longer exists, do **not** run
 Terraform from a fresh clone. Apply the narrowly scoped live repair instead:
@@ -1240,52 +1316,60 @@ curl -I https://app.52.17.97.51.nip.io
 After service is restored, recover or rebuild the Terraform state and migrate it
 to an S3 backend before making further infrastructure changes.
 
-### Recover a Partial EKS Apply
+### Recover a Partial or Lost-State EKS Apply
 
-If Terraform created EKS but failed on Helm releases or Secrets Manager, do not
-destroy the cluster immediately. First inspect the controller and clean old
-secrets:
+The combination of `AddressLimitExceeded` plus existing secrets, IAM resources,
+bucket, log group, or KMS alias means the account and active state disagree. A
+successful resource from the failed apply may be in remote state, while older
+resources may exist only in AWS. Deleting one error at a time and repeatedly
+applying the old plan makes the drift worse.
 
-```bash
-aws eks update-kubeconfig --name "$(terraform output -raw cluster_name)" --region eu-west-1
-kubectl -n kube-system get pods,endpoints | grep aws-load-balancer
-kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=180s
-```
-
-If `aws-load-balancer-webhook-service` has no endpoints, inspect:
+For this project, the approved recovery is a full reset and clean redeploy:
 
 ```bash
-kubectl -n kube-system describe deploy aws-load-balancer-controller
-kubectl -n kube-system logs deploy/aws-load-balancer-controller --tail=100
+cd "$HOME/retail-edge"
+git pull --ff-only origin deploy/aws-eks
+make cloud-eks-prereqs
+
+export AWS_REGION=eu-west-1
+export CONFIRM_RESET=retailvision-production
+make cloud-eks-reset
+unset CONFIRM_RESET
 ```
 
-For a clean redeploy after wiping k3s, permanently remove stale Secrets Manager
-entries that are pending deletion or left outside Terraform state:
+The reset is intentionally destructive. It removes the RetailVision EKS
+deployment, application data, object bucket contents, secrets, fixed-name IAM
+resources, load balancers, and tagged EIPs. It retains only the S3 Terraform
+backend and DynamoDB lock table.
+
+The reset ends by running the preflight. Continue only when it prints:
+
+```text
+Terraform state is empty. Confirming AWS preflight before redeploying:
+AWS/Terraform preflight passed.
+```
+
+Then create a **new** plan and deployment:
 
 ```bash
-for s in \
-  retailvision/postgres-password \
-  retailvision/redis-password \
-  retailvision/jwt-secret \
-  retailvision/agent-secret \
-  retailvision/redis-url \
-  retailvision/s3-access-key \
-  retailvision/s3-secret-key \
-  retailvision/openai-api-key \
-  retailvision/grafana-admin-password
-do
-  aws secretsmanager delete-secret \
-    --region eu-west-1 \
-    --secret-id "$s" \
-    --force-delete-without-recovery 2>/dev/null || true
-done
+export OWNER=salman-719
+export VERSION=1.3.1
+export LETSENCRYPT_EMAIL=aas145@mail.aub.edu
+make cloud-eks-deploy
 ```
 
-Then rerun:
+If the final preflight still reports insufficient EIP capacity, list all
+addresses and resolve the quota before deploying:
 
 ```bash
-terraform apply eks.tfplan
+aws ec2 describe-addresses \
+  --region "$AWS_REGION" \
+  --query 'Addresses[].{IP:PublicIp,AllocationId:AllocationId,AssociationId:AssociationId,Name:Tags[?Key==`Name`]|[0].Value}' \
+  --output table
 ```
+
+Do not release an EIP unless you have confirmed that it is unused and does not
+belong to another system.
 
 ### Clean reinstall (fresh database)
 
@@ -1298,7 +1382,7 @@ kubectl delete namespace retailvision --ignore-not-found --wait=true
 # if finalizers hang). Confirm none remain:
 kubectl get pvc -A | grep retailvision || echo "no retailvision PVCs (good)"
 ```
-Then re-run **A7**. EEP rebuilds the schema through the current Alembic head on
+Then re-run **A8**. EEP rebuilds the schema through the current Alembic head on
 the fresh TimescaleDB volume, then you re-create the store (Part B).
 
 ### Rotate a Secrets Manager value (e.g. a password)
@@ -1317,55 +1401,33 @@ kubectl -n retailvision rollout restart deploy/eep
 
 ## PART F — Teardown
 
-Run this from the same checkout that owns the Terraform state. For deployments
-created by `make cloud-eks-deploy`, recreate `infra/aws/backend.tf` if needed and
-run `terraform init -reconfigure` with the same backend bucket/table. If an older
-deployment used only local state and the state file is gone, stop and
-recover/import state before running `terraform destroy`; otherwise Terraform
-cannot know what it owns.
+For the approved complete wipe, use the repository reset command. It reconnects
+to the remote backend, destroys state-owned resources, and cleans scoped
+RetailVision resources left by older lost-state deployments.
 
-**[LOCAL/CLOUDSHELL]:**
+**This permanently deletes the cloud deployment and its data.**
+
 ```bash
 cd "$HOME/retail-edge"
 git checkout deploy/aws-eks
-cd infra/aws
+git pull --ff-only origin deploy/aws-eks
+make cloud-eks-prereqs
+
 export AWS_REGION=eu-west-1
-# Local laptop only. In CloudShell, leave AWS_PROFILE unset.
-# export AWS_PROFILE=adsal
-export ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-export TF_STATE_BUCKET="${TF_STATE_BUCKET:-retailvision-tfstate-${ACCOUNT_ID}-${AWS_REGION}}"
-export TF_LOCK_TABLE="${TF_LOCK_TABLE:-retailvision-tflock-${AWS_REGION}}"
-
-cat > backend.tf <<EOF
-terraform {
-  backend "s3" {}
-}
-EOF
-
-terraform init -reconfigure \
-  -backend-config="bucket=${TF_STATE_BUCKET}" \
-  -backend-config="key=retailvision/${AWS_REGION}/terraform.tfstate" \
-  -backend-config="region=${AWS_REGION}" \
-  -backend-config="dynamodb_table=${TF_LOCK_TABLE}" \
-  -backend-config="encrypt=true"
-
-aws eks update-kubeconfig --name "$(terraform output -raw cluster_name)" --region "$AWS_REGION" 2>/dev/null || true
-helm uninstall retailvision -n retailvision 2>/dev/null || true
-kubectl delete namespace retailvision --ignore-not-found --wait=true
-
-export BUCKET="$(terraform output -raw s3_bucket 2>/dev/null || true)"
-if [ -n "$BUCKET" ]; then
-  aws s3 rm "s3://$BUCKET" --recursive --region "$AWS_REGION" || true
-  VERSIONS="$(aws s3api list-object-versions --bucket "$BUCKET" --region "$AWS_REGION" --query 'Versions[].{Key:Key,VersionId:VersionId}' --output json)"
-  MARKERS="$(aws s3api list-object-versions --bucket "$BUCKET" --region "$AWS_REGION" --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' --output json)"
-  [ "$(echo "$VERSIONS" | jq 'length')" -gt 0 ] && aws s3api delete-objects --bucket "$BUCKET" --region "$AWS_REGION" --delete "$(jq -nc --argjson objects "$VERSIONS" '{Objects:$objects}')" || true
-  [ "$(echo "$MARKERS" | jq 'length')" -gt 0 ] && aws s3api delete-objects --bucket "$BUCKET" --region "$AWS_REGION" --delete "$(jq -nc --argjson objects "$MARKERS" '{Objects:$objects}')" || true
-fi
-
-terraform destroy
+export CONFIRM_RESET=retailvision-production
+make cloud-eks-reset
+unset CONFIRM_RESET
 ```
-If `terraform destroy` still reports `BucketNotEmpty`, repeat the S3 version
-cleanup and rerun `terraform destroy`.
+
+Expected final line:
+
+```text
+AWS/Terraform preflight passed.
+```
+
+The reset retains `retailvision-tfstate-<account>-<region>` and the DynamoDB lock
+table so future sessions reconnect to the same state location. Immediately before
+that line it also confirms that Terraform state is empty. Redeploy with Part A1.
 
 ---
 
@@ -1396,5 +1458,5 @@ Terraform (`infra/aws/`):
   (edge↔EEP gRPC and Redis).
 
 - **IEP6 (AI agent)** deploys with the chart (`iep6.enabled`, default on) at
-  `/api/agent`; the only manual step is setting the OpenAI key — **Part A, step A4b**.
+  `/api/agent`; the only manual step is setting the OpenAI key — **Part A, step A5b**.
   Contract + tools: `docs/services/IEP6_AGENT.md`.

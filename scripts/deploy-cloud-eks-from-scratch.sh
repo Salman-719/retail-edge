@@ -39,6 +39,10 @@ fi
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "ERROR: missing command: $1" >&2
+    echo "Run prerequisites first from the repo root:" >&2
+    echo "  bash scripts/install-cloud-deploy-tools.sh" >&2
+    echo "or:" >&2
+    echo "  make cloud-eks-prereqs" >&2
     exit 1
   fi
 }
@@ -160,10 +164,21 @@ terraform init -upgrade -reconfigure \
   -backend-config="encrypt=true"
 terraform fmt -recursive
 terraform validate
+popd >/dev/null
+
+bash scripts/check-cloud-deploy-preflight.sh
+
+pushd infra/aws >/dev/null
 terraform plan -out eks.tfplan
 if [[ "${AUTO_APPROVE:-0}" == "1" ]]; then
   terraform apply -auto-approve eks.tfplan
 else
+  echo
+  read -r -p "Review the Terraform plan above. Type APPLY to continue: " APPLY_CONFIRMATION
+  if [[ "$APPLY_CONFIRMATION" != "APPLY" ]]; then
+    echo "Deployment cancelled before Terraform apply."
+    exit 1
+  fi
   terraform apply eks.tfplan
 fi
 
@@ -171,17 +186,20 @@ aws eks update-kubeconfig \
   --name "$(terraform output -raw cluster_name)" \
   --region "$AWS_REGION"
 
-export INGRESS_EIP="$(terraform output -raw ingress_eip)"
-export GRPC_EIP="$(terraform output -raw grpc_eip)"
-export APP_HOST="$(terraform output -raw app_host)"
-export EEP_HOST="$(terraform output -raw eep_host)"
-export AGENT_SECRET="$(terraform output -raw agent_secret)"
-export GRPC_EIP_ALLOCATIONS="$(terraform output -json grpc_eip_allocation_ids | jq -r 'join("\\,")')"
-export PUBLIC_SUBNET_IDS="$(terraform output -json public_subnet_ids | jq -r 'join("\\,")')"
-export VPC_CIDR="$(terraform output -raw vpc_cidr)"
-export WG_INSTANCE_ID="$(terraform output -raw wireguard_instance_id)"
-export WG_ENDPOINT="$(terraform output -raw wireguard_endpoint)"
-export S3_BUCKET="$(terraform output -raw s3_bucket)"
+INGRESS_EIP="$(terraform output -raw ingress_eip)"
+GRPC_EIP="$(terraform output -raw grpc_eip)"
+APP_HOST="$(terraform output -raw app_host)"
+EEP_HOST="$(terraform output -raw eep_host)"
+AGENT_SECRET="$(terraform output -raw agent_secret)"
+GRPC_EIP_ALLOCATIONS="$(terraform output -json grpc_eip_allocation_ids | jq -r 'join("\\,")')"
+PUBLIC_SUBNET_IDS="$(terraform output -json public_subnet_ids | jq -r 'join("\\,")')"
+VPC_CIDR="$(terraform output -raw vpc_cidr)"
+WG_INSTANCE_ID="$(terraform output -raw wireguard_instance_id)"
+WG_ENDPOINT="$(terraform output -raw wireguard_endpoint)"
+S3_BUCKET="$(terraform output -raw s3_bucket)"
+export INGRESS_EIP GRPC_EIP APP_HOST EEP_HOST AGENT_SECRET
+export GRPC_EIP_ALLOCATIONS PUBLIC_SUBNET_IDS VPC_CIDR
+export WG_INSTANCE_ID WG_ENDPOINT S3_BUCKET
 popd >/dev/null
 
 if [[ -n "${OPENAI_API_KEY:-}" ]]; then
