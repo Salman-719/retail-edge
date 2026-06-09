@@ -28,6 +28,7 @@ import msgpack
 import numpy as np
 import zmq
 import zmq.asyncio
+from prometheus_client import Counter, Histogram, start_http_server
 
 log = logging.getLogger("reid_service")
 
@@ -35,11 +36,43 @@ log = logging.getLogger("reid_service")
 REID_INPUT_SOCK       = os.environ.get("REID_INPUT_SOCK",       "ipc:///tmp/sockets/reid_input.sock")
 REID_HEALTH_UNIX_SOCK = os.environ.get("REID_HEALTH_SOCK",      "unix:///tmp/sockets/reid_health.sock")
 REID_HEALTH_TCP_ADDR  = os.environ.get("REID_HEALTH_TCP_ADDR",  "[::]:50053")
+REID_METRICS_PORT     = int(os.environ.get("REID_METRICS_PORT", "9401"))
 
 REID_MODEL_PATH  = os.environ.get("REID_MODEL_PATH",  "resnet50_msmt17.engine")
 MAX_BATCH_SIZE    = int(os.environ.get("REID_MAX_BATCH_SIZE",    "64"))
 BATCH_TIMEOUT_MS  = float(os.environ.get("REID_BATCH_TIMEOUT_MS", "50"))
 EMBEDDING_DIM     = 2048
+
+# ── Prometheus metrics ────────────────────────────────────────────────────────
+# Scraped on :9401, job "reid".
+
+REID_CROPS = Counter(
+    "reid_crops_processed_total",
+    "Total person crops processed by the ReID embedding service",
+)
+REID_ERRORS = Counter(
+    "reid_errors_total",
+    "Crops that failed to preprocess or caused an inference error",
+)
+REID_INFERENCE = Histogram(
+    "reid_inference_seconds",
+    "Wall-clock time for one TRT ReID batch inference call",
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+)
+REID_BATCH_SIZE = Histogram(
+    "reid_batch_size",
+    "Number of crops per TRT ReID inference batch — GPU utilisation proxy",
+    buckets=[1, 2, 4, 8, 16, 32, 48, 64, 96, 128],
+)
+# ML signal: distribution of raw (pre-L2) embedding norms.
+# ResNet50 healthy activations cluster around 10–30. A distribution collapsing
+# toward 0 indicates degenerate embeddings — model weight corruption or
+# preprocessing failure — before any downstream metric degrades.
+REID_EMBEDDING_NORM = Histogram(
+    "reid_embedding_norm",
+    "L2 norm of raw ResNet50 embeddings before normalisation (2048-dim)",
+    buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0],
+)
 
 # ImageNet normalisation constants (R3).
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -145,16 +178,28 @@ def _l2_normalize(emb: np.ndarray) -> np.ndarray:
 
 def _infer_and_pack(engine, batch_items: list[dict]) -> list[dict]:
     """Preprocess, infer, L2-normalise, pack responses."""
-    # Preprocess all crops to float16 tensors.
-    tensors = [_preprocess_crop(item["crop"]) for item in batch_items]
-    batch   = np.stack(tensors, axis=0)              # [B, 3, 256, 128] fp16
+    tensors = []
+    for item in batch_items:
+        try:
+            tensors.append(_preprocess_crop(item["crop"]))
+        except Exception:
+            REID_ERRORS.inc()
+            tensors.append(np.zeros((3, 256, 128), dtype=np.float16))
 
+    batch = np.stack(tensors, axis=0)                # [B, 3, 256, 128] fp16
+
+    t0 = time.monotonic()
     embeddings = _infer_batch(engine, batch)          # [B, 2048] fp32
+    REID_INFERENCE.observe(time.monotonic() - t0)
+    REID_BATCH_SIZE.observe(len(batch_items))
+    REID_CROPS.inc(len(batch_items))
 
     responses = []
     for item, emb in zip(batch_items, embeddings):
         # R6: assert dimension is correct.
         assert emb.shape == (EMBEDDING_DIM,), f"Expected ({EMBEDDING_DIM},), got {emb.shape}"
+        # ML signal: record raw norm before L2 normalisation.
+        REID_EMBEDDING_NORM.observe(float(np.linalg.norm(emb)))
         emb = _l2_normalize(emb)                      # R5
         responses.append({
             "request_id":   item["request_id"],
@@ -228,6 +273,11 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+    # Prometheus metrics HTTP server — started before engine load so Prometheus
+    # sees the target as UP even while the TRT engine is initialising.
+    start_http_server(REID_METRICS_PORT)
+    log.info("Prometheus metrics server started on :%d", REID_METRICS_PORT)
 
     from grpc_health.v1 import health, health_pb2
 

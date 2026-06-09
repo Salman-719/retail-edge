@@ -9,6 +9,7 @@ import uuid
 import asyncpg
 import numpy as np
 
+from app.metrics import IEP3_REID_COSINE
 from app.repository import Iep3Repository, LocalObservation, GlobalCandidate
 from app.reid.gates import cross_camera_gate
 
@@ -182,6 +183,9 @@ class ReidMatcher:
                 batch_number=batch_number,
             )
             return True
+
+        # Match confirmed — record cosine similarity for ML drift monitoring.
+        IEP3_REID_COSINE.observe(best_score)
 
         # Step 4: link or reactivate
         best_candidate = next(

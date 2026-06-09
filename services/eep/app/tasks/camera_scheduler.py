@@ -14,6 +14,7 @@ from sqlalchemy import text
 from app.core.database import AsyncSessionLocal
 from app.core import orchestrator
 from app.grpc_server import camera_status as _camera_status
+from app.metrics import EEP_ACTIVE_CAMERAS, EEP_SCHEDULER_TICKS
 
 log = logging.getLogger(__name__)
 
@@ -24,10 +25,12 @@ _running_cameras: set[tuple[str, str]] = set()
 
 def mark_running(store_id: str, camera_config_id: str) -> None:
     _running_cameras.add((str(store_id), str(camera_config_id)))
+    EEP_ACTIVE_CAMERAS.set(len(_running_cameras))
 
 
 def mark_stopped(store_id: str, camera_config_id: str) -> None:
     _running_cameras.discard((str(store_id), str(camera_config_id)))
+    EEP_ACTIVE_CAMERAS.set(len(_running_cameras))
 
 _LOAD_SQL = text("""
 SELECT
@@ -270,3 +273,5 @@ async def evaluate_schedules() -> None:
             "evaluate_schedules took %.1fs — approaching %.0fs interval",
             elapsed, _WINDOW_SECONDS,
         )
+
+    EEP_SCHEDULER_TICKS.inc()

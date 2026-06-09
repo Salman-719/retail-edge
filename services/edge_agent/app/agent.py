@@ -261,6 +261,7 @@ def _build_configmap_data(
         "DATABASE_URL_SERVER": DATABASE_URL_SERVER,
         "RTSP_URL":            rtsp_url,
         "TARGET_FPS":          str(target_fps),
+        "IEP2_METRICS_PORT":   os.environ.get("IEP2_METRICS_PORT", "9201"),
     }
 
 

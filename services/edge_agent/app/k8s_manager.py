@@ -18,8 +18,10 @@ from kubernetes.client.exceptions import ApiException as K8sApiException
 
 logger = logging.getLogger(__name__)
 
-NAMESPACE  = os.environ.get("K8S_NAMESPACE", "retailvision")
-IEP2_IMAGE = os.environ.get("IEP2_IMAGE", "retailvision-iep2:latest")
+NAMESPACE   = os.environ.get("K8S_NAMESPACE", "retailvision")
+IEP2_IMAGE  = os.environ.get("IEP2_IMAGE", "retailvision-iep2:latest")
+STORE_ID    = os.environ.get("STORE_ID", "")
+IEP2_METRICS_PORT = os.environ.get("IEP2_METRICS_PORT", "9201")
 
 _apps_v1: k8s.AppsV1Api | None = None
 _core_v1: k8s.CoreV1Api | None = None
@@ -182,7 +184,18 @@ def _build_iep2_deployment(camera_id: str) -> k8s.V1Deployment:
             ),
             template=k8s.V1PodTemplateSpec(
                 metadata=k8s.V1ObjectMeta(
-                    labels={"app": "iep2", "camera-id": camera_id, "component": "iep2"}
+                    labels={
+                        "app": "iep2",
+                        "camera-id": camera_id,
+                        "camera_id": camera_id,
+                        "store_id": STORE_ID,
+                        "component": "iep2",
+                    },
+                    annotations={
+                        "prometheus.io/scrape": "true",
+                        "prometheus.io/port": IEP2_METRICS_PORT,
+                        "prometheus.io/path": "/metrics",
+                    },
                 ),
                 spec=k8s.V1PodSpec(
                     containers=[container],

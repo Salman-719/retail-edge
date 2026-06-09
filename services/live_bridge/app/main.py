@@ -12,9 +12,19 @@ from typing import Dict, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import Gauge
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from .redis_reader import read_camera_stream
 from .s3_presign import generate_presigned_url
+
+# Active WebSocket client connections per camera. WebSocket upgrades are not
+# HTTP request/response pairs so the FastAPI instrumentator cannot count them.
+LIVE_BRIDGE_WS_CONNECTIONS = Gauge(
+    "live_bridge_ws_connections_active",
+    "Number of active WebSocket client connections per camera",
+    ["camera_id"],
+)
 
 log = logging.getLogger("live_bridge")
 
@@ -27,6 +37,7 @@ _registry: Dict[str, Set[asyncio.Queue]] = {}
 _tasks: Dict[str, asyncio.Task] = {}
 
 app = FastAPI()
+Instrumentator().instrument(app).expose(app)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -101,6 +112,7 @@ async def ws_live(websocket: WebSocket, camera_id: str):
     if camera_id not in _registry:
         _registry[camera_id] = set()
     _registry[camera_id].add(queue)
+    LIVE_BRIDGE_WS_CONNECTIONS.labels(camera_id=camera_id).inc()
 
     if camera_id not in _tasks or _tasks[camera_id].done():
         _tasks[camera_id] = asyncio.create_task(_reader_task(camera_id))
@@ -114,6 +126,7 @@ async def ws_live(websocket: WebSocket, camera_id: str):
         pass
     finally:
         _registry[camera_id].discard(queue)
+        LIVE_BRIDGE_WS_CONNECTIONS.labels(camera_id=camera_id).dec()
         if not _registry.get(camera_id):
             _registry.pop(camera_id, None)
             task = _tasks.pop(camera_id, None)

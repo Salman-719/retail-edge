@@ -29,6 +29,7 @@ import msgpack
 import numpy as np
 import zmq
 import zmq.asyncio
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 log = logging.getLogger("yolo_service")
 
@@ -36,12 +37,51 @@ log = logging.getLogger("yolo_service")
 YOLO_INPUT_SOCK       = os.environ.get("YOLO_INPUT_SOCK",       "ipc:///tmp/sockets/yolo_input.sock")
 YOLO_HEALTH_UNIX_SOCK = os.environ.get("YOLO_HEALTH_SOCK",      "unix:///tmp/sockets/yolo_health.sock")
 YOLO_HEALTH_TCP_ADDR  = os.environ.get("YOLO_HEALTH_TCP_ADDR",  "[::]:50052")
+YOLO_METRICS_PORT     = int(os.environ.get("YOLO_METRICS_PORT", "9400"))
 
 YOLO_MODEL_VARIANT    = os.environ.get("YOLO_MODEL_VARIANT",     "n")
 YOLO_CONF_THRESHOLD   = float(os.environ.get("YOLO_CONF",        "0.25"))
 YOLO_IOU_THRESHOLD    = float(os.environ.get("YOLO_IOU",         "0.45"))
 MAX_BATCH_SIZE        = int(os.environ.get("YOLO_MAX_BATCH_SIZE",  "32"))
 BATCH_TIMEOUT_MS      = float(os.environ.get("YOLO_BATCH_TIMEOUT_MS", "20"))
+
+# ── Prometheus metrics ────────────────────────────────────────────────────────
+# Scraped on :9400, job "detector" — port already declared in docker-compose expose.
+
+DETECTOR_FRAMES = Counter(
+    "detector_frames_total",
+    "Total frames processed by the YOLO inference service",
+)
+DETECTOR_DETECTIONS = Counter(
+    "detector_detections_total",
+    "Person detections returned across all batches",
+)
+DETECTOR_ERRORS = Counter(
+    "detector_errors_total",
+    "Frames that failed to decode or caused an inference error",
+)
+DETECTOR_INFERENCE = Histogram(
+    "detector_inference_seconds",
+    "Wall-clock time for one TRT batch inference call",
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+)
+DETECTOR_BATCH_SIZE = Histogram(
+    "detector_batch_size",
+    "Number of frames per TRT inference batch — GPU utilisation proxy",
+    buckets=[1, 2, 4, 8, 16, 24, 32, 48, 64],
+)
+# ML signal: per-detection confidence score distribution (person class only).
+# Drift toward lower buckets signals scene degradation before errors appear.
+DETECTOR_CONFIDENCE = Histogram(
+    "detector_detection_confidence",
+    "Confidence score of each accepted person detection (class 0)",
+    buckets=[0.25, 0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0],
+)
+# ML signal: mean confidence of the last batch as a simple time-series line.
+DETECTOR_CONF_MEAN = Gauge(
+    "detector_inference_confidence_mean",
+    "Mean confidence of all person detections in the most recent inference batch",
+)
 
 # ── Per-camera result sockets ─────────────────────────────────────────────────
 # One PUSH socket per camera_id — routes results to the correct IEP2 container.
@@ -97,14 +137,28 @@ def _decode_frame(jpeg_bytes: bytes) -> np.ndarray:
 
 def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
     """Batch inference on all frames; R4 filters to class 0 (person) only."""
-    frames = [_decode_frame(item["frame"]) for item in batch_items]
+    frames = []
+    for item in batch_items:
+        try:
+            frames.append(_decode_frame(item["frame"]))
+        except Exception:
+            DETECTOR_ERRORS.inc()
+            frames.append(np.zeros((640, 640, 3), dtype=np.uint8))
+
+    t0 = time.monotonic()
     results = model(
         frames,
         verbose=False,
         conf=YOLO_CONF_THRESHOLD,
         iou=YOLO_IOU_THRESHOLD,
     )
+    DETECTOR_INFERENCE.observe(time.monotonic() - t0)
+    DETECTOR_BATCH_SIZE.observe(len(batch_items))
+    DETECTOR_FRAMES.inc(len(batch_items))
+
     responses = []
+    all_confs = []
+
     for item, result in zip(batch_items, results):
         detections = []
         if result.boxes is not None:
@@ -118,12 +172,19 @@ def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
                     "bbox_xyxy":  [float(x) for x in xyxy],
                     "confidence": float(conf),
                 })
+                DETECTOR_CONFIDENCE.observe(float(conf))
+                all_confs.append(float(conf))
+        DETECTOR_DETECTIONS.inc(len(detections))
         responses.append({
             "request_id":   item["request_id"],
             "camera_id":    item["camera_id"],
             "timestamp_ms": item["timestamp_ms"],
             "detections":   detections,
         })
+
+    if all_confs:
+        DETECTOR_CONF_MEAN.set(sum(all_confs) / len(all_confs))
+
     return responses
 
 
@@ -190,6 +251,11 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+    # Prometheus metrics HTTP server — started before engine load so Prometheus
+    # sees the target as UP even while the TRT engine is initialising.
+    start_http_server(YOLO_METRICS_PORT)
+    log.info("Prometheus metrics server started on :%d", YOLO_METRICS_PORT)
 
     from grpc_health.v1 import health, health_pb2
 

@@ -1,0 +1,169 @@
+---
+# ServiceAccount + ClusterRole for Prometheus pod discovery on k3s.
+# Prometheus needs read access to pods so kubernetes_sd_configs can
+# discover IEP2 pods dynamically without manual scrape config changes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: retailvision
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-edge
+rules:
+  - apiGroups: [""]
+    resources: [pods, nodes, services, endpoints]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-edge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-edge
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: retailvision
+---
+# ConfigMap holding prometheus-edge.yml.
+# The STORE_ID placeholder is replaced at deploy time by kustomize or envsubst.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-edge-config
+  namespace: retailvision
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      external_labels:
+        cluster: edge
+        store_id: "${STORE_ID}"
+
+    rule_files:
+      - /etc/prometheus/alert_rules.yml
+
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      - job_name: iep1
+        static_configs:
+          - targets: ["iep1-daemon.retailvision.svc.cluster.local:9200"]
+
+      - job_name: detector
+        static_configs:
+          - targets: ["yolo-service.retailvision.svc.cluster.local:9400"]
+
+      - job_name: reid
+        static_configs:
+          - targets: ["reid-service.retailvision.svc.cluster.local:9401"]
+
+      - job_name: iep2
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ["retailvision"]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            target_label: __address__
+            regex: (.+);(.+)
+            replacement: "${1}:${2}"
+          - source_labels: [__meta_kubernetes_pod_label_camera_id]
+            target_label: camera_id
+          - source_labels: [__meta_kubernetes_pod_label_store_id]
+            target_label: store_id
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+
+      - job_name: node
+        static_configs:
+          - targets: ["localhost:9100"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-edge
+  namespace: retailvision
+  labels:
+    app: prometheus-edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus-edge
+  template:
+    metadata:
+      labels:
+        app: prometheus-edge
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.51.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=7d
+            - --web.enable-lifecycle
+          ports:
+            - containerPort: 9090
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+            - name: alert-rules
+              mountPath: /etc/prometheus/alert_rules.yml
+              subPath: alert_rules.yml
+            - name: data
+              mountPath: /prometheus
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-edge-config
+        - name: alert-rules
+          configMap:
+            name: prometheus-edge-alert-rules
+        - name: data
+          emptyDir: {}
+---
+# ClusterIP only — Prometheus is NOT exposed outside the cluster.
+# Cloud Prometheus reaches it via an internal VPN tunnel or k3s federation endpoint.
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-edge
+  namespace: retailvision
+  labels:
+    app: prometheus-edge
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus-edge
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090

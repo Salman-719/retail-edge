@@ -25,8 +25,21 @@ import msgpack
 import numpy as np
 import zmq
 import zmq.asyncio
+from prometheus_client import Counter, Histogram, start_http_server
 
 log = logging.getLogger("reid_service_dev")
+
+REID_METRICS_PORT = int(os.environ.get("REID_METRICS_PORT", "9401"))
+
+REID_CROPS     = Counter("reid_crops_processed_total", "Total person crops processed")
+REID_ERRORS    = Counter("reid_errors_total", "Crops that caused inference errors")
+REID_INFERENCE = Histogram("reid_inference_seconds", "Wall-clock time for one ReID batch",
+                           buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0])
+REID_BATCH_SIZE = Histogram("reid_batch_size", "Number of crops per batch",
+                            buckets=[1, 2, 4, 8, 16, 32, 48, 64, 96, 128])
+REID_EMBEDDING_NORM = Histogram("reid_embedding_norm",
+                                "L2 norm of raw embeddings before normalisation",
+                                buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0])
 
 # ── Device selection (CPU / GPU) shared with the dev pipeline ──────────────────
 # Mirrors the detector service: reads the desired device from Redis `inference:device`,
@@ -129,18 +142,30 @@ def _load_model():
     from pathlib import Path
     from boxmot.appearance.reid_auto_backend import ReidAutoBackend
 
-    device = _state["device"]
-    # boxmot select_device expects "cpu" or a CUDA index ("0", "1", …),
-    # not PyTorch's "cuda" string.
-    boxmot_device = "0" if device == "cuda" else device
-    rab = ReidAutoBackend(
-        weights=Path(REID_MODEL_PATH),
-        device=torch.device(boxmot_device) if boxmot_device == "cpu" else boxmot_device,
-        half=False,
-    )
-    _state["model_device"] = device
-    log.info("resnet50_msmt17 (boxmot) loaded  device=%s  output_dim=%d", device, EMBEDDING_DIM)
-    return rab.model   # PyTorchBackend — owns .model (nn.Module) and .forward()
+    # resnet50_msmt17.pt uses the legacy Python-2 pickle protocol (protocol 2).
+    # torch.load defaults to utf-8 which fails on raw byte strings in that format.
+    # Monkey-patch to inject encoding='latin1' for legacy files only.
+    _original_torch_load = torch.load
+    def _patched_torch_load(f, *args, **kwargs):
+        kwargs.setdefault("encoding", "latin1")
+        return _original_torch_load(f, *args, **kwargs)
+    torch.load = _patched_torch_load
+
+    try:
+        device = _state["device"]
+        # boxmot select_device expects "cpu" or a CUDA index ("0", "1", …),
+        # not PyTorch's "cuda" string.
+        boxmot_device = "0" if device == "cuda" else device
+        rab = ReidAutoBackend(
+            weights=Path(REID_MODEL_PATH),
+            device=torch.device(boxmot_device) if boxmot_device == "cpu" else boxmot_device,
+            half=False,
+        )
+        _state["model_device"] = device
+        log.info("resnet50_msmt17 (boxmot) loaded  device=%s  output_dim=%d", device, EMBEDDING_DIM)
+        return rab.model   # PyTorchBackend — owns .model (nn.Module) and .forward()
+    finally:
+        torch.load = _original_torch_load
 
 
 def _warmup(model) -> None:
@@ -187,17 +212,22 @@ def _infer_and_pack(model, batch_items: list[dict]) -> list[dict]:
         model.model.to(device)
         _state["model_device"] = _state["device"]
 
+    REID_BATCH_SIZE.observe(len(batch_items))
     tensors = [_preprocess_crop(item["crop"]) for item in batch_items]
     batch   = torch.tensor(np.stack(tensors, axis=0), dtype=torch.float32, device=device)  # [B,3,256,128]
 
+    t0 = time.monotonic()
     embeddings = model.forward(batch)
+    REID_INFERENCE.observe(time.monotonic() - t0)
     if hasattr(embeddings, "cpu"):
         embeddings = embeddings.cpu().numpy()
     embeddings = np.asarray(embeddings).reshape(len(batch_items), -1)  # [B, 2048]
 
+    REID_CROPS.inc(len(batch_items))
     responses = []
     for item, emb in zip(batch_items, embeddings):
         assert emb.shape == (EMBEDDING_DIM,), f"Expected ({EMBEDDING_DIM},), got {emb.shape}"
+        REID_EMBEDDING_NORM.observe(float(np.linalg.norm(emb)))
         emb = _l2_normalize(emb)
         responses.append({
             "request_id":   item["request_id"],
@@ -276,6 +306,9 @@ async def main() -> None:
 
     asyncio.create_task(_run_health_server(health_servicer))
     await asyncio.sleep(0)
+
+    start_http_server(REID_METRICS_PORT)
+    log.info("Prometheus metrics server started on :%d", REID_METRICS_PORT)
 
     # Resolve initial device, then start the watcher that tracks the dev toggle.
     _state["device"] = _resolve_device(_INITIAL_DEVICE, _detect_caps())
