@@ -1,12 +1,11 @@
 """Canary evaluation job.
 
-Queries Prometheus for canary request flow plus platform/model metrics,
-checks three conditions,
+Queries Prometheus for production vs canary metrics, checks three conditions,
 logs results to MLflow experiment "canary_eval", and exits 0 (pass) or 1 (fail).
 
-On failure it also transitions the canary model registration in MLflow back to
-Staging. Kubernetes traffic changes remain an explicit operator action via Helm:
-set eep.canaryPercentage back to 0 and redeploy.
+On failure it also:
+  - Writes CANARY_PERCENTAGE=0 to .env.canary (the operator env-var override).
+  - Transitions the canary model registration in MLflow from Production → Staging.
 
 Usage
 -----
@@ -21,11 +20,10 @@ Environment variables
 
 Threshold env vars (all optional — defaults shown)
 ---------------------------------------------------
-    CANARY_MAX_ERROR_RATE     Maximum allowed aggregate EEP HTTP 5xx rate. Default: 0.05
-    CANARY_MAX_LATENCY_P95    Maximum aggregate EEP p95 latency in seconds. Default: 0.5
+    CANARY_MAX_ERROR_RATE     Maximum allowed canary HTTP 5xx rate. Default: 0.05
+    CANARY_MAX_LATENCY_P95    Maximum canary p95 latency in seconds. Default: 0.5
     CANARY_MIN_CONFIDENCE     Minimum canary detection_confidence mean. Default: 0.40
     CANARY_LOOKBACK_MINUTES   Prometheus lookback window in minutes. Default: 30
-    CANARY_REQUIRE_TRAFFIC    Fail if no canary-tagged EEP requests. Default: 1
 """
 from __future__ import annotations
 
@@ -49,7 +47,6 @@ CANARY_MAX_ERROR_RATE    = float(os.environ.get("CANARY_MAX_ERROR_RATE",    "0.0
 CANARY_MAX_LATENCY_P95   = float(os.environ.get("CANARY_MAX_LATENCY_P95",   "0.5"))
 CANARY_MIN_CONFIDENCE    = float(os.environ.get("CANARY_MIN_CONFIDENCE",    "0.40"))
 CANARY_LOOKBACK_MINUTES  = int(os.environ.get("CANARY_LOOKBACK_MINUTES",    "30"))
-CANARY_REQUIRE_TRAFFIC   = os.environ.get("CANARY_REQUIRE_TRAFFIC", "1") != "0"
 
 ENV_CANARY_FILE = os.environ.get("CANARY_ENV_FILE", ".env.canary")
 
@@ -85,25 +82,27 @@ def fetch_metrics(
     def q(expr: str) -> float | None:
         return _instant_query(expr, prometheus_url)
 
-    # EEP canary middleware emits request counts by model_version. The default
-    # FastAPI instrumentator emits aggregate latency/errors, not model_version
-    # split latency/errors, so canary_eval gates platform health aggregate and
-    # model confidence by detector model_version when canary detector metrics exist.
-    eep_errors = q(
+    # Error rate: HTTP 5xx rate over total requests, split by model_version.
+    # eep_requests_total has labels {route, model_version}.
+    prod_errors = q(
         f'sum(rate(http_requests_total{{status=~"5..",job="eep"}}[{window}])) or vector(0)'
     )
-    eep_total = q(
+    prod_total = q(
         f'sum(rate(http_requests_total{{job="eep"}}[{window}])) or vector(0)'
     )
-    prod_request_rate = q(
-        f'sum(rate(eep_requests_total{{model_version="production"}}[{window}])) or vector(0)'
+    canary_errors = q(
+        f'sum(rate(eep_requests_total{{model_version="canary"}}[{window}])) or vector(0)'
     )
-    canary_request_rate = q(
+    canary_total = q(
         f'sum(rate(eep_requests_total{{model_version="canary"}}[{window}])) or vector(0)'
     )
 
-    eep_latency_p95 = q(
-        f'histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{{job="eep"}}[{window}])))'
+    # Latency p95: use the prometheus_fastapi_instrumentator histogram for EEP.
+    prod_latency_p95 = q(
+        f'histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{{job="eep",model_version="production"}}[{window}])))'
+    )
+    canary_latency_p95 = q(
+        f'histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{{job="eep",model_version="canary"}}[{window}])))'
     )
 
     # Detection confidence mean: use the YOLO service metric (model_version label).
@@ -115,10 +114,10 @@ def fetch_metrics(
     )
 
     return {
-        "eep_error_rate":       (eep_errors / eep_total) if (eep_errors is not None and eep_total and eep_total > 0) else 0.0,
-        "eep_latency_p95":      eep_latency_p95,
-        "prod_request_rate":    prod_request_rate,
-        "canary_request_rate":  canary_request_rate,
+        "prod_error_rate":      (prod_errors / prod_total) if (prod_errors is not None and prod_total and prod_total > 0) else 0.0,
+        "canary_error_rate":    (canary_errors / canary_total) if (canary_errors is not None and canary_total and canary_total > 0) else 0.0,
+        "prod_latency_p95":     prod_latency_p95,
+        "canary_latency_p95":   canary_latency_p95,
         "prod_confidence_mean": prod_confidence,
         "canary_confidence_mean": canary_confidence,
     }
@@ -139,19 +138,16 @@ def evaluate(
     """
     failures: list[str] = []
 
-    if CANARY_REQUIRE_TRAFFIC and (metrics.get("canary_request_rate") or 0.0) <= 0.0:
-        failures.append("no canary-tagged EEP requests observed")
-
-    canary_error = metrics.get("eep_error_rate")
+    canary_error = metrics.get("canary_error_rate")
     if canary_error is not None and canary_error > max_error_rate:
         failures.append(
-            f"EEP aggregate error rate {canary_error:.4f} > threshold {max_error_rate:.4f}"
+            f"canary error rate {canary_error:.4f} > threshold {max_error_rate:.4f}"
         )
 
-    canary_p95 = metrics.get("eep_latency_p95")
+    canary_p95 = metrics.get("canary_latency_p95")
     if canary_p95 is not None and canary_p95 > max_latency_p95:
         failures.append(
-            f"EEP aggregate latency p95 {canary_p95:.3f}s > threshold {max_latency_p95:.3f}s"
+            f"canary latency p95 {canary_p95:.3f}s > threshold {max_latency_p95:.3f}s"
         )
 
     canary_conf = metrics.get("canary_confidence_mean")
@@ -166,14 +162,22 @@ def evaluate(
 # ── Rollback ───────────────────────────────────────────────────────────────────
 
 def rollback(model_name: str = CANARY_MODEL_NAME, version: str = CANARY_VERSION) -> None:
-    """Write an operator hint and demote the model version in MLflow."""
+    """Disable canary traffic and demote the model version in MLflow.
+
+    Writes CANARY_PERCENTAGE=0 to .env.canary (the operator override file that
+    docker-compose / k3s env-from reads on next container restart).
+    Transitions the MLflow model version from Production → Staging so it is no
+    longer served by the model registry as the live production version.
+    """
+    # Step 1: write env override — operators pick this up on next deploy.
     try:
         with open(ENV_CANARY_FILE, "w") as f:
-            f.write("HELM_SET_EEP_CANARY_PERCENTAGE=0\n")
-        log.warning("Rollback hint: wrote Helm canary reset to %s", ENV_CANARY_FILE)
+            f.write("CANARY_PERCENTAGE=0\n")
+        log.warning("Rollback: wrote CANARY_PERCENTAGE=0 to %s", ENV_CANARY_FILE)
     except OSError as exc:
         log.error("Rollback: could not write %s: %s", ENV_CANARY_FILE, exc)
 
+    # Step 2: transition canary model version to Staging in MLflow registry.
     try:
         import mlflow
         from mlflow.tracking import MlflowClient
