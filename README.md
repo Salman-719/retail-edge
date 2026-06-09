@@ -856,41 +856,49 @@ The default `docker-compose.yml` runs the full stack with dev defaults. For debu
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
-### Cloud — AWS-native (k3s on EC2, no EKS)
+### Cloud — AWS-native (Amazon EKS, autoscaling)
 
-The cloud runs **k3s on EC2** (no control-plane fee), with in-cluster Postgres +
-Redis, S3 for object storage, AWS Secrets Manager for secrets, and a single
-Elastic IP fronting ingress + gRPC via k3s ServiceLB (no always-on NLB).
-Images are pulled from **GitHub Container Registry**.
+The cloud runs on **Amazon EKS**: a managed HA control plane, an on-demand
+**stable** node pool (TimescaleDB, Redis, monitoring, MLflow, controllers) and a
+**Karpenter** elastic Graviton/Spot pool for workers. Public subnets + IGW (no NAT)
+with a free S3 gateway endpoint; **NLBs with fixed EIPs** front the app/API (via
+ingress-nginx), edge gRPC mTLS (`:50051`), and the private Postgres/Redis data plane
+(reached by edge devices over a **WireGuard** gateway). Secrets = AWS Secrets
+Manager (External Secrets); object storage = S3; images = GitHub Container Registry.
+EEP provisions per-store IEP3/IEP4 StatefulSets and IEP5 Jobs through the Kubernetes
+API; HPA/KEDA scale pods and Karpenter scales nodes.
 
-**Single source of truth — [docs/operations/DEPLOYMENT_GUIDE.md](docs/operations/DEPLOYMENT_GUIDE.md)**
-covers everything end-to-end: cloud (Part A), add a store (Part B), edge incl.
-GPU images (Part C), updating (Part D), troubleshooting (Part E), teardown (Part F).
+**Architecture:** [docs/operations/EKS_ARCHITECTURE.md](docs/operations/EKS_ARCHITECTURE.md)
+(topology) and [docs/operations/EKS_DECISIONS.md](docs/operations/EKS_DECISIONS.md)
+(every decision + why, scaling, cost). **Step-by-step install:**
+[docs/operations/DEPLOYMENT_GUIDE.md](docs/operations/DEPLOYMENT_GUIDE.md)
+— cloud (Part A), add a store (Part B), edge incl. GPU images (Part C), updating
+(Part D), troubleshooting (Part E), teardown (Part F).
 
 Provisioning is two layers:
 
 ```bash
-# 1. Infrastructure (VPC, EC2 k3s server, S3, IAM, Secrets Manager, EIP).
+# 1. Infrastructure (VPC, EKS, stable node group, Karpenter, add-ons, S3, IAM,
+#    Secrets Manager, EIPs, WireGuard gateway).
 cd infra/aws
-cp terraform.tfvars.example terraform.tfvars   # edit hosts, bucket, region
+cp terraform.tfvars.example terraform.tfvars   # edit region, bucket, sizing
 terraform init && terraform apply
-#   user-data runs scripts/bootstrap-cloud-k3s.sh -> k3s + ingress-nginx +
-#   cert-manager + external-secrets + ebs-csi. Point DNS at the output EIP.
+aws eks update-kubeconfig --name retailvision-production --region eu-west-1
 
-# 2. Application (Helm). Run against the server's kubeconfig:
+# 2. Application (Helm) — use the rendered command from `terraform output helm_install_hint`:
 helm upgrade --install retailvision ./charts/retailvision \
   -f charts/retailvision/values.production.yaml \
-  --set ingress.appHost=app.example.com \
-  --set eep.grpcHost=eep.example.com \
-  --set "iep3.stores={store-uuid-1,store-uuid-2}" \
+  --set ingress.appHost=app.<ingress-eip>.nip.io \
+  --set eep.grpcHost=eep.<grpc-eip>.nip.io \
   --namespace retailvision --create-namespace
 
 kubectl rollout status deployment/eep -n retailvision --timeout=180s
 kubectl get pods -n retailvision
 ```
 
-Adding a store later = append its UUID to `iep3.stores` and `helm upgrade`
-(spins up a per-store IEP3 StatefulSet), then bootstrap the store's edge device.
+Adding a store later = onboard + **activate** it in the app; EEP provisions that
+store's IEP3 + IEP4 automatically (and an IEP5 Job per shift close), with Karpenter
+supplying the nodes. Then bootstrap the store's edge device.
 
 ### Cloud — Edge Device (k3s bootstrap)
 

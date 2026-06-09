@@ -70,7 +70,11 @@
 
 ## 4. Alerting rules
 
-Prometheus alerting rules file: `infra/prometheus/alerts.yml`
+Prometheus alerting rules file: `monitoring/alert_rules.yml` (vendored into the
+Helm chart at `charts/retailvision/files/alert_rules.yml`). On EKS, Prometheus +
+Grafana run in-cluster on the stable pool; Grafana is exposed at
+`grafana.<ingress-eip>.nip.io`. For the live deployment/operation of this stack see
+**`docs/PROMETHEUS_GRAFANA_GUIDE.md`** — this file is the metrics/alerts design spec.
 
 | Alert name | Condition | Severity | Action |
 |---|---|---|---|
