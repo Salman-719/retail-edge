@@ -123,6 +123,25 @@ echo "[4/7] Shared host paths created"
 #    variant + GPU request). Run from the repo root.
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 k3s kubectl apply -k "${REPO_ROOT}/infra/edge/overlays/${EDGE_PROFILE}/"
+
+case "${EDGE_PROFILE}" in
+    cpu) INFERENCE_TAG="${VERSION}-cpu" ;;
+    cuda) INFERENCE_TAG="${VERSION}-cuda" ;;
+    jetson) INFERENCE_TAG="${VERSION}" ;;
+esac
+
+# The overlays define profile behavior, while the bootstrap argument is the
+# single source of truth for the deployed release.
+k3s kubectl set image deployment/iep1-daemon \
+    -n retailvision \
+    iep1="ghcr.io/salman-719/retailvision/iep1:${VERSION}"
+k3s kubectl set image deployment/yolo-service \
+    -n retailvision \
+    yolo-service="ghcr.io/salman-719/retailvision/yolo:${INFERENCE_TAG}"
+k3s kubectl set image deployment/reid-service \
+    -n retailvision \
+    reid-service="ghcr.io/salman-719/retailvision/reid:${INFERENCE_TAG}"
+
 k3s kubectl create secret generic edge-cloud-ca \
     --namespace retailvision \
     --from-file=ca.crt=/etc/retailvision/certs/ca.crt \

@@ -758,8 +758,8 @@ WireGuard gateway. Neither database is internet-facing.
   `get.k3s.io`; plus RTSP access to each camera, normally TCP `554`.
 - Root/sudo. The bootstrap installs k3s itself.
 - GHCR images public (or `GHCR_USER`/`GHCR_TOKEN`): `iep1` and `iep2`
-  (all profiles); **`yolo`/`reid`** `:1.3.0-cpu` and `:1.3.0-cuda` from CI for
-  those profiles; `yolo`/`reid` `:1.3.0` (Jetson) built on-device in C6.
+  (all profiles); **`yolo`/`reid`** `:$VERSION-cpu` and `:$VERSION-cuda` from CI
+  for those profiles; `yolo`/`reid` `:$VERSION` (Jetson) built on-device in C6.
 
 ### C0.5. [OPTIONAL SIMULATOR] Publish videos as RTSP cameras
 
@@ -960,12 +960,14 @@ made them Public in Part A (A4), skip this. Otherwise uncomment and fill in:
 Run the bootstrap (installs k3s + NVIDIA plugin + edge manifests + the Edge Agent
 systemd service):
 ```bash
-sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SECRET"
+sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" "$VERSION" "$EEP_HOST" "$AGENT_SECRET"
 ```
 
 The script refuses to start without `DATABASE_URL_SERVER`,
 `SERVER_REDIS_URL`, and `/etc/retailvision/certs/ca.crt`. It stores the
-credentials in `/etc/retailvision/edge-agent.env` with mode `0600`.
+credentials in `/etc/retailvision/edge-agent.env` with mode `0600`. The supplied
+`VERSION` is also applied to IEP1 and IEP2; YOLO/ReID use `$VERSION-cuda`,
+`$VERSION-cpu`, or `$VERSION` for the CUDA, CPU, or Jetson profile respectively.
 
 ### C5. [EDGE] Verify the runtime
 
@@ -1029,10 +1031,10 @@ Build from the **repo root** and push:
 ```bash
 cd ~/path/to/retail-edge
 echo "$GHCR_TOKEN" | docker login ghcr.io -u salman-719 --password-stdin
-docker build -f services/yolo_service/Dockerfile  -t ghcr.io/salman-719/retailvision/yolo:1.3.0  .
-docker push ghcr.io/salman-719/retailvision/yolo:1.3.0
-docker build -f services/reid_service/Dockerfile -t ghcr.io/salman-719/retailvision/reid:1.3.0 .
-docker push ghcr.io/salman-719/retailvision/reid:1.3.0
+docker build -f services/yolo_service/Dockerfile  -t "ghcr.io/salman-719/retailvision/yolo:${VERSION}" .
+docker push "ghcr.io/salman-719/retailvision/yolo:${VERSION}"
+docker build -f services/reid_service/Dockerfile -t "ghcr.io/salman-719/retailvision/reid:${VERSION}" .
+docker push "ghcr.io/salman-719/retailvision/reid:${VERSION}"
 ```
 Then make `retailvision/yolo` and `retailvision/reid` **Public** (GitHub →
 Packages), like the others.
@@ -1156,7 +1158,7 @@ the bootstrap with the same release tag used by the cloud.
   and pulls the new `-cpu`/`-cuda` images:
   ```bash
   cd ~/path/to/retail-edge && git pull
-  sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SECRET"
+  sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" "$VERSION" "$EEP_HOST" "$AGENT_SECRET"
   ```
 - **jetson**: rebuild `yolo`/`reid` on the device at the new tag (C6), then re-run
   the bootstrap.
@@ -1248,7 +1250,7 @@ kubectl -n retailvision rollout restart statefulset/redis-server
 # move together:
 cd ~/retail-edge
 git pull --ff-only origin deploy/aws-eks
-sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SECRET"
+sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" "$VERSION" "$EEP_HOST" "$AGENT_SECRET"
 ```
 
 ---
