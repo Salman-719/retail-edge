@@ -31,14 +31,12 @@ export default function Alerts() {
   // ── Active feed (polled) ──────────────────────────────────────────────────
   const [active, setActive] = useState([])
   const [activeLoading, setActiveLoading] = useState(true)
-  const [activeError, setActiveError] = useState('')
   const [dismissingId, setDismissingId] = useState(null)
 
   const loadActive = useCallback(() => {
-    setActiveError('')
     return getActiveAlerts(slug)
       .then((d) => setActive(Array.isArray(d) ? d : []))
-      .catch((error) => setActiveError(error.response?.data?.detail?.error || 'Failed to load active alerts'))
+      .catch(() => {})
       .finally(() => setActiveLoading(false))
   }, [slug])
 
@@ -129,7 +127,6 @@ export default function Alerts() {
       <div className="flex-1 overflow-y-auto p-5">
         {tab === 'active' && (
           activeLoading ? <div className="skeleton h-24 w-full rounded-xl" />
-            : activeError ? <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg p-4">{activeError}</div>
             : !active.length ? <div className="text-sm text-gray-400 bg-gray-50 rounded-lg p-8 text-center">No active alerts.</div>
             : <div className="space-y-3">{active.map((a) => <AlertCard key={a.id} alert={a} onDismiss={dismiss} dismissing={dismissingId === a.id} />)}</div>
         )}

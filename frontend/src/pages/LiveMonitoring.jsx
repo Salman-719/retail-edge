@@ -152,7 +152,6 @@ export default function LiveMonitoring() {
   const [alerts, setAlerts] = useState([])
   const [cameraHealth, setCameraHealth] = useState(null)
   const [loadingLive, setLoadingLive] = useState(true)
-  const [liveError, setLiveError] = useState('')
   const [dismissingId, setDismissingId] = useState(null)
   const [nowTick, setNowTick] = useState(Date.now())
 
@@ -167,17 +166,7 @@ export default function LiveMonitoring() {
   useEffect(() => {
     let cancelled = false
     async function tick() {
-      try {
-        const o = await getLiveOverview(slug)
-        if (!cancelled) {
-          setOverview(o)
-          setLiveError('')
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setLiveError(error.response?.data?.detail?.error || 'Live backend unavailable')
-        }
-      }
+      try { const o = await getLiveOverview(slug); if (!cancelled) setOverview(o) } catch { /* keep last */ }
       try { const c = await getCameraHealth(slug); if (!cancelled) setCameraHealth(c) } catch { /* keep last */ }
       await loadAlerts()
       if (!cancelled) setLoadingLive(false)
@@ -207,19 +196,14 @@ export default function LiveMonitoring() {
           <p className="page-subtitle">Near-live store activity · one update per ~60s window</p>
         </div>
         <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${liveError ? 'bg-red-500' : 'bg-green-400 animate-pulse'}`} />
-          <span className={`text-xs ${liveError ? 'text-red-600' : 'text-gray-500'}`}>
-            {liveError || (updatedAgo === null ? 'Connecting…' : `Updated ${updatedAgo}s ago`)}
+          <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+          <span className="text-xs text-gray-500">
+            {updatedAgo === null ? 'Connecting…' : `Updated ${updatedAgo}s ago`}
           </span>
         </div>
       </header>
 
       <div className="flex-1 overflow-auto p-5 space-y-4">
-        {liveError && (
-          <div className="bg-red-50 text-red-700 text-sm px-4 py-3 rounded-lg border border-red-200">
-            Live data could not be refreshed. The last successful snapshot remains visible.
-          </div>
-        )}
 
         {/* KPI Bar */}
         {loadingLive && !kpi ? (

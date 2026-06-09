@@ -32,7 +32,7 @@ export default function Login() {
       const data = await login(form.email, form.password)
       const tokens = { access_token: data.access_token, refresh_token: data.refresh_token }
       const jwtPayload = JSON.parse(atob(data.access_token.split('.')[1]))
-      const user = { user_id: jwtPayload.sub, account_type: data.account_type }
+      const user = { user_id: jwtPayload.sub, account_type: data.account_type, is_super_admin: !!jwtPayload.is_super_admin }
       dispatch({ type: 'LOGIN', payload: { user, tokens } })
       if (data.redirect_slug) {
         navigate(`/store/${data.redirect_slug}/live`, { replace: true })
