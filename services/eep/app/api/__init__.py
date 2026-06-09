@@ -11,7 +11,7 @@ from app.api.routers.employees import router as employees_router
 from app.api.routers.shifts import router as shifts_router
 from app.api.routers.audit import router as audit_router
 from app.api.routers.settings import router as settings_router
-from app.api.routers.schedules import router as schedules_router
+from app.api.routers.operating_hours import router as operating_hours_router
 from app.api.routers.punch import router as punch_router
 
 
@@ -26,7 +26,7 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(shifts_router, prefix="/api")
     app.include_router(audit_router, prefix="/api")
     app.include_router(settings_router, prefix="/api")
-    app.include_router(schedules_router, prefix="/api")
+    app.include_router(operating_hours_router, prefix="/api")
     app.include_router(punch_router, prefix="/api")
 
     # Dev/debug routers: always mounted (incl. production), gated at the router level

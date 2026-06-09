@@ -661,16 +661,17 @@ CREATE INDEX IF NOT EXISTS idx_tracking_history_store_ts
     ON tracking_history(store_id, timestamp_ms);
 
 
-CREATE TABLE IF NOT EXISTS camera_schedules (
-    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_id         UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    camera_config_id UUID        NOT NULL REFERENCES camera_configs(id) ON DELETE CASCADE,
-    days_of_week     INTEGER[]   NOT NULL,
-    start_time       TIME        NOT NULL,
-    end_time         TIME        NOT NULL,
-    is_active        BOOLEAN     NOT NULL DEFAULT true,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+-- Store operating hours — the master clock (C2). Per weekday (0=Mon..6=Sun);
+-- cameras of the store's ACTIVE config version inherit these hours. Overnight
+-- windows wrap when close_time <= open_time. Replaces per-camera camera_schedules.
+CREATE TABLE IF NOT EXISTS store_operating_hours (
+    store_id    UUID        NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    day_of_week SMALLINT    NOT NULL CHECK (day_of_week >= 0 AND day_of_week <= 6),
+    is_open     BOOLEAN     NOT NULL DEFAULT FALSE,
+    open_time   TIME,
+    close_time  TIME,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (store_id, day_of_week)
 );
 
 

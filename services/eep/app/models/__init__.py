@@ -20,7 +20,7 @@ from app.models.employee import Employee
 from app.models.shift_pattern import ShiftPattern
 from app.models.shift_instance import ShiftInstance, ShiftAssignment, BreakRecord
 from app.models.password_reset_token import PasswordResetToken
-from app.models.camera_schedule import CameraSchedule
+from app.models.store_operating_hours import StoreOperatingHours
 from app.models.edge_agent import EdgeAgent
 from app.models.camera_runtime_session import CameraRuntimeSession
 from app.models.punch_in_station import PunchInStation
@@ -52,7 +52,7 @@ __all__ = [
     "ShiftAssignment",
     "BreakRecord",
     "PasswordResetToken",
-    "CameraSchedule",
+    "StoreOperatingHours",
     "EdgeAgent",
     "CameraRuntimeSession",
     "PunchInStation",

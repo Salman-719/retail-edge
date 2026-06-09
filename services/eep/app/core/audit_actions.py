@@ -53,5 +53,7 @@ AUDIT_ACTIONS: frozenset[str] = frozenset(
         "shift_employee_assigned",
         "shift_attendance_updated",
         "break_created",
+        # Store operating hours (master clock)
+        "operating_hours_updated",
     }
 )
