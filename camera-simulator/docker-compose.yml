@@ -21,9 +21,10 @@ services:
       OUTPUT_WIDTH: ${OUTPUT_WIDTH:-1280}
       FFMPEG_LOGLEVEL: ${FFMPEG_LOGLEVEL:-warning}
       RESTART_DELAY_SECONDS: ${RESTART_DELAY_SECONDS:-2}
+      SYNC_START_DELAY_SECONDS: ${SYNC_START_DELAY_SECONDS:-3}
     volumes:
       - ${VIDEO_ROOT:-../testing-data}:/videos:ro
       - ${STREAMS_FILE_HOST:-./streams.csv}:/config/streams.csv:ro
       - ./scripts/publish-streams.sh:/app/publish-streams.sh:ro
       - ./logs:/logs
-    command: ["/bin/sh", "/app/publish-streams.sh"]
+    entrypoint: ["/bin/sh", "/app/publish-streams.sh"]

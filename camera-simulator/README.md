@@ -38,8 +38,8 @@ Edit `streams.csv`:
 
 ```csv
 # name,source,path
-test3-cam1,/videos/Test3/images/Cam1.jpg,test3-cam1
-test3-cam2,/videos/Test3/images/Cam2.jpg,test3-cam2
+test3-cam1,/videos/Test3/Cam1.mp4,test3-cam1
+test3-cam2,/videos/Test3/Cam2.mp4,test3-cam2
 ```
 
 The `source` path is inside the publisher container. By default,
@@ -49,12 +49,13 @@ The `source` path is inside the publisher container. By default,
 /videos/Test1/Camera1.mp4
 /videos/Test1/Camera2.mp4
 /videos/Test2/Videos/video_camera1.mp4
-/videos/Test3/images/Cam1.jpg
+/videos/Test3/Cam1.mp4
+/videos/Test3/Cam2.mp4
 ```
 
-Test3 contains still images rather than videos. The simulator publishes those as
-continuous H.264 RTSP streams so the edge can ingest them like cameras, but they
-will not show motion. For moving people, use Test1 or Test2 videos.
+The two Test3 publishers wait for one shared wall-clock start boundary, begin
+together, and use FFmpeg's infinite input loop. If either publisher exits, the
+whole camera group restarts together to avoid silent drift.
 
 To switch back to the Test1 videos:
 
