@@ -10,7 +10,14 @@ these inline on the real batch hot path; main.py starts the HTTP server.
 """
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram, start_http_server
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+# Reconciliation errors by type (e.g. "db", "reid", "orphan_sweep").
+IEP3_ERRORS = Counter(
+    "iep3_errors_total",
+    "Reconciliation errors by type",
+    ["error_type"],
+)
 
 # How many reconciliation batches IEP3 has fully processed.
 IEP3_BATCHES = Counter(
@@ -43,6 +50,34 @@ IEP3_TRANSITIONS = Counter(
     "iep3_identity_transitions_total",
     "Global identity state-machine transitions",
     ["transition"],
+)
+
+
+# How many cameras contributed to each reconciliation batch.
+# Exposes coordinator behaviour — consistently low values mean cameras are
+# timing out rather than all reporting before the window closes.
+IEP3_CAMERAS_REPORTING = Histogram(
+    "iep3_batch_cameras_reporting",
+    "Number of cameras that reported batch_complete before reconciliation fired",
+    buckets=[1, 2, 3, 4, 5, 6, 8, 10, 16],
+)
+
+# ML signal: cosine similarity score at the moment of a successful ReID match.
+# A healthy system shows mass well above the match threshold (default 0.85).
+# Mass drifting toward the threshold means the model is barely making matches —
+# early warning of cross-camera ReID degradation.
+IEP3_REID_COSINE = Histogram(
+    "iep3_reid_cosine_similarity",
+    "Cosine similarity score at successful cross-camera ReID match time (ML signal)",
+    buckets=[0.70, 0.75, 0.80, 0.85, 0.88, 0.90, 0.92, 0.95, 0.98, 1.0],
+)
+
+# ML signal: fraction of new LocalIDs that matched an existing GlobalID this batch.
+# Near 0 = cross-camera ReID is not linking identities across cameras.
+# Near 1 = unexpectedly high re-identification (possible false-positive merging).
+IEP3_REID_MATCH_RATE = Gauge(
+    "iep3_reid_match_rate",
+    "Fraction of new LocalIDs matched to an existing GlobalID in the last batch (ML signal)",
 )
 
 

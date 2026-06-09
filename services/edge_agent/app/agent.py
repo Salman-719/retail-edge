@@ -275,6 +275,7 @@ def _build_configmap_data(
         "RTSP_URL":            rtsp_url,
         "TARGET_FPS":          str(target_fps),
         "CAMERA_CONFIG_ID":    camera_config_id,
+        "IEP2_METRICS_PORT":   os.environ.get("IEP2_METRICS_PORT", "9201"),
     }
 
 

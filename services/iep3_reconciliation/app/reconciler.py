@@ -35,9 +35,12 @@ from app.camera_graph import CameraGraph, connected_components
 from app.db import get_pool
 from app.metrics import (
     IEP3_BATCHES,
+    IEP3_CAMERAS_REPORTING,
+    IEP3_ERRORS,
     IEP3_MATCHES,
     IEP3_NEW,
     IEP3_RECONCILE,
+    IEP3_REID_MATCH_RATE,
     IEP3_TRANSITIONS,
 )
 from app.repository import Iep3Repository, merge_top_quality
@@ -212,6 +215,10 @@ class Reconciler:
         IEP3_NEW.inc(n_new_globals)
         IEP3_TRANSITIONS.labels(transition="lost").inc(cleanup_stats.get("newly_lost", 0))
         IEP3_TRANSITIONS.labels(transition="exited").inc(cleanup_stats.get("newly_exited", 0))
+        IEP3_CAMERAS_REPORTING.observe(len(reporting_cameras))
+        total_locals = len(known) + n_new_globals
+        if total_locals > 0:
+            IEP3_REID_MATCH_RATE.set(len(known) / total_locals)
 
         logger.info("Batch %d reconciled: %s", batch_number, stats)
 
@@ -221,7 +228,11 @@ class Reconciler:
                 try:
                     await self._repo.orphan_sweep(self._store_id)
                 except Exception:
-                    logger.exception("Periodic orphan sweep failed at batch=%d", batch_number)
+                    IEP3_ERRORS.labels(error_type="orphan_sweep").inc()
+                    logger.exception(
+                        "Periodic orphan sweep failed at batch=%d — skipping",
+                        batch_number,
+                    )
             else:
                 logger.info(
                     "Skipping orphan sweep — reconciliation took %.1fs (>80%% of %.0fs window)",

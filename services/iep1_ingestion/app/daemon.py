@@ -17,6 +17,7 @@ from services.iep1_ingestion.app.grpc_generated import (
     iep1_control_pb2 as _pb2,
     iep1_control_pb2_grpc as _grpc,
 )
+from services.iep1_ingestion.app.metrics import IEP1_ACTIVE_CAMERAS, start_metrics_server
 from services.iep1_ingestion.app.worker import CameraWorker
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class _Iep1ControlServicer(_grpc.Iep1ControlServicer):
             worker = CameraWorker(request)
             await worker.start(self._redis)
             self._workers[camera_id] = worker
+            IEP1_ACTIVE_CAMERAS.set(len(self._workers))
             logger.info("AddCamera camera=%s", camera_id)
             return _pb2.AddCameraResponse(success=True)
         except Exception as exc:
@@ -60,6 +62,7 @@ class _Iep1ControlServicer(_grpc.Iep1ControlServicer):
         if worker is None:
             return _pb2.RemoveCameraResponse(success=False)
         await worker.stop()
+        IEP1_ACTIVE_CAMERAS.set(len(self._workers))
         logger.info("RemoveCamera camera=%s", camera_id)
         return _pb2.RemoveCameraResponse(success=True)
 
@@ -77,6 +80,10 @@ class _Iep1ControlServicer(_grpc.Iep1ControlServicer):
 
 
 async def run_daemon() -> None:
+    metrics_port = int(os.environ.get("IEP1_METRICS_PORT", "9200"))
+    start_metrics_server(metrics_port)
+    logger.info("Prometheus metrics server started on :%d", metrics_port)
+
     redis_client = aioredis.Redis.from_url(LOCAL_REDIS_URL)
 
     servicer = _Iep1ControlServicer()

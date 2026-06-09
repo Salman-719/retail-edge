@@ -11,6 +11,8 @@ import asyncio
 import logging
 import time
 import uuid
+
+from app.metrics import IEP3_ERRORS
 from collections import defaultdict
 from typing import Awaitable, Callable
 
@@ -299,6 +301,7 @@ class BatchCoordinator:
         try:
             await self._on_ready(batch_key, window, reporting)
         except Exception as exc:
+            IEP3_ERRORS.labels(error_type=type(exc).__name__).inc()
             logger.error(
                 "Reconciliation failed for batch_key=%d: %s",
                 batch_key, exc, exc_info=True,

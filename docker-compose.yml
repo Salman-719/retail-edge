@@ -86,12 +86,29 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.51.0
-    ports:
-      - "9090:9090"
+    # NOT exposed to the host — Prometheus has no auth by default.
+    # Access via Grafana (internal Docker network) or kubectl port-forward in prod.
+    expose:
+      - "9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - ./monitoring/recording_rules.yml:/etc/prometheus/recording_rules.yml:ro
       - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    # NOT exposed to the host — internal only, Prometheus routes alerts to it.
+    expose:
+      - "9093"
+    environment:
+      ALERTMANAGER_SMTP_PASSWORD: ${ALERTMANAGER_SMTP_PASSWORD}
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
     restart: unless-stopped
 
   redis_exporter:
@@ -119,6 +136,15 @@ services:
     image: prom/node-exporter:v1.8.1
     ports:
       - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
     restart: unless-stopped
 
   grafana:
@@ -127,8 +153,20 @@ services:
       - "3001:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-retailvision_dev}
+      # GRAFANA_PASSWORD must be set in the environment or .env file — never hardcode it.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
+      # SMTP — used by Grafana unified alerting contact points
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: "smtp-mail.outlook.com:587"
+      GF_SMTP_USER: ${SMTP_USER}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD}
+      GF_SMTP_FROM_ADDRESS: ${SMTP_FROM}
+      GF_SMTP_FROM_NAME: "RetailVision Alerts"
+      GF_SMTP_STARTTLS_POLICY: "MandatoryStartTLS"
+      # Use the external Alertmanager for routing instead of Grafana's built-in one
+      GF_UNIFIED_ALERTING_ENABLED: "true"
+      GF_ALERTING_ENABLED: "false"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -220,6 +258,9 @@ services:
       IEP1_HEALTH_SOCK: "unix:///tmp/iep1-sockets/iep1_health.sock"
       TMPFS_FRAME_ROOT: /dev/shm/frames
       JPEG_QUALITY: ${JPEG_QUALITY:-85}
+      IEP1_METRICS_PORT: "9200"
+    expose:
+      - "9200"              # Prometheus /metrics (job "iep1")
     volumes:
       - iep1-sockets:/tmp/iep1-sockets
       # Shared frame store: IEP1 writes JEPGs here; IEP2 reads them by tmpfs path.
@@ -273,10 +314,13 @@ services:
       REID_INPUT_SOCK: "ipc:///tmp/sockets/reid_input.sock"
       REID_HEALTH_SOCK: "unix:///tmp/sockets/reid_health.sock"
       REID_HEALTH_TCP_ADDR: "[::]:50053"
+      REID_METRICS_PORT: "9401"
     volumes:
       - ipc-sockets:/tmp/sockets
     ports:
       - "50053:50053"
+    expose:
+      - "9401"              # Prometheus /metrics (job "reid")
     restart: on-failure
 
   iep2_vision:
@@ -299,6 +343,9 @@ services:
       TMPFS_FRAME_ROOT: /dev/shm/frames
       YOLO_HEALTH_TCP_ADDR: yolo-service:50052
       REID_HEALTH_TCP_ADDR: reid-service:50053
+      IEP2_METRICS_PORT: "9201"
+    expose:
+      - "9201"              # Prometheus /metrics — scraped by edge Prometheus via k8s_sd
     volumes:
       - ./testing-data:/workspace/testing-data:ro
       - ipc-sockets:/tmp/sockets
@@ -394,6 +441,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8006:8006"
+    expose:
+      - "8006"              # Prometheus /metrics at /metrics (instrumentator)
 
   live_bridge:
     build:

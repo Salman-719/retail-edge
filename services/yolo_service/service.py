@@ -29,6 +29,7 @@ import msgpack
 import numpy as np
 import zmq
 import zmq.asyncio
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 log = logging.getLogger("yolo_service")
 
@@ -42,6 +43,50 @@ YOLO_CONF_THRESHOLD   = float(os.environ.get("YOLO_CONF",        "0.25"))
 YOLO_IOU_THRESHOLD    = float(os.environ.get("YOLO_IOU",         "0.45"))
 MAX_BATCH_SIZE        = int(os.environ.get("YOLO_MAX_BATCH_SIZE",  "32"))
 BATCH_TIMEOUT_MS      = float(os.environ.get("YOLO_BATCH_TIMEOUT_MS", "20"))
+YOLO_METRICS_PORT     = int(os.environ.get("YOLO_METRICS_PORT", "9400"))
+
+# ── Prometheus metrics (scraped on :9400, job "detector") ─────────────────────
+# model_version label carries model-quality metrics (canary sets it to "canary");
+# infra/throughput metrics do not. Only additive instrumentation — no behaviour.
+_MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
+
+DETECTOR_FRAMES = Counter(
+    "detector_frames_total",
+    "Total frames processed by the YOLO inference service",
+)
+DETECTOR_DETECTIONS = Counter(
+    "detector_detections_total",
+    "Person detections returned across all batches",
+    ["model_version"],
+)
+DETECTOR_ERRORS = Counter(
+    "detector_errors_total",
+    "Frames that failed to decode or caused an inference error",
+)
+DETECTOR_INFERENCE = Histogram(
+    "detector_inference_seconds",
+    "Wall-clock time for one TRT batch inference call",
+    ["model_version"],
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+)
+DETECTOR_BATCH_SIZE = Histogram(
+    "detector_batch_size",
+    "Number of frames per TRT inference batch — GPU utilisation proxy",
+    buckets=[1, 2, 4, 8, 16, 24, 32, 48, 64],
+)
+# ML signal: per-detection confidence distribution; drift toward lower buckets
+# signals scene degradation before errors appear.
+DETECTOR_CONFIDENCE = Histogram(
+    "detector_detection_confidence",
+    "Confidence score of each accepted person detection (class 0)",
+    ["model_version"],
+    buckets=[0.25, 0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0],
+)
+DETECTOR_CONF_MEAN = Gauge(
+    "detector_inference_confidence_mean",
+    "Mean confidence of all person detections in the most recent inference batch",
+    ["model_version"],
+)
 
 # ── Per-camera result sockets ─────────────────────────────────────────────────
 # One PUSH socket per camera_id — routes results to the correct IEP2 container.
@@ -98,13 +143,19 @@ def _decode_frame(jpeg_bytes: bytes) -> np.ndarray:
 def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
     """Batch inference on all frames; R4 filters to class 0 (person) only."""
     frames = [_decode_frame(item["frame"]) for item in batch_items]
+    t0 = time.monotonic()
     results = model(
         frames,
         verbose=False,
         conf=YOLO_CONF_THRESHOLD,
         iou=YOLO_IOU_THRESHOLD,
     )
+    DETECTOR_INFERENCE.labels(model_version=_MODEL_VERSION).observe(time.monotonic() - t0)
+    DETECTOR_BATCH_SIZE.observe(len(batch_items))
+    DETECTOR_FRAMES.inc(len(batch_items))
+
     responses = []
+    all_confs = []
     for item, result in zip(batch_items, results):
         detections = []
         if result.boxes is not None:
@@ -118,12 +169,19 @@ def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
                     "bbox_xyxy":  [float(x) for x in xyxy],
                     "confidence": float(conf),
                 })
+                DETECTOR_CONFIDENCE.labels(model_version=_MODEL_VERSION).observe(float(conf))
+                all_confs.append(float(conf))
+        DETECTOR_DETECTIONS.labels(model_version=_MODEL_VERSION).inc(len(detections))
         responses.append({
             "request_id":   item["request_id"],
             "camera_id":    item["camera_id"],
             "timestamp_ms": item["timestamp_ms"],
             "detections":   detections,
         })
+
+    if all_confs:
+        DETECTOR_CONF_MEAN.labels(model_version=_MODEL_VERSION).set(sum(all_confs) / len(all_confs))
+
     return responses
 
 
@@ -190,6 +248,11 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+    # Prometheus metrics HTTP server — started before engine load so Prometheus
+    # sees the target as UP while the model is still initialising.
+    start_http_server(YOLO_METRICS_PORT)
+    log.info("Prometheus metrics server started on :%d", YOLO_METRICS_PORT)
 
     from grpc_health.v1 import health, health_pb2
 

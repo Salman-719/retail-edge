@@ -1,0 +1,9 @@
+apiVersion: 1
+
+datasources:
+  - name: MLflow
+    type: grafana-mlflow-datasource
+    access: proxy
+    url: http://mlflow:5000
+    jsonData:
+      timeout: 30
