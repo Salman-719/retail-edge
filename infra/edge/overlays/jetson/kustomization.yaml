@@ -10,10 +10,10 @@ resources:
 images:
   - name: ghcr.io/your-org/retailvision/iep1
     newName: ghcr.io/salman-719/retailvision/iep1
-    newTag: "1.2.0"
+    newTag: "1.3.0"
   - name: ghcr.io/your-org/retailvision/yolo
     newName: ghcr.io/salman-719/retailvision/yolo
-    newTag: "1.2.0"
+    newTag: "1.3.0"
   - name: ghcr.io/your-org/retailvision/reid
     newName: ghcr.io/salman-719/retailvision/reid
-    newTag: "1.2.0"
+    newTag: "1.3.0"

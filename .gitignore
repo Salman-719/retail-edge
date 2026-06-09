@@ -62,6 +62,7 @@ certs/*.key
 infra/aws/.terraform/
 infra/aws/.terraform.lock.hcl
 infra/aws/terraform.tfvars
+infra/aws/backend.tf
 *.tfplan
 *.tfstate
 *.tfstate.*

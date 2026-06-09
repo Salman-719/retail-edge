@@ -27,13 +27,25 @@ The cloud deployment runs on Amazon EKS. Edge devices still run k3s.
   - tainted `stable=true:NoSchedule`.
   - hosts TimescaleDB/Postgres, Redis, Prometheus, Alertmanager, Grafana, MLflow,
     ingress-nginx, AWS Load Balancer Controller, cert-manager, External Secrets,
-    metrics-server, Karpenter, CoreDNS, and EBS CSI controller.
+    metrics-server, KEDA, Karpenter, CoreDNS, and EBS CSI controller.
 
 - **Karpenter worker pool**:
   - arm64 Graviton capacity.
   - Spot with on-demand fallback.
-  - launches nodes for EEP, frontend, IEP6, per-store IEP3/IEP4, and IEP5 jobs.
+  - launches nodes for EEP, frontend, IEP6 agent replicas, per-store IEP3/IEP4,
+    and IEP5 jobs.
   - consolidates empty or underutilized nodes.
+
+## Autoscaling Layers
+
+- **HPA** scales CPU-bound stateless services such as EEP and frontend.
+- **KEDA** scales `iep6-agent` from Prometheus
+  `http_requests_inprogress{job="iep6-agent"}` because the agent is mostly
+  OpenAI/API I/O wait rather than CPU-bound work.
+- **Karpenter** adds or removes Kubernetes nodes when HPA/KEDA/per-store workers
+  create pending pods.
+- **`iep6-scheduler` is a singleton** and is never autoscaled; it owns scheduled
+  daily/weekly insight jobs.
 
 ## Scheduling Rules
 
@@ -54,8 +66,8 @@ trigger Karpenter instead of consuming stable DB/controller capacity.
 
 ## Deployment Flow
 
-1. Terraform creates VPC, EKS, stable nodes, Karpenter, cluster add-ons, S3, IAM,
-   Secrets Manager entries, fixed EIPs, and the WireGuard gateway.
+1. Terraform creates VPC, EKS, stable nodes, Karpenter, KEDA, cluster add-ons,
+   S3, IAM, Secrets Manager entries, fixed EIPs, and the WireGuard gateway.
 2. `aws eks update-kubeconfig` points `kubectl` at the cluster.
 3. Helm installs `charts/retailvision` with production values and Terraform output
    hostnames/subnet IDs, creating the public gRPC NLB and private data NLBs.

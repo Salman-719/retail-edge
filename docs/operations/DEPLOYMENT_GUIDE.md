@@ -57,6 +57,65 @@ bottom; do not skip.
 
 ## PART A — Cloud deployment on EKS (from scratch)
 
+### A0. Recommended smooth path
+
+Use this path for a fresh deployment or after intentionally tearing down the old
+cloud. It avoids the mistakes we already hit: missing Helm locally, wrong
+architecture Terraform binary, stale plans, lost CloudShell state, missing image
+tags, private GHCR packages, dropped gRPC NLB annotations, and `--reuse-values`
+carrying broken old values into a first install.
+
+Run from a machine that has AWS access and the repo. **AWS CloudShell in
+`eu-west-1` is the safest place** if your laptop is blocked by
+`releases.hashicorp.com` geo/WAF responses.
+
+```bash
+cd "$HOME"
+git clone https://github.com/Salman-719/retail-edge.git
+cd "$HOME/retail-edge"
+git checkout deploy/aws-eks
+git pull --ff-only origin deploy/aws-eks
+
+export AWS_REGION=eu-west-1
+export OWNER=salman-719
+export VERSION=1.3.1   # use the image tag built from this commit
+export LETSENCRYPT_EMAIL=ali.salman@edgebot.com
+export BUCKET="retailvision-prod-objects-$(aws sts get-caller-identity --query Account --output text)"
+
+# Optional, but required for the IEP6 agent to call OpenAI.
+export OPENAI_API_KEY='sk-...'
+
+# If this image tag is not already built, push the release tag and wait for
+# GitHub Actions -> Build & Push Images to finish green.
+if ! git ls-remote --tags origin "refs/tags/v$VERSION" | grep -q .; then
+  git tag "v$VERSION"
+  git push origin "v$VERSION"
+fi
+
+make cloud-eks-deploy
+```
+
+The script:
+- checks that the required GHCR images exist and are public for `$VERSION`;
+- writes `infra/aws/terraform.tfvars` from the exports above;
+- creates an encrypted/versioned S3 Terraform state bucket and DynamoDB lock
+  table, then writes an ignored `infra/aws/backend.tf`;
+- runs `terraform init`, `validate`, `plan`, and `apply`;
+- configures `kubectl`;
+- writes `retailvision/openai-api-key` if `OPENAI_API_KEY` is set;
+- runs `helm lint` and `helm template`;
+- installs the chart with Terraform outputs wired into Helm; and
+- writes reusable exports to `/tmp/retailvision-cloud.env`, including
+  `APP_HOST`, `EEP_HOST`, `AGENT_SECRET`, `WG_ENDPOINT`, `PG_HOST`, and
+  `REDIS_HOST`;
+- writes the cloud CA certificate to `/tmp/retailvision-ca.crt` for edge setup.
+
+If the old cloud still exists and you are intentionally wiping it, run the
+teardown in **Part F** first. If old local Terraform state is already lost, do not
+guess with a fresh local-state checkout: recover/import state or delete the old
+AWS resources from the console before running a fresh deployment with the same
+names. New deployments created by `make cloud-eks-deploy` use S3 remote state.
+
 ### A1. [LOCAL] Install tools & fix the AWS profile
 
 ```bash
@@ -88,8 +147,8 @@ git checkout deploy/aws-eks
 ### A3. [LOCAL] Build & publish the images (GHCR)
 
 ```bash
-git tag v1.2.0
-git push origin v1.2.0
+git tag "v$VERSION"
+git push origin "v$VERSION"
 ```
 **Expect:** a "Build & Push Images" run starts in GitHub → **Actions**. Wait until
 the cloud matrix jobs are green (≈15–25 min): `eep`, `iep3`, `iep4`, `iep5`,
@@ -102,15 +161,14 @@ Then make the cloud images pullable without credentials:
   Public**. (EEP provisions `iep3`/`iep4`/`iep5` at runtime, so those images must
   be pullable too.)
 
-Before installing Helm, verify the required tag exists. The production chart
-currently expects `1.2.0`:
+Before installing Helm, verify the required tag exists:
 ```bash
 for image in eep iep3 iep4 iep5 iep6 frontend mlflow; do
   token="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:salman-719/retailvision/$image:pull" | jq -r .token)"
   curl -fsSL -H "Authorization: Bearer $token" \
-    "https://ghcr.io/v2/salman-719/retailvision/$image/manifests/1.2.0" \
-    -H 'Accept: application/vnd.oci.image.index.v1+json' >/dev/null &&
-    echo "$image:1.2.0 OK" || echo "$image:1.2.0 MISSING/PRIVATE"
+    "https://ghcr.io/v2/salman-719/retailvision/$image/manifests/$VERSION" \
+    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' >/dev/null &&
+    echo "$image:$VERSION OK" || echo "$image:$VERSION MISSING/PRIVATE"
 done
 ```
 Do not install Helm until every required cloud image prints `OK`.
@@ -146,7 +204,7 @@ terraform validate
 terraform plan -out eks.tfplan
 terraform apply eks.tfplan
 ```
-**Expect:** an EKS cluster, two stable on-demand nodes, Karpenter, AWS Load
+**Expect:** an EKS cluster, two stable on-demand nodes, Karpenter, KEDA, AWS Load
 Balancer Controller, ingress-nginx, cert-manager, External Secrets,
 metrics-server, gp3 StorageClass, Secrets Manager entries, and an S3 bucket.
 
@@ -265,15 +323,16 @@ kubectl get nodes -L workload
 kubectl get pods -A
 kubectl get sc
 kubectl -n kube-system get deploy aws-load-balancer-controller metrics-server karpenter
+kubectl -n keda get deploy
 kubectl -n cert-manager get pods
 kubectl -n external-secrets get pods
 aws ssm describe-instance-information \
   --filters "Key=InstanceIds,Values=$WG_INSTANCE_ID" \
   --query 'InstanceInformationList[0].PingStatus' --output text
 ```
-**Expect:** two `workload=stable` nodes, add-ons Running, and `gp3` as the default
-StorageClass. The SSM command should print `Online`; user-data may need 2–5
-minutes after Terraform finishes.
+**Expect:** two `workload=stable` nodes, add-ons Running, KEDA Running, and `gp3`
+as the default StorageClass. The SSM command should print `Online`; user-data may
+need 2–5 minutes after Terraform finishes.
 
 Read the generated WireGuard server public key:
 
@@ -288,6 +347,15 @@ echo "$WG_SERVER_PUBLIC_KEY"
 Terraform prints `helm_install_hint`; use it, or run the equivalent command:
 ```bash
 cd ../..
+helm lint ./charts/retailvision \
+  -f charts/retailvision/values.production.yaml \
+  --set global.imageRegistry=ghcr.io/$OWNER/retailvision \
+  --set ingress.appHost="$APP_HOST" \
+  --set eep.grpcHost="$EEP_HOST" \
+  --set eep.grpc.serviceType=LoadBalancer \
+  --set s3.bucket="$BUCKET" \
+  --set s3.region="$REGION"
+
 helm upgrade --install retailvision ./charts/retailvision \
   -f charts/retailvision/values.production.yaml \
   --set global.imageRegistry=ghcr.io/$OWNER/retailvision \
@@ -307,7 +375,14 @@ helm upgrade --install retailvision ./charts/retailvision \
   --set s3.region="$REGION" \
   --set monitoring.grafana.host="grafana.$INGRESS_EIP.nip.io" \
   --set mlflow.host="mlflow.$INGRESS_EIP.nip.io" \
-  -n retailvision --create-namespace
+  --set eep.image.tag="$VERSION" \
+  --set iep3.image.tag="$VERSION" \
+  --set iep4.image.tag="$VERSION" \
+  --set iep5.image.tag="$VERSION" \
+  --set iep6.image.tag="$VERSION" \
+  --set frontend.image.tag="$VERSION" \
+  --set mlflow.image.tag="$VERSION" \
+  -n retailvision --create-namespace --atomic --timeout 20m
 ```
 **Expect:** `STATUS: deployed`. EEP runs Alembic at startup, building the schema
 through the current head revision, including TimescaleDB hypertables, edge-agent
@@ -323,6 +398,7 @@ were supplied by `--set-string`.
 ```bash
 kubectl -n retailvision get pods -o wide
 kubectl -n retailvision get hpa
+kubectl -n retailvision get scaledobject
 kubectl -n retailvision get svc eep-grpc postgres redis-server
 kubectl -n retailvision logs deploy/eep --tail=30
 ```
@@ -384,14 +460,19 @@ kubectl -n retailvision get cm prometheus-config grafana-dashboards alertmanager
 kubectl -n retailvision get ingress grafana mlflow
 kubectl -n retailvision get certificate grafana-tls mlflow-tls
 kubectl -n retailvision get endpoints grafana mlflow iep6
+kubectl -n retailvision get deploy iep6-agent iep6-scheduler
+kubectl -n retailvision get scaledobject iep6-agent
 kubectl -n retailvision port-forward svc/prometheus 9090:9090 >/tmp/rv-prometheus.log 2>&1 &
 sleep 2
 curl -fsS "http://localhost:9090/-/ready"
 curl -fsS "http://localhost:9090/api/v1/rules" | jq '.data.groups | length'
 curl -fsS "http://localhost:9090/api/v1/query?query=up%7Bjob%3D%22iep6%22%7D" | jq '.data.result'
+curl -fsS "http://localhost:9090/api/v1/query?query=sum%28http_requests_inprogress%7Bjob%3D%22iep6-agent%22%7D%29" | jq '.data.result'
 ```
 **Expect:** all four deployments available, Prometheus ready, and a non-zero
-rules group count. The IEP6 query should return value `1`.
+rules group count. The IEP6 service query should return value `1`; the
+`iep6-agent` in-flight request query should return a numeric series (usually `0`
+when idle).
 
 Grafana and MLflow URLs, when set in Helm:
 ```bash
@@ -411,8 +492,10 @@ curl -fsS "https://mlflow.$INGRESS_EIP.nip.io/health"
 ```
 **Expect:** Grafana returns `HTTP/2 200` or `302`; MLflow returns `OK`.
 
-IEP6 is routed through the frontend nginx and now validates the same JWT plus
-store membership used by EEP. Confirm an unauthenticated request is rejected:
+IEP6 is routed through the frontend nginx and validates the same JWT plus store
+membership used by EEP. The request-serving deployment is `iep6-agent`; scheduled
+daily/weekly jobs run only in the singleton `iep6-scheduler`. Confirm an
+unauthenticated request is rejected:
 ```bash
 curl -sk -o /dev/null -w "%{http_code}\n" \
   "https://$APP_HOST/api/store/example/agent/reports?type=daily"
@@ -421,9 +504,8 @@ curl -sk -o /dev/null -w "%{http_code}\n" \
 persisted daily and weekly reports from `agent_insights`; it no longer displays
 sample reports. Weekly summaries run each Monday at 15 minutes past the configured
 daily insight hour.
-IEP6 stays at one replica while its scheduled insight/alert jobs run in-process.
-Do not enable its HPA unless `iep6.schedulerEnabled=false` and scheduling is
-moved to a separately managed worker.
+Do not scale `iep6-scheduler`. KEDA owns the `iep6-agent` HPA by reading
+`http_requests_inprogress{job="iep6-agent"}` from Prometheus.
 
 Run an MLOps smoke check from the repo root:
 ```bash
@@ -550,9 +632,9 @@ The bootstrap **detects the device** and applies the matching kustomize overlay
 
 | Profile | Detected when | yolo/reid image | GPU | Notes |
 |---|---|---|---|---|
-| `jetson` | `/etc/nv_tegra_release` present | `:1.2.0` (L4T TensorRT) | yes | **built on the device** (C6) |
-| `cuda` | `nvidia-smi` works (not Jetson) | `:1.2.0-cuda` (CI) | yes | discrete NVIDIA laptop/PC |
-| `cpu` | no NVIDIA GPU | `:1.2.0-cpu` (CI) | no | dev/low-throughput; Macs too |
+| `jetson` | `/etc/nv_tegra_release` present | `:1.3.0` (L4T TensorRT) | yes | **built on the device** (C6) |
+| `cuda` | `nvidia-smi` works (not Jetson) | `:1.3.0-cuda` (CI) | yes | discrete NVIDIA laptop/PC |
+| `cpu` | no NVIDIA GPU | `:1.3.0-cpu` (CI) | no | dev/low-throughput; Macs too |
 
 `iep1`/`iep2`/`edge-agent` are identical across profiles.
 
@@ -586,8 +668,80 @@ WireGuard gateway. Neither database is internet-facing.
   `get.k3s.io`; plus RTSP access to each camera, normally TCP `554`.
 - Root/sudo. The bootstrap installs k3s itself.
 - GHCR images public (or `GHCR_USER`/`GHCR_TOKEN`): `iep1` and `iep2`
-  (all profiles); **`yolo`/`reid`** `:1.2.0-cpu` and `:1.2.0-cuda` from CI for
-  those profiles; `yolo`/`reid` `:1.2.0` (Jetson) built on-device in C6.
+  (all profiles); **`yolo`/`reid`** `:1.3.0-cpu` and `:1.3.0-cuda` from CI for
+  those profiles; `yolo`/`reid` `:1.3.0` (Jetson) built on-device in C6.
+
+### C0.5. [OPTIONAL SIMULATOR] Publish videos as RTSP cameras
+
+For a real simulation without physical cameras, run the standalone root-level
+camera simulator on a laptop/server that the edge device can reach on the LAN.
+It publishes one RTSP stream per video through MediaMTX, so EEP and the edge see
+normal camera URLs.
+
+**On the simulator laptop/server:**
+
+```bash
+cd /path/to/retail-edge
+cd camera-simulator
+cp .env.example .env
+./scripts/start.sh
+```
+
+The default config publishes Test3 camera 1 and camera 2 as RTSP streams. Test3
+contains still frames, so these are static camera feeds. For moving video, switch
+the simulator to `streams.test1.csv` or add Test2 videos to `streams.csv`.
+
+The script prints URLs like:
+
+```text
+rtsp://192.168.1.45:8554/test3-cam1
+rtsp://192.168.1.45:8554/test3-cam2
+```
+
+Paste those values into the EEP camera stream URL fields. Use the simulator
+machine's LAN IP, not `localhost`, because the edge device must connect to it.
+
+To add more simulated cameras, edit `camera-simulator/streams.csv`:
+
+```csv
+# name,source,path
+cam1,/videos/Test1/Camera1.mp4,cam1
+cam2,/videos/Test1/Camera2.mp4,cam2
+cam3,/videos/Test2/Videos/video_camera3.mp4,cam3
+```
+
+To run the simulator on an AWS EC2 instance, open inbound TCP `8554` in the
+instance security group from the edge device public IP, then use:
+
+```text
+rtsp://<ec2-public-ip-or-dns>:8554/test3-cam1
+rtsp://<ec2-public-ip-or-dns>:8554/test3-cam2
+```
+
+Do not leave RTSP open to the whole internet except for a short demo window; the
+standalone simulator is intentionally simple and does not enable authentication.
+
+If a stream does not decode on the edge, switch the simulator to H.264
+transcoding:
+
+```bash
+cd camera-simulator
+sed -i.bak 's/^PUBLISH_MODE=.*/PUBLISH_MODE=h264/' .env
+./scripts/restart.sh
+```
+
+Verify from the edge after C4/C5:
+
+```bash
+sudo k3s kubectl -n retailvision exec deploy/iep1-daemon -- python - <<'PY'
+import cv2
+for url in ["rtsp://192.168.1.45:8554/test3-cam1", "rtsp://192.168.1.45:8554/test3-cam2"]:
+    cap = cv2.VideoCapture(url)
+    ok, _ = cap.read()
+    cap.release()
+    print(url, "OK" if ok else "FAILED")
+PY
+```
 
 ### C1. [LOCAL/CLOUDSHELL] Collect cloud inputs
 
@@ -716,7 +870,7 @@ made them Public in Part A (A3), skip this. Otherwise uncomment and fill in:
 Run the bootstrap (installs k3s + NVIDIA plugin + edge manifests + the Edge Agent
 systemd service):
 ```bash
-sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.2.0 "$EEP_HOST" "$AGENT_SECRET"
+sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SECRET"
 ```
 
 The script refuses to start without `DATABASE_URL_SERVER`,
@@ -785,10 +939,10 @@ Build from the **repo root** and push:
 ```bash
 cd ~/path/to/retail-edge
 echo "$GHCR_TOKEN" | docker login ghcr.io -u salman-719 --password-stdin
-docker build -f services/yolo_service/Dockerfile  -t ghcr.io/salman-719/retailvision/yolo:1.2.0  .
-docker push ghcr.io/salman-719/retailvision/yolo:1.2.0
-docker build -f services/reid_service/Dockerfile -t ghcr.io/salman-719/retailvision/reid:1.2.0 .
-docker push ghcr.io/salman-719/retailvision/reid:1.2.0
+docker build -f services/yolo_service/Dockerfile  -t ghcr.io/salman-719/retailvision/yolo:1.3.0  .
+docker push ghcr.io/salman-719/retailvision/yolo:1.3.0
+docker build -f services/reid_service/Dockerfile -t ghcr.io/salman-719/retailvision/reid:1.3.0 .
+docker push ghcr.io/salman-719/retailvision/reid:1.3.0
 ```
 Then make `retailvision/yolo` and `retailvision/reid` **Public** (GitHub →
 Packages), like the others.
@@ -821,7 +975,8 @@ plugin config — check the device-plugin pod logs
 
 The canonical sequence to ship **any** change — new upstream code (e.g. a
 `reconfig-edge` merge), config, or chart edits. Pick a new version that does not
-already exist in GHCR (e.g. `1.2.1`).
+already exist in GHCR (for example, the current release is `1.3.0`; the next
+release would normally be `1.3.1` or `1.4.0`).
 
 **1. [LOCAL] Bring in changes + reconcile the deploy layer**
 ```bash
@@ -905,13 +1060,13 @@ kubectl -n retailvision set image statefulset -l app=iep4 \
 > Postgres re-seeds. Existing data is lost — back up first if it matters.
 
 **4. [EDGE] Update each store's device only when edge code or image tags changed**
-(`git pull` first). The `1.3.0` live/analytics/alerts release is cloud-only and
-does not require an edge redeploy.
+(`git pull` first). If the release changes edge images or edge manifests, re-run
+the bootstrap with the same release tag used by the cloud.
 - **cpu / cuda**: re-run the bootstrap — it re-applies the overlay at the new tag
   and pulls the new `-cpu`/`-cuda` images:
   ```bash
   cd ~/path/to/retail-edge && git pull
-  sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.2.1 "$EEP_HOST" "$AGENT_SECRET"
+  sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SECRET"
   ```
 - **jetson**: rebuild `yolo`/`reid` on the device at the new tag (C6), then re-run
   the bootstrap.
@@ -1002,7 +1157,7 @@ kubectl -n retailvision rollout restart statefulset/redis-server
 # move together:
 cd ~/retail-edge
 git pull --ff-only origin deploy/aws-eks
-sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.2.1 "$EEP_HOST" "$AGENT_SECRET"
+sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.3.0 "$EEP_HOST" "$AGENT_SECRET"
 ```
 
 ---
@@ -1021,7 +1176,7 @@ sudo -E bash scripts/bootstrap-edge-k3s.sh "$STORE" 1.2.1 "$EEP_HOST" "$AGENT_SE
 | Public app returns nginx `503 Service Temporarily Unavailable` | ingress/NLB is reachable, but the `frontend` Service has no Ready pod endpoints | inspect `kubectl -n retailvision get pods,endpoints`, events, and `describe pod`; fix Pending/ImagePull/secret/migration failures before retrying the URL |
 | Public app returns nginx `504`, while `curl http://frontend/` works inside the namespace | ingress-nginx and the frontend pods are on different nodes, but the EKS node security group blocks the frontend container port (`80`) between nodes | pull the Terraform fix that adds `node_security_group_additional_rules.ingress_nodes_all`, then run `terraform plan` and `terraform apply` from the CloudShell directory that owns the Terraform state |
 | `helm ... namespaces "retailvision" not found` on first try | namespace race | include `--create-namespace` (step A6) |
-| Pod `ImagePullBackOff`: GHCR `not found` | the chart tag was never built/pushed | trigger **Build & Push Images** with tag `1.2.0` or push Git tag `v1.2.0`; wait for all required jobs to pass, then restart affected deployments |
+| Pod `ImagePullBackOff`: GHCR `not found` | the chart tag was never built/pushed | trigger **Build & Push Images** with tag `1.3.0` or push Git tag `v1.3.0`; wait for all required jobs to pass, then restart affected deployments |
 | Pod `ImagePullBackOff`: GHCR `403 Forbidden` | the GHCR package is private | make the package Public, or configure an `imagePullSecret`; for the current public-image deployment, make all cloud packages Public |
 | `ImagePullBackOff` on a **freshly-tagged** image (e.g. `eep:1.1.0`) right after a release | that service's CI job hasn't finished (or failed); other images already pushed | wait for **all** matrix jobs green (check per-image tag in Packages); then `kubectl -n retailvision delete pod -l app=<svc>` to retry. Confirm which tags exist: `curl -s "https://ghcr.io/token?scope=repository:<owner>/retailvision/<svc>:pull&service=ghcr.io"` then query `/v2/.../tags/list` |
 | Pod `Pending` "Insufficient cpu" | Karpenter cannot launch enough capacity or limits are too low | check `kubectl -n kube-system logs deploy/karpenter`, AWS quotas, and `karpenter_cpu_limit`; raise limits or allow larger instance families (D3) |
@@ -1162,16 +1317,55 @@ kubectl -n retailvision rollout restart deploy/eep
 
 ## PART F — Teardown
 
-**[LOCAL]:**
+Run this from the same checkout that owns the Terraform state. For deployments
+created by `make cloud-eks-deploy`, recreate `infra/aws/backend.tf` if needed and
+run `terraform init -reconfigure` with the same backend bucket/table. If an older
+deployment used only local state and the state file is gone, stop and
+recover/import state before running `terraform destroy`; otherwise Terraform
+cannot know what it owns.
+
+**[LOCAL/CLOUDSHELL]:**
 ```bash
+cd "$HOME/retail-edge"
+git checkout deploy/aws-eks
+cd infra/aws
+export AWS_REGION=eu-west-1
+# Local laptop only. In CloudShell, leave AWS_PROFILE unset.
+# export AWS_PROFILE=adsal
+export ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+export TF_STATE_BUCKET="${TF_STATE_BUCKET:-retailvision-tfstate-${ACCOUNT_ID}-${AWS_REGION}}"
+export TF_LOCK_TABLE="${TF_LOCK_TABLE:-retailvision-tflock-${AWS_REGION}}"
+
+cat > backend.tf <<EOF
+terraform {
+  backend "s3" {}
+}
+EOF
+
+terraform init -reconfigure \
+  -backend-config="bucket=${TF_STATE_BUCKET}" \
+  -backend-config="key=retailvision/${AWS_REGION}/terraform.tfstate" \
+  -backend-config="region=${AWS_REGION}" \
+  -backend-config="dynamodb_table=${TF_LOCK_TABLE}" \
+  -backend-config="encrypt=true"
+
+aws eks update-kubeconfig --name "$(terraform output -raw cluster_name)" --region "$AWS_REGION" 2>/dev/null || true
 helm uninstall retailvision -n retailvision 2>/dev/null || true
 kubectl delete namespace retailvision --ignore-not-found --wait=true
-cd infra/aws
-export AWS_PROFILE=adsal
+
+export BUCKET="$(terraform output -raw s3_bucket 2>/dev/null || true)"
+if [ -n "$BUCKET" ]; then
+  aws s3 rm "s3://$BUCKET" --recursive --region "$AWS_REGION" || true
+  VERSIONS="$(aws s3api list-object-versions --bucket "$BUCKET" --region "$AWS_REGION" --query 'Versions[].{Key:Key,VersionId:VersionId}' --output json)"
+  MARKERS="$(aws s3api list-object-versions --bucket "$BUCKET" --region "$AWS_REGION" --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' --output json)"
+  [ "$(echo "$VERSIONS" | jq 'length')" -gt 0 ] && aws s3api delete-objects --bucket "$BUCKET" --region "$AWS_REGION" --delete "$(jq -nc --argjson objects "$VERSIONS" '{Objects:$objects}')" || true
+  [ "$(echo "$MARKERS" | jq 'length')" -gt 0 ] && aws s3api delete-objects --bucket "$BUCKET" --region "$AWS_REGION" --delete "$(jq -nc --argjson objects "$MARKERS" '{Objects:$objects}')" || true
+fi
+
 terraform destroy
 ```
-> S3 buckets and gp3 volumes use Retain/versioning — empty/delete them in the
-> console if you want them fully gone (otherwise they keep costing).
+If `terraform destroy` still reports `BucketNotEmpty`, repeat the S3 version
+cleanup and rerun `terraform destroy`.
 
 ---
 

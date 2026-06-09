@@ -125,7 +125,11 @@ iep6:
   openaiModel: "gpt-4o-mini"
   enableRawSql: false      # guarded ad-hoc SELECT tool (off by default)
   enableEepActions: false  # state-changing actions via EEP (off = read-only)
-  schedulerEnabled: true   # in-process scheduler; keep one replica unless disabled
+  # The same image runs as two deployments:
+  # - iep6-agent: request API, KEDA-scaled, scheduler disabled.
+  # - iep6-scheduler: singleton scheduled jobs, scheduler enabled.
+  scheduler:
+    enabled: true
   resources:
     requests:
       cpu: "100m"
@@ -133,6 +137,14 @@ iep6:
     limits:
       cpu: "500m"
       memory: "512Mi"
+  keda:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    pollingInterval: 15
+    cooldownPeriod: 120
+    inflightThreshold: "10"
+    prometheusServerAddress: "http://prometheus.retailvision.svc:9090"
   hpa:
     enabled: false
     minReplicas: 1

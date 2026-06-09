@@ -144,6 +144,12 @@ variable "external_secrets_version" {
   default     = "0.10.4"
 }
 
+variable "keda_version" {
+  description = "KEDA Helm chart version (event/metric-driven autoscaling for IEP6 agent)."
+  type        = string
+  default     = "2.14.0"
+}
+
 variable "metrics_server_version" {
   description = "metrics-server Helm chart version."
   type        = string

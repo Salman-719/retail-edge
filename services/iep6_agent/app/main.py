@@ -2,7 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from prometheus_client import make_asgi_app
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app import scheduler
 from app.api.routers import agent
@@ -24,7 +24,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="IEP6 — Agent", lifespan=lifespan)
 app.include_router(agent.router)
-app.mount("/metrics", make_asgi_app())
+
+# Expose /metrics with a concurrency gauge so KEDA can scale the request-serving
+# agent pods on actual in-flight OpenAI/API work instead of CPU.
+Instrumentator(
+    should_instrument_requests_inprogress=True,
+    inprogress_name="http_requests_inprogress",
+    inprogress_labels=False,
+).instrument(app).expose(app, endpoint="/metrics")
 
 
 @app.get("/health")

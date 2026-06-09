@@ -185,6 +185,35 @@ resource "kubectl_manifest" "ca_issuer" {
   depends_on = [kubectl_manifest.ca_certificate]
 }
 
+# ── KEDA — metric-driven autoscaling ────────────────────────────────────────
+# Drives request-based autoscaling of the IEP6 agent API. The operator itself
+# runs on the stable pool; KEDA-created workload replicas still schedule normally
+# and can overflow to Karpenter elastic nodes.
+resource "helm_release" "keda" {
+  namespace        = "keda"
+  name             = "keda"
+  create_namespace = true
+  repository       = "https://kedacore.github.io/charts"
+  chart            = "keda"
+  version          = var.keda_version
+  wait             = true
+
+  values = [yamlencode({
+    nodeSelector = { workload = "stable" }
+    tolerations  = local.stable_addon_tolerations
+    metricsServer = {
+      nodeSelector = { workload = "stable" }
+      tolerations  = local.stable_addon_tolerations
+    }
+    webhooks = {
+      nodeSelector = { workload = "stable" }
+      tolerations  = local.stable_addon_tolerations
+    }
+  })]
+
+  depends_on = [module.eks]
+}
+
 # ── External Secrets Operator + ClusterSecretStore (IRSA → Secrets Manager) ──
 resource "helm_release" "external_secrets" {
   namespace        = "external-secrets"

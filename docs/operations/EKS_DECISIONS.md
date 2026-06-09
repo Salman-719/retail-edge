@@ -27,10 +27,10 @@ cloud.
    ┌──────────────────────── EKS (managed control plane) ───────────────────────────┐
    │ STABLE pool  (on-demand 2×t4g.large, 2 AZ, TAINT stable=true:NoSchedule)         │
    │   system:  coredns·kube-proxy·vpc-cni·ebs-csi·pod-identity-agent                  │
-   │   ctrls:   aws-lb-controller·ingress-nginx·cert-manager·ESO·metrics-server·karpenter│
+   │   ctrls:   aws-lb-controller·ingress-nginx·cert-manager·ESO·metrics-server·KEDA·karpenter│
    │   stateful: postgres(TimescaleDB)·redis·prometheus·grafana·mlflow·pgbouncer       │
    │ KARPENTER pool (Graviton arm64, Spot+on-demand fallback, consolidates)            │
-   │   workers: eep·iep3/iep4(per store)·iep5(jobs)·iep6·frontend                      │
+   │   workers: eep·iep3/iep4(per store)·iep5(jobs)·iep6-agent·frontend                │
    └───────────────────────────────────────────────────────────────────────────────────┘
        EBS gp3 (PVCs)   S3 + gateway endpoint   Secrets Manager (via External Secrets)
 
@@ -218,11 +218,14 @@ High-frequency frames remain in the edge-local `redis-edge`/tmpfs path.
 
 ## 9. Scaling model
 
-**Two independent layers:**
-1. **Pods (HPA + metrics-server):** EEP (and optionally frontend/IEP6) scale on CPU.
-   Per-store workers scale by **count** — one IEP3 + one IEP4 per active store, one
-   IEP5 Job per shift close.
-2. **Nodes (Karpenter):** launches right-sized Graviton Spot nodes for Pending pods in
+**Three independent layers:**
+1. **Pods (HPA + metrics-server):** EEP and frontend scale on CPU. Per-store
+   workers scale by **count** — one IEP3 + one IEP4 per active store, one IEP5
+   Job per shift close.
+2. **Pods (KEDA + Prometheus):** `iep6-agent` scales on
+   `http_requests_inprogress{job="iep6-agent"}` because agent work is mostly
+   OpenAI/API I/O wait. `iep6-scheduler` is a singleton and is never autoscaled.
+3. **Nodes (Karpenter):** launches right-sized Graviton Spot nodes for Pending pods in
    ~1 min; consolidates when idle; capped at `karpenter_cpu_limit`.
 
 **Automatic:** more stores (→ more IEP3/IEP4 → Karpenter nodes), shift bursts (IEP5
