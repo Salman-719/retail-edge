@@ -30,6 +30,16 @@ log = logging.getLogger("iep2.runtime")
 import cv2
 import numpy as np
 from PIL import Image
+from services.iep2_vision.metrics import (
+    IEP2_DETECTION_CONFIDENCE,
+    IEP2_DETECTIONS_PER_FRAME,
+    IEP2_ERRORS,
+    IEP2_FRAME_LATENCY,
+    IEP2_FRAMES,
+    IEP2_IDENTITY_SWITCHES,
+    IEP2_TRACK_AGE,
+    IEP2_TRACKS_ACTIVE,
+)
 
 try:
     from .detector.detector import YoloClient
@@ -341,22 +351,52 @@ class IEP2Runtime:
         seen_ids: set  = set()
         frame_index    = 0
         db_rows_written = 0
+        # track_id -> frame_index when first seen; used to compute track age on loss
+        _track_birth: dict[int, int] = {}
 
         for _capture_ts_ms, _s3_key, frame in source:
-            detections = await self.yolo_client.detect(frame, _capture_ts_ms)
-            tracks     = update(tracker, detections, frame)
-            _project_tracks(tracks, projector)
-            enriched, _, __ = await manager.process_frame(frame, tracks, timestamp_ms=_capture_ts_ms)
+            _t0 = time.monotonic()
+            try:
+                detections = await self.yolo_client.detect(frame, _capture_ts_ms)
+                tracks     = update(tracker, detections, frame)
+                _project_tracks(tracks, projector)
+                enriched, _, __ = await manager.process_frame(frame, tracks, timestamp_ms=_capture_ts_ms)
 
-            log.debug(
-                "Frame %4d  detections=%d  tracks=%d  confirmed=%d  pending=%d",
-                frame_index, len(detections), len(tracks),
-                sum(1 for t in enriched if t["local_id"] is not None),
-                sum(1 for t in enriched if t["local_id"] is None),
-            )
+                log.debug(
+                    "Frame %4d  detections=%d  tracks=%d  confirmed=%d  pending=%d",
+                    frame_index, len(detections), len(tracks),
+                    sum(1 for t in enriched if t["local_id"] is not None),
+                    sum(1 for t in enriched if t["local_id"] is None),
+                )
 
-            rows = await self._run_frame_detections(enriched, _capture_ts_ms, persistence, projector)
-            db_rows_written += rows
+                rows = await self._run_frame_detections(enriched, _capture_ts_ms, persistence, projector)
+                db_rows_written += rows
+
+                # Prometheus: throughput, latency, detection count and confidence
+                cam = self.settings.camera_id
+                IEP2_FRAMES.labels(camera_id=cam).inc()
+                IEP2_FRAME_LATENCY.labels(camera_id=cam).observe(time.monotonic() - _t0)
+                IEP2_DETECTIONS_PER_FRAME.labels(camera_id=cam).observe(len(detections))
+                for det in detections:
+                    IEP2_DETECTION_CONFIDENCE.labels(camera_id=cam).observe(
+                        float(det.get("confidence", det.get("conf", 0.0)))
+                    )
+
+                # ML signal: track age + active count + identity switches
+                active_ids = {t["track_id"] for t in enriched}
+                for tid in list(_track_birth):
+                    if tid not in active_ids:
+                        age = frame_index - _track_birth.pop(tid)
+                        IEP2_TRACK_AGE.labels(camera_id=cam).observe(age)
+                for t in enriched:
+                    _track_birth.setdefault(t["track_id"], frame_index)
+                IEP2_TRACKS_ACTIVE.labels(camera_id=cam).set(len(active_ids))
+
+            except Exception:
+                IEP2_ERRORS.labels(camera_id=self.settings.camera_id).inc()
+                log.exception("Frame %d processing error", frame_index)
+                frame_index += 1
+                continue
 
             frame_b64, scale = _encode_frame(frame)
             display_tracks = (
@@ -365,6 +405,9 @@ class IEP2Runtime:
             )
 
             new_entries = [t["track_id"] for t in enriched if t["track_id"] not in seen_ids]
+            for tid in new_entries:
+                if tid in seen_ids:
+                    IEP2_IDENTITY_SWITCHES.labels(camera_id=cam).inc()
             seen_ids.update(t["track_id"] for t in enriched)
             if new_entries:
                 log.info("Frame %4d  new track_ids=%s", frame_index, new_entries)
@@ -403,6 +446,7 @@ class IEP2Runtime:
         frame_index    = 0
         db_rows_written = 0
         _resolution_written = False  # write stream resolution once from first valid frame
+        _track_birth: dict[int, int] = {}
 
         async def _load_and_detect_s3(mfst: dict) -> tuple[list, list, list, list]:
             """Fetch frames from S3/tmpfs and run detect_batch for one manifest.
@@ -458,22 +502,51 @@ class IEP2Runtime:
                 batch_frames, batch_ts, batch_keys, batch_detections
             ):
                 _t_frame_s3 = time.monotonic()
-                tracks   = update(tracker, detections, frame)
-                _project_tracks(tracks, projector)
-                enriched, _crops_s3, _batches_s3 = await manager.process_frame(frame, tracks, timestamp_ms=capture_ts_ms)
-                tracker_ms_s3    += (time.monotonic() - _t_frame_s3) * 1000
-                reid_crops_s3   += _crops_s3
-                reid_batches_s3 += _batches_s3
+                try:
+                    tracks   = update(tracker, detections, frame)
+                    _project_tracks(tracks, projector)
+                    enriched, _crops_s3, _batches_s3 = await manager.process_frame(frame, tracks, timestamp_ms=capture_ts_ms)
+                    tracker_ms_s3    += (time.monotonic() - _t_frame_s3) * 1000
+                    reid_crops_s3   += _crops_s3
+                    reid_batches_s3 += _batches_s3
 
-                log.debug(
-                    "Frame %4d  detections=%d  tracks=%d  confirmed=%d  pending=%d",
-                    frame_index, len(detections), len(tracks),
-                    sum(1 for t in enriched if t["local_id"] is not None),
-                    sum(1 for t in enriched if t["local_id"] is None),
-                )
+                    log.debug(
+                        "Frame %4d  detections=%d  tracks=%d  confirmed=%d  pending=%d",
+                        frame_index, len(detections), len(tracks),
+                        sum(1 for t in enriched if t["local_id"] is not None),
+                        sum(1 for t in enriched if t["local_id"] is None),
+                    )
 
-                rows = await self._run_frame_detections(enriched, capture_ts_ms, persistence, projector)
-                db_rows_written += rows
+                    rows = await self._run_frame_detections(enriched, capture_ts_ms, persistence, projector)
+                    db_rows_written += rows
+
+                    # Prometheus: throughput, latency, detection count and confidence
+                    cam = self.settings.camera_id
+                    IEP2_FRAMES.labels(camera_id=cam).inc()
+                    IEP2_FRAME_LATENCY.labels(camera_id=cam).observe(time.monotonic() - _t_frame_s3)
+                    IEP2_DETECTIONS_PER_FRAME.labels(camera_id=cam).observe(len(detections))
+                    for det in detections:
+                        IEP2_DETECTION_CONFIDENCE.labels(camera_id=cam).observe(
+                            float(det.get("confidence", det.get("conf", 0.0)))
+                        )
+
+                    # ML signal: track age + active count + identity switches
+                    active_ids = {t["track_id"] for t in enriched}
+                    for tid in list(_track_birth):
+                        if tid not in active_ids:
+                            age = frame_index - _track_birth.pop(tid)
+                            IEP2_TRACK_AGE.labels(camera_id=cam).observe(age)
+                    for t in enriched:
+                        if t["track_id"] in seen_ids and t["track_id"] not in _track_birth:
+                            IEP2_IDENTITY_SWITCHES.labels(camera_id=cam).inc()
+                        _track_birth.setdefault(t["track_id"], frame_index)
+                    IEP2_TRACKS_ACTIVE.labels(camera_id=cam).set(len(active_ids))
+
+                except Exception:
+                    IEP2_ERRORS.labels(camera_id=self.settings.camera_id).inc()
+                    log.exception("Frame %d processing error (IEP1 path)", frame_index)
+                    frame_index += 1
+                    continue
 
                 frame_b64, scale = _encode_frame(frame)
                 display_tracks = (
