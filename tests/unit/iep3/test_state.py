@@ -5,7 +5,7 @@ Uses mocked repo to verify correct method calls and arguments.
 import pytest
 from unittest.mock import MagicMock
 
-from conftest import (
+from .conftest import (
     STORE_ID, GLOBAL_01, GLOBAL_02,
     WINDOW_START, WINDOW_END,
 )
