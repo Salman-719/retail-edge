@@ -39,17 +39,27 @@ def upgrade() -> None:
     ))
 
     # Re-add at 8192 bytes = 2048 float32 values = resnet50_msmt17 embedding.
+    # Guard: schema.sql already uses the post-0013 layout (embeddings column, no
+    # centroid). Skip on fresh DBs where centroid never existed.
     op.execute(sa.text(
         "DO $$ BEGIN "
-        "ALTER TABLE local_centroids "
-        f"ADD CONSTRAINT chk_centroid_size CHECK (octet_length(centroid) = {_NEW_BYTES}); "
-        "EXCEPTION WHEN duplicate_object THEN NULL; END; $$"
+        "IF EXISTS ("
+        "  SELECT 1 FROM information_schema.columns "
+        "  WHERE table_name='local_centroids' AND column_name='centroid'"
+        ") THEN "
+        f"ALTER TABLE local_centroids ADD CONSTRAINT chk_centroid_size CHECK (octet_length(centroid) = {_NEW_BYTES}); "
+        "END IF; "
+        "END; $$"
     ))
     op.execute(sa.text(
         "DO $$ BEGIN "
-        "ALTER TABLE global_embeddings "
-        f"ADD CONSTRAINT chk_embedding_size CHECK (octet_length(centroid) = {_NEW_BYTES}); "
-        "EXCEPTION WHEN duplicate_object THEN NULL; END; $$"
+        "IF EXISTS ("
+        "  SELECT 1 FROM information_schema.columns "
+        "  WHERE table_name='global_embeddings' AND column_name='centroid'"
+        ") THEN "
+        f"ALTER TABLE global_embeddings ADD CONSTRAINT chk_embedding_size CHECK (octet_length(centroid) = {_NEW_BYTES}); "
+        "END IF; "
+        "END; $$"
     ))
 
 
