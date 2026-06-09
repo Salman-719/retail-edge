@@ -57,8 +57,8 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-  eep-tests:
-    name: EEP Unit Tests
+  unit-tests:
+    name: Unit Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -69,21 +69,66 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install EEP + test dependencies
+      - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r services/eep/requirements.txt
-          pip install pytest
+          pip install -r tests/requirements.txt
 
-      - name: Run EEP unit tests
+      # Every service ships a package named `app`, so the suites cannot share one
+      # interpreter process — each unit dir runs as its OWN pytest invocation.
+      - name: EEP unit tests
+        run: pytest tests/unit/eep -v
+      - name: IEP1 unit tests
+        run: pytest tests/unit/iep1 -v
+      - name: IEP2 unit tests
+        run: pytest tests/unit/iep2 -v
+      - name: IEP3 unit tests
+        run: pytest tests/unit/iep3 -v
+      - name: IEP4 unit tests
+        run: pytest tests/unit/iep4 -v
+      - name: IEP5 unit tests
+        run: pytest tests/unit/iep5 -v
+      - name: Consistency guardrails
+        run: pytest tests/unit/consistency -v
+
+  validate-prometheus:
+    name: Prometheus Config Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install promtool
         run: |
-          pytest \
-            tests/unit/test_schemas.py::TestStoreCreate \
-            tests/unit/test_schemas.py::TestZoneCreate \
-            tests/unit/test_schemas.py::TestCameraCreate \
-            tests/unit/test_schemas.py::TestCalibrationRequest \
-            tests/unit/test_schemas.py::TestComputeHomography \
-            -v
+          PROM_VERSION="2.51.0"
+          curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin prometheus-${PROM_VERSION}.linux-amd64/promtool
+          promtool --version
+
+      - name: Validate prometheus.yml (compose/dev)
+        run: promtool check config monitoring/prometheus.yml
+
+      - name: Validate prometheus-cloud.yml
+        run: promtool check config monitoring/prometheus-cloud.yml
+
+      - name: Validate prometheus-edge.yml
+        run: promtool check config monitoring/prometheus-edge.yml
+
+      - name: Validate alert_rules.yml
+        run: promtool check rules monitoring/alert_rules.yml
+
+      - name: Validate recording_rules.yml
+        run: promtool check rules monitoring/recording_rules.yml
+
+      - name: Install amtool
+        run: |
+          AM_VERSION="0.27.0"
+          curl -sSL "https://github.com/prometheus/alertmanager/releases/download/v${AM_VERSION}/alertmanager-${AM_VERSION}.linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin alertmanager-${AM_VERSION}.linux-amd64/amtool
+          amtool --version
+
+      - name: Validate alertmanager.yml
+        run: amtool check-config monitoring/alertmanager.yml
 
   docker-smoke:
     name: Docker Compose Smoke
