@@ -12,6 +12,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 
+from app.metrics import IEP4_ALERTS_FIRED, IEP4_EMAILS
 from app.models import AlertRule, AlertState
 
 logger = logging.getLogger(__name__)
@@ -88,11 +89,14 @@ class CooldownMachine:
         state.last_followup_at = now_ms
         state.condition_cleared_at = None
         state.cooldown_until = None
+        IEP4_ALERTS_FIRED.labels(rule_type=rule.type).inc()
         logger.info("Alert FIRING rule=%s (%s) name=%s", rule.id, rule.type, rule.name)
         if send_email and ctx.recipients:
             try:
                 await self._delivery.send(ctx.recipients, ctx.email_subject, ctx.email_body)
+                IEP4_EMAILS.labels(outcome="sent").inc()
             except Exception:
+                IEP4_EMAILS.labels(outcome="failed").inc()
                 logger.exception("Alert email delivery failed rule=%s", rule.id)
 
     async def _resolve(self, rule, state, now_ms, cooldown_ms: int) -> None:

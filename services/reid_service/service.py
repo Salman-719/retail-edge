@@ -42,6 +42,40 @@ REID_MODEL_PATH  = os.environ.get("REID_MODEL_PATH",  "resnet50_msmt17.engine")
 MAX_BATCH_SIZE    = int(os.environ.get("REID_MAX_BATCH_SIZE",    "64"))
 BATCH_TIMEOUT_MS  = float(os.environ.get("REID_BATCH_TIMEOUT_MS", "50"))
 EMBEDDING_DIM     = 2048
+REID_METRICS_PORT = int(os.environ.get("REID_METRICS_PORT", "9401"))
+
+# ── Prometheus metrics (scraped on :9401, job "reid") ─────────────────────────
+# model_version label carries metrics that reflect model output quality;
+# infra/throughput metrics do not. Only additive instrumentation — no behaviour.
+_MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
+
+REID_CROPS = Counter(
+    "reid_crops_processed_total",
+    "Total person crops processed by the ReID embedding service",
+)
+REID_ERRORS = Counter(
+    "reid_errors_total",
+    "Crops that failed to preprocess or caused an inference error",
+)
+REID_INFERENCE = Histogram(
+    "reid_inference_seconds",
+    "Wall-clock time for one TRT ReID batch inference call",
+    ["model_version"],
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+)
+REID_BATCH_SIZE = Histogram(
+    "reid_batch_size",
+    "Number of crops per TRT ReID inference batch — GPU utilisation proxy",
+    buckets=[1, 2, 4, 8, 16, 32, 48, 64, 96, 128],
+)
+# ML signal: distribution of raw (pre-L2) embedding norms. A collapse toward 0
+# indicates degenerate embeddings before any downstream metric degrades.
+REID_EMBEDDING_NORM = Histogram(
+    "reid_embedding_norm",
+    "L2 norm of raw ResNet50 embeddings before normalisation (2048-dim)",
+    ["model_version"],
+    buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0],
+)
 
 _MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
 
@@ -195,6 +229,7 @@ def _infer_and_pack(engine, batch_items: list[dict]) -> list[dict]:
     for item, emb in zip(batch_items, embeddings):
         # R6: assert dimension is correct.
         assert emb.shape == (EMBEDDING_DIM,), f"Expected ({EMBEDDING_DIM},), got {emb.shape}"
+        # ML signal: record raw norm before L2 normalisation.
         REID_EMBEDDING_NORM.labels(model_version=_MODEL_VERSION).observe(float(np.linalg.norm(emb)))
         emb = _l2_normalize(emb)                      # R5
         responses.append({
@@ -269,6 +304,11 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+    # Prometheus metrics HTTP server — started before engine load so Prometheus
+    # sees the target as UP while the model is still initialising.
+    start_http_server(REID_METRICS_PORT)
+    log.info("Prometheus metrics server started on :%d", REID_METRICS_PORT)
 
     from grpc_health.v1 import health, health_pb2
 

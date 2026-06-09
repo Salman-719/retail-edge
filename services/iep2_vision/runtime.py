@@ -32,6 +32,29 @@ import numpy as np
 from PIL import Image
 
 try:
+    from .metrics import (
+        IEP2_DETECTION_CONFIDENCE,
+        IEP2_DETECTIONS_PER_FRAME,
+        IEP2_FRAME_LATENCY,
+        IEP2_FRAMES,
+        IEP2_IDENTITY_SWITCHES,
+        IEP2_TRACK_AGE,
+        IEP2_TRACKS_ACTIVE,
+        _MODEL_VERSION,
+    )
+except ImportError:
+    from metrics import (
+        IEP2_DETECTION_CONFIDENCE,
+        IEP2_DETECTIONS_PER_FRAME,
+        IEP2_FRAME_LATENCY,
+        IEP2_FRAMES,
+        IEP2_IDENTITY_SWITCHES,
+        IEP2_TRACK_AGE,
+        IEP2_TRACKS_ACTIVE,
+        _MODEL_VERSION,
+    )
+
+try:
     from .detector.detector import YoloClient
     from .reid.reid import ReidClient
     from .tracker.tracker import create_tracker, update
@@ -412,11 +435,10 @@ class IEP2Runtime:
         seen_ids: set  = set()
         frame_index    = 0
         db_rows_written = 0
-        track_ages: dict[int, int] = {}
-        previous_track_ids: set[int] = set()
+        _track_birth: dict[int, int] = {}  # track_id -> frame_index first seen (metrics only)
 
         for _capture_ts_ms, _s3_key, frame in source:
-            _frame_t0 = time.monotonic()
+            _t0 = time.monotonic()
             detections = await self.yolo_client.detect(frame, _capture_ts_ms)
             tracks     = update(tracker, detections, frame)
             _project_tracks(tracks, projector)
@@ -440,6 +462,28 @@ class IEP2Runtime:
                 previous_track_ids=previous_track_ids,
                 frame_index=frame_index,
             )
+
+            # Prometheus (additive only): throughput, latency, detection count +
+            # confidence, track age on loss, active-track count, reappearances.
+            cam = self.settings.camera_id
+            IEP2_FRAMES.labels(camera_id=cam).inc()
+            IEP2_FRAME_LATENCY.labels(camera_id=cam).observe(time.monotonic() - _t0)
+            IEP2_DETECTIONS_PER_FRAME.labels(camera_id=cam).observe(len(detections))
+            for det in detections:
+                IEP2_DETECTION_CONFIDENCE.labels(camera_id=cam, model_version=_MODEL_VERSION).observe(
+                    float(det.get("confidence", det.get("conf", 0.0)))
+                )
+            active_ids = {t["track_id"] for t in enriched}
+            for tid in list(_track_birth):
+                if tid not in active_ids:
+                    IEP2_TRACK_AGE.labels(camera_id=cam, model_version=_MODEL_VERSION).observe(
+                        frame_index - _track_birth.pop(tid)
+                    )
+            for t in enriched:
+                if t["track_id"] in seen_ids and t["track_id"] not in _track_birth:
+                    IEP2_IDENTITY_SWITCHES.labels(camera_id=cam).inc()
+                _track_birth.setdefault(t["track_id"], frame_index)
+            IEP2_TRACKS_ACTIVE.labels(camera_id=cam).set(len(active_ids))
 
             frame_b64, scale = _encode_frame(frame)
             display_tracks = (
@@ -493,8 +537,7 @@ class IEP2Runtime:
         frame_index    = 0
         db_rows_written = 0
         _resolution_written = False  # write stream resolution once from first valid frame
-        track_ages: dict[int, int] = {}
-        previous_track_ids: set[int] = set()
+        _track_birth: dict[int, int] = {}  # track_id -> frame_index first seen (metrics only)
 
         async def _load_and_detect_s3(mfst: dict) -> tuple[list, list, list, list]:
             """Fetch frames from S3/tmpfs and run detect_batch for one manifest.
@@ -575,6 +618,27 @@ class IEP2Runtime:
                     previous_track_ids=previous_track_ids,
                     frame_index=frame_index,
                 )
+
+                # Prometheus (additive only): same signals as the live path.
+                cam = self.settings.camera_id
+                IEP2_FRAMES.labels(camera_id=cam).inc()
+                IEP2_FRAME_LATENCY.labels(camera_id=cam).observe(time.monotonic() - _t_frame_s3)
+                IEP2_DETECTIONS_PER_FRAME.labels(camera_id=cam).observe(len(detections))
+                for det in detections:
+                    IEP2_DETECTION_CONFIDENCE.labels(camera_id=cam, model_version=_MODEL_VERSION).observe(
+                        float(det.get("confidence", det.get("conf", 0.0)))
+                    )
+                active_ids = {t["track_id"] for t in enriched}
+                for tid in list(_track_birth):
+                    if tid not in active_ids:
+                        IEP2_TRACK_AGE.labels(camera_id=cam, model_version=_MODEL_VERSION).observe(
+                            frame_index - _track_birth.pop(tid)
+                        )
+                for t in enriched:
+                    if t["track_id"] in seen_ids and t["track_id"] not in _track_birth:
+                        IEP2_IDENTITY_SWITCHES.labels(camera_id=cam).inc()
+                    _track_birth.setdefault(t["track_id"], frame_index)
+                IEP2_TRACKS_ACTIVE.labels(camera_id=cam).set(len(active_ids))
 
                 frame_b64, scale = _encode_frame(frame)
                 display_tracks = (

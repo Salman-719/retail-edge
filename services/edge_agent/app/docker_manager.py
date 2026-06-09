@@ -16,9 +16,6 @@ IEP2_IMAGE         = os.environ.get("IEP2_IMAGE",         "retail-edge-iep2_visi
 DOCKER_NETWORK     = os.environ.get("DOCKER_NETWORK",     "retail-edge_default")
 IPC_SOCKETS_VOLUME = os.environ.get("IPC_SOCKETS_VOLUME", "retail-edge_ipc-sockets")
 FRAME_STORE_VOLUME = os.environ.get("FRAME_STORE_VOLUME", "retail-edge_frame-store")
-REDIS_CA_CERT_PATH = os.environ.get(
-    "REDIS_CA_CERT_PATH", "/etc/retailvision/certs/ca.crt"
-)
 
 _client = None
 
@@ -71,21 +68,14 @@ def apply_iep2_deployment(camera_id: str) -> None:
     except docker.errors.NotFound:
         pass
 
-    volumes = {
-        IPC_SOCKETS_VOLUME: {"bind": "/tmp/sockets",    "mode": "rw"},
-        FRAME_STORE_VOLUME: {"bind": "/dev/shm/frames", "mode": "rw"},
-    }
-    if os.path.isfile(REDIS_CA_CERT_PATH):
-        volumes[REDIS_CA_CERT_PATH] = {
-            "bind": "/etc/retailvision/certs/ca.crt",
-            "mode": "ro",
-        }
-
     _client.containers.run(
         image=IEP2_IMAGE,
         name=name,
         environment=env,
-        volumes=volumes,
+        volumes={
+            IPC_SOCKETS_VOLUME: {"bind": "/tmp/sockets",    "mode": "rw"},
+            FRAME_STORE_VOLUME: {"bind": "/dev/shm/frames", "mode": "rw"},
+        },
         network=DOCKER_NETWORK,
         detach=True,
         restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},

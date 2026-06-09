@@ -9,8 +9,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 
 from app.db import close_pool, create_pool, get_pool
+from app.metrics import (
+    IEP5_JOB_DURATION,
+    IEP5_JOB_SUCCESS,
+    IEP5_LAST_SUCCESS_TIMESTAMP,
+    push_metrics,
+)
 from app.persistence.postgres import AnalyticsRepository
 from app.pipeline import AnalyticsPipeline
 from app.settings import get_settings
@@ -55,14 +62,24 @@ async def _main() -> int:
         settings.database_url_server.split("@")[-1].split("/")[0],
     )
 
+    _t0 = time.monotonic()
     pool = await create_pool(settings.database_url_server)
+    code = 1
     try:
         await _verify_db(pool)
         repo = AnalyticsRepository(get_pool(), store_id=settings.store_id)
         pipeline = AnalyticsPipeline(settings, repo)
-        return await pipeline.run()
+        code = await pipeline.run()
+        return code
     finally:
         await close_pool()
+        # One-shot job: record outcome and PUSH to the Pushgateway (no scrape
+        # target exists for a process that exits). Never affects the exit code.
+        IEP5_JOB_DURATION.set(time.monotonic() - _t0)
+        IEP5_JOB_SUCCESS.set(1 if code == 0 else 0)
+        if code == 0:
+            IEP5_LAST_SUCCESS_TIMESTAMP.set(time.time())
+        push_metrics(settings.store_id, str(settings.shift_date))
 
 
 def main() -> None:

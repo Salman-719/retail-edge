@@ -8,3 +8,4 @@ protobuf==5.27.2
 prometheus-client==0.20.0
 # boto3 kept for legacy Iep1Runtime (S3-based single-camera mode); not used by daemon
 boto3==1.34.0
+prometheus-client==0.20.0

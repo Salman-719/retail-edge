@@ -1,64 +1,115 @@
-"""Prometheus metrics for the IEP2 per-camera vision daemon."""
+"""Prometheus metrics for IEP2 vision daemon.
+
+IEP2 is a portless asyncio daemon in production, so metrics are exposed via
+a side HTTP server (prometheus_client.start_http_server) on :9201.
+Prometheus scrapes job "iep2" — see monitoring/prometheus.yml.
+
+In the k3s production deployment each IEP2 pod is annotated for discovery:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9201"
+
+Metric objects are defined once at module import time. runtime.py imports
+and updates these on the per-frame hot path. main.py starts the server.
+"""
 from __future__ import annotations
 
 import os
 
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
-MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
+# Set at container startup from MODEL_VERSION env var (default "production").
+# A canary deployment sets MODEL_VERSION=canary so Prometheus automatically
+# separates production and canary time-series for ML-signal metrics.
+_MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
 
+# Total frames processed by this IEP2 instance. Rate == 0 means the pipeline
+# has stalled for this camera.
 IEP2_FRAMES = Counter(
     "iep2_frames_processed_total",
-    "Total frames processed by IEP2",
+    "Total frames processed by this IEP2 instance",
     ["camera_id"],
 )
 
+# End-to-end per-frame latency: from receiving the frame to writing DB rows.
+# This is the primary latency budget for the vision pipeline.
 IEP2_FRAME_LATENCY = Histogram(
     "iep2_frame_latency_seconds",
-    "End-to-end frame processing latency in IEP2",
+    "End-to-end time from frame receipt to tracking_history write",
     ["camera_id"],
-    buckets=[0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0],
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0],
 )
 
+# Errors during DB writes or pipeline processing.
 IEP2_ERRORS = Counter(
     "iep2_processing_errors_total",
-    "IEP2 frame or batch processing errors",
+    "Frames that caused an unhandled error during tracking or DB write",
     ["camera_id"],
 )
 
+# Number of detections returned by YOLO per frame.
+# Sudden sustained drop to 0 across frames means YOLO stopped detecting
+# people — could be model stall, empty scene, or ZMQ socket failure.
 IEP2_DETECTIONS_PER_FRAME = Histogram(
     "iep2_detections_per_frame",
-    "Person detections per processed frame",
+    "Number of person detections returned by YOLO for each frame",
     ["camera_id"],
-    buckets=[0, 1, 2, 3, 5, 8, 12, 20, 30, 50],
+    buckets=[0, 1, 2, 3, 5, 8, 12, 20, 30],
 )
 
+# ML signal: per-detection confidence score distribution per camera.
+# Tracks model certainty over time for this specific camera's scene.
+# Drift toward lower buckets signals degraded camera quality (dirty lens,
+# lighting shift, camera repositioning) before detection count drops.
 IEP2_DETECTION_CONFIDENCE = Histogram(
     "iep2_detection_confidence",
-    "YOLO person detection confidence observed by IEP2",
+    "Confidence score of each YOLO person detection per camera (ML signal)",
     ["camera_id", "model_version"],
     buckets=[0.25, 0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0],
 )
 
-IEP2_TRACKS_ACTIVE = Gauge(
-    "iep2_tracks_active",
-    "Confirmed/pending tracker outputs in the most recent frame",
-    ["camera_id"],
-)
-
+# ML signal: how many frames a track survives before being dropped by BoTSORT.
+# Very short track lifetimes (1–2 frames) indicate the tracker cannot maintain
+# identity through occlusion — a model performance signal distinct from
+# detection count. Measured at track termination, not per-frame.
 IEP2_TRACK_AGE = Histogram(
     "iep2_track_age_frames",
-    "Number of frames seen for a local track",
+    "Number of frames a BoTSORT track survived before being dropped (ML signal)",
     ["camera_id", "model_version"],
     buckets=[1, 2, 3, 5, 10, 20, 50, 100, 200],
 )
 
+# Instantaneous count of active BoTSORT tracks per camera per frame.
+# Drives the tracker lifecycle dashboard "active tracks over time" panel.
+IEP2_TRACKS_ACTIVE = Gauge(
+    "iep2_tracks_active",
+    "Number of confirmed BoTSORT tracks active in the most recent frame",
+    ["camera_id"],
+)
+
+# Total identity switches (track ID reassignment events). Incremented each time
+# BoTSORT assigns a new local_id to a detection that was already tracking —
+# a proxy for tracker fragmentation / occlusion-handling quality.
 IEP2_IDENTITY_SWITCHES = Counter(
     "iep2_identity_switches_total",
-    "New local tracks created after the first frame of a camera stream",
+    "Number of times BoTSORT dropped and re-acquired the same physical person",
     ["camera_id"],
+)
+
+# Inference requests (YOLO detect / ReID extract) that exceeded their per-request
+# deadline and fell back to an empty result. A sustained non-zero rate means the
+# shared yolo/reid service is wedged or overloaded — the pipeline degrades to
+# empty-but-advancing frames instead of hanging the camera forever.
+IEP2_INFERENCE_TIMEOUTS = Counter(
+    "iep2_inference_timeouts_total",
+    "Inference requests that exceeded their deadline and returned a fallback",
+    ["camera_id", "service"],  # service = "yolo" | "reid"
 )
 
 
 def start_metrics_server(port: int = 9201) -> None:
+    """Start the /metrics HTTP server on its own background thread.
+
+    Safe to call once at daemon startup; does not interfere with the asyncio
+    event loop. Raises if the port is already bound.
+    """
     start_http_server(port)

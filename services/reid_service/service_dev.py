@@ -119,6 +119,18 @@ REID_MODEL_PATH       = os.environ.get("REID_MODEL_PATH",        "resnet50_msmt1
 MAX_BATCH_SIZE         = int(os.environ.get("REID_MAX_BATCH_SIZE",    "8"))
 BATCH_TIMEOUT_MS       = float(os.environ.get("REID_BATCH_TIMEOUT_MS", "200"))
 EMBEDDING_DIM          = 2048
+REID_METRICS_PORT      = int(os.environ.get("REID_METRICS_PORT", "9401"))
+
+# ── Prometheus metrics (scraped on :9401, job "reid") — additive only ─────────
+REID_CROPS     = Counter("reid_crops_processed_total", "Total person crops processed")
+REID_ERRORS    = Counter("reid_errors_total", "Crops that caused inference errors")
+REID_INFERENCE = Histogram("reid_inference_seconds", "Wall-clock time for one ReID batch",
+                           buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0])
+REID_BATCH_SIZE = Histogram("reid_batch_size", "Number of crops per batch",
+                            buckets=[1, 2, 4, 8, 16, 32, 48, 64, 96, 128])
+REID_EMBEDDING_NORM = Histogram("reid_embedding_norm",
+                                "L2 norm of raw embeddings before normalisation",
+                                buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0])
 
 # ImageNet normalisation — same constants boxmot's backend uses (R3).
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -236,6 +248,8 @@ def _infer_and_pack(model, batch_items: list[dict]) -> list[dict]:
     if hasattr(embeddings, "cpu"):
         embeddings = embeddings.detach().cpu().numpy()
     embeddings = np.asarray(embeddings).reshape(len(batch_items), -1)  # [B, 2048]
+    REID_INFERENCE.observe(time.monotonic() - t0)
+    REID_BATCH_SIZE.observe(len(batch_items))
     REID_CROPS.inc(len(batch_items))
 
     responses = []
@@ -312,6 +326,9 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+    start_http_server(REID_METRICS_PORT)
+    log.info("Prometheus metrics server started on :%d", REID_METRICS_PORT)
 
     from grpc_health.v1 import health, health_pb2
 

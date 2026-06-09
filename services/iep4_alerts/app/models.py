@@ -18,6 +18,7 @@ class DeltaRow:
     floor_y:      float
     source_camera: str
     is_employee:  bool
+    employee_id:  uuid.UUID | None
 
 
 @dataclass
@@ -30,6 +31,7 @@ class PersonState:
     last_seen_at:            int
     last_batch_number:       int
     is_employee:             bool
+    employee_id:             uuid.UUID | None = None
     # Batch at which the person entered current_zone_id — for zone_transition_log
     # entry_batch on the *next* transition. Not persisted; tracked in memory.
     entered_zone_batch:      int | None = None

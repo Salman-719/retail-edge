@@ -42,15 +42,13 @@ def _write_to_tmpfs(camera_id: str, ts_ms: int, frame) -> str | None:
     if not success or buf is None:
         IEP1_ENCODE_ERRORS.labels(camera_id=camera_id).inc()
         logger.warning("Frame encode failed camera=%s ts=%d", camera_id, ts_ms)
+        IEP1_ENCODE_ERRORS.labels(camera_id=camera_id).inc()
         return None
     path = f"{TMPFS_ROOT}/{camera_id}/{ts_ms}.jpg"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        with open(path, "wb") as fh:
-            fh.write(buf.tobytes())
-    except OSError:
-        IEP1_ENCODE_ERRORS.labels(camera_id=camera_id).inc()
-        raise
+    with open(path, "wb") as fh:
+        fh.write(buf.tobytes())
+    IEP1_FRAMES.labels(camera_id=camera_id).inc()
     return path
 
 
@@ -145,17 +143,17 @@ class CameraWorker:
         item = (now_ms(), frame)
 
         # put_nowait must run on the event-loop thread; schedule it there.
-        def _enqueue(q=self._frame_queue, it=item):
+        def _enqueue(q=self._frame_queue, it=item, cam=self._config.camera_id):
             try:
                 q.put_nowait(it)
                 IEP1_FRAMES.labels(camera_id=self._config.camera_id).inc()
             except asyncio.QueueFull:
                 self._frames_dropped += 1
-                IEP1_FRAMES_DROPPED.labels(camera_id=self._config.camera_id).inc()
+                IEP1_FRAMES_DROPPED.labels(camera_id=cam).inc()
                 if self._frames_dropped % 100 == 0:
                     logger.warning(
                         "camera=%s dropped %d frames (queue full)",
-                        self._config.camera_id, self._frames_dropped,
+                        cam, self._frames_dropped,
                     )
 
         self._loop.call_soon_threadsafe(_enqueue)
@@ -294,8 +292,9 @@ class CameraWorker:
         payload = self._manifest_to_dict(manifest)
         for attempt in range(3):
             try:
-                with IEP1_PUBLISH_LATENCY.time():
-                    await self._xadd(payload)
+                t0 = time.monotonic()
+                await self._xadd(payload)
+                IEP1_PUBLISH_LATENCY.observe(time.monotonic() - t0)
                 return
             except Exception as exc:
                 logger.warning(

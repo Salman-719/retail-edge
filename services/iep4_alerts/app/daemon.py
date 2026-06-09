@@ -18,6 +18,15 @@ import logging
 import time
 import uuid
 
+from app.metrics import (
+    IEP4_ACTIVE_PERSONS,
+    IEP4_CYCLE_ERRORS,
+    IEP4_CYCLE_SECONDS,
+    IEP4_CYCLES,
+    IEP4_VISITS_CLOSED,
+    IEP4_VISITS_OPENED,
+    IEP4_ZONE_TRANSITIONS,
+)
 from app.alerts.delivery import EmailDelivery
 from app.alerts.evaluator import AlertEvaluator
 from app.models import PersonState
@@ -63,6 +72,7 @@ class AlertDaemon:
                 last_seen_at=int(r["last_seen_at"]),
                 last_batch_number=int(r["last_batch_number"]),
                 is_employee=bool(r["is_employee"]),
+                employee_id=r["employee_id"],
                 entered_zone_batch=int(r["last_batch_number"]),
             )
             for r in rows
@@ -103,10 +113,15 @@ class AlertDaemon:
     async def run(self, stop_event: asyncio.Event) -> None:
         await self.bootstrap()
         while not stop_event.is_set():
+            _t0 = time.monotonic()
             try:
                 await self._tick()
             except Exception:
+                IEP4_CYCLE_ERRORS.inc()
                 logger.exception("IEP4 cycle failed — continuing")
+            finally:
+                IEP4_CYCLES.inc()
+                IEP4_CYCLE_SECONDS.observe(time.monotonic() - _t0)
 
             if self._catchup:
                 delay = 0.2  # drain backlog quickly
@@ -183,6 +198,11 @@ class AlertDaemon:
 
         # 5. Refresh in-memory state for present persons.
         self._states.update(new_states)
+
+        IEP4_ZONE_TRANSITIONS.inc(n_trans)
+        IEP4_VISITS_OPENED.inc(n_open)
+        IEP4_VISITS_CLOSED.inc(n_closed)
+        IEP4_ACTIVE_PERSONS.set(len(self._states))
 
         logger.info(
             "IEP4 cycle store=%s window=(%d,%d] delta=%d transitions=%d visits_opened=%d "

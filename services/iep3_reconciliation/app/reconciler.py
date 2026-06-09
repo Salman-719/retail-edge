@@ -40,7 +40,6 @@ from app.metrics import (
     IEP3_MATCHES,
     IEP3_NEW,
     IEP3_RECONCILE,
-    IEP3_REID_COSINE,
     IEP3_REID_MATCH_RATE,
     IEP3_TRANSITIONS,
 )
@@ -107,6 +106,25 @@ class Reconciler:
             batch_number, window_start_ms, window_end_ms, sorted(reporting_cameras),
         )
         IEP3_CAMERAS_REPORTING.observe(len(reporting_cameras))
+
+        # Dev trace (VD1): Redis-gated, default off. `trace` stays None in prod →
+        # zero collection overhead; only a list when explicitly enabled.
+        trace: list | None = [] if await self._trace_enabled() else None
+
+        # ── Stage 0: camera overlap graph (read-only, outside the transaction) ──
+        # Reloaded each batch so a version activation is picked up automatically.
+        edges = await self._repo.get_camera_overlap_edges(self._store_id)
+        graph = CameraGraph(edges)
+        if trace is not None:
+            trace.append({
+                "event_type": "graph",
+                "detail": {"pairs": [[str(a), str(b)] for a, b in graph.overlapping_pairs()]},
+            })
+
+        n_cross_links = 0
+        n_new_globals = 0
+        n_written = 0
+        detections = []
 
         # Dev trace (VD1): Redis-gated, default off. `trace` stays None in prod →
         # zero collection overhead; only a list when explicitly enabled.
@@ -215,10 +233,12 @@ class Reconciler:
         IEP3_RECONCILE.observe(reconcile_elapsed)
         IEP3_MATCHES.inc(n_cross_links)
         IEP3_NEW.inc(n_new_globals)
-        local_count = len({d.local_id for d in detections}) if detections else 0
-        IEP3_REID_MATCH_RATE.set((n_cross_links / local_count) if local_count else 0.0)
         IEP3_TRANSITIONS.labels(transition="lost").inc(cleanup_stats.get("newly_lost", 0))
         IEP3_TRANSITIONS.labels(transition="exited").inc(cleanup_stats.get("newly_exited", 0))
+        IEP3_CAMERAS_REPORTING.observe(len(reporting_cameras))
+        total_locals = len(known) + n_new_globals
+        if total_locals > 0:
+            IEP3_REID_MATCH_RATE.set(len(known) / total_locals)
 
         logger.info("Batch %d reconciled: %s", batch_number, stats)
 
@@ -229,7 +249,10 @@ class Reconciler:
                     await self._repo.orphan_sweep(self._store_id)
                 except Exception:
                     IEP3_ERRORS.labels(error_type="orphan_sweep").inc()
-                    logger.exception("Periodic orphan sweep failed at batch=%d", batch_number)
+                    logger.exception(
+                        "Periodic orphan sweep failed at batch=%d — skipping",
+                        batch_number,
+                    )
             else:
                 logger.info(
                     "Skipping orphan sweep — reconciliation took %.1fs (>80%% of %.0fs window)",
@@ -313,7 +336,7 @@ class Reconciler:
                 for lid, heap in heaps.items()
             }
             amb_pairs = [(la, lb, vr) for _, la, _, lb, vr in ambiguous_all]
-            reid_details = []
+            reid_details = [] if trace is not None else None
             for la, lb, _vr in resolve_ambiguous(
                 amb_pairs, embeddings,
                 reid_fallback_threshold=s.reid_fallback_threshold,
@@ -323,12 +346,8 @@ class Reconciler:
                 cam_b = per_local[lb]["camera"]
                 confirmed_edges.append(((cam_a, la), (cam_b, lb)))
 
-            if reid_details:
+            if trace is not None and reid_details:
                 for d in reid_details:
-                    if d.get("matched"):
-                        IEP3_REID_COSINE.observe(float(d.get("cosine") or 0.0))
-                    if trace is None:
-                        continue
                     ca = per_local.get(d["local_a"], {}).get("camera")
                     cb = per_local.get(d["local_b"], {}).get("camera")
                     trace.append({"event_type": "reid_fallback", "detail": {

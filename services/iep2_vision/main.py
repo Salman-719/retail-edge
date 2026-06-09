@@ -39,6 +39,16 @@ def main():
         log.error("Settings validation failed: %s", exc)
         sys.exit(1)
 
+    # Start Prometheus metrics HTTP server before the pipeline loop so Prometheus
+    # sees the target as UP from the moment the daemon is ready.
+    metrics_port = int(os.getenv("IEP2_METRICS_PORT", "9201"))
+    try:
+        from metrics import start_metrics_server
+    except ImportError:
+        from services.iep2_vision.metrics import start_metrics_server
+    start_metrics_server(metrics_port)
+    log.info("Prometheus metrics server started on :%d", metrics_port)
+
     log.info(
         "IEP2 starting  camera=%s  store=%s  window_seconds=%.1f",
         settings.camera_id, settings.store_id, settings.window_seconds,
