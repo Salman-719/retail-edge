@@ -1,4 +1,4 @@
-"""Store settings and alert config endpoints."""
+"""Store settings endpoints. (Alert config retired in D5 — see core/alert_defaults.py.)"""
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -12,7 +12,6 @@ from app.core.audit import write_audit_log
 from app.core.database import get_db
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
 from app.models.store_settings import StoreSettings
-from app.models.alert_config import AlertConfig
 
 router = APIRouter(tags=["settings"])
 
@@ -40,27 +39,6 @@ class PatchStoreSettingsRequest(BaseModel):
     active_config_cache_ttl_sec: Optional[int] = Field(None, ge=10, le=86400)
 
 
-class AlertConfigResponse(BaseModel):
-    id: uuid.UUID
-    store_id: uuid.UUID
-    shift_start_grace_min: int
-    absence_threshold_min: int
-    queue_people_threshold: int
-    queue_wait_min_threshold: int
-    queue_alert_cooldown_min: int
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class PatchAlertConfigRequest(BaseModel):
-    shift_start_grace_min: Optional[int] = Field(None, ge=0, le=120)
-    absence_threshold_min: Optional[int] = Field(None, ge=1, le=120)
-    queue_people_threshold: Optional[int] = Field(None, ge=1, le=500)
-    queue_wait_min_threshold: Optional[int] = Field(None, ge=1, le=120)
-    queue_alert_cooldown_min: Optional[int] = Field(None, ge=1, le=120)
-
-
 # ── Store Settings endpoints ──────────────────────────────────────────────────
 
 async def _get_settings_or_404(store_id: uuid.UUID, db: AsyncSession) -> StoreSettings:
@@ -68,14 +46,6 @@ async def _get_settings_or_404(store_id: uuid.UUID, db: AsyncSession) -> StoreSe
     row = result.scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail={"error": "Settings not found", "code": "NOT_FOUND"})
-    return row
-
-
-async def _get_alert_config_or_404(store_id: uuid.UUID, db: AsyncSession) -> AlertConfig:
-    result = await db.execute(select(AlertConfig).where(AlertConfig.store_id == store_id))
-    row = result.scalar_one_or_none()
-    if not row:
-        raise HTTPException(status_code=404, detail={"error": "Alert config not found", "code": "NOT_FOUND"})
     return row
 
 
@@ -113,41 +83,3 @@ async def patch_settings(
         await db.commit()
 
     return settings
-
-
-# ── Alert Config endpoints ────────────────────────────────────────────────────
-
-@router.get("/store/{slug}/alert-config", response_model=AlertConfigResponse)
-async def get_alert_config(
-    ctx: StoreContext = Depends(get_store_context),
-    db: AsyncSession = Depends(get_db),
-):
-    require_owner_or_manager(ctx)
-    return await _get_alert_config_or_404(ctx.store_id, db)
-
-
-@router.patch("/store/{slug}/alert-config", response_model=AlertConfigResponse)
-async def patch_alert_config(
-    body: PatchAlertConfigRequest,
-    ctx: StoreContext = Depends(get_store_context),
-    db: AsyncSession = Depends(get_db),
-):
-    require_owner_or_manager(ctx)
-    config = await _get_alert_config_or_404(ctx.store_id, db)
-
-    changed = False
-    for field in body.model_fields:
-        val = getattr(body, field)
-        if val is not None:
-            setattr(config, field, val)
-            changed = True
-
-    if changed:
-        config.updated_at = datetime.now(timezone.utc)
-        await write_audit_log(
-            db, "config_edited", store_id=ctx.store_id, user_id=ctx.user_id,
-            entity_type="store", entity_id=ctx.store_id,
-        )
-        await db.commit()
-
-    return config

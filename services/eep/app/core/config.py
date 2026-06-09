@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # or every cell is the wrong size. Matches IEP5's own default (0.5).
     HEATMAP_CELL_SIZE_M: float = 0.5
 
+    # ── Live monitoring (F1) ─────────────────────────────────────────────────
+    # A person counts as "present" only if last_seen_ts is within this window
+    # (~2 IEP3/IEP4 windows). KPIs and the persons list use the SAME cut so the
+    # numbers match the map dots.
+    LIVE_STALE_MS: int = 120_000
+
     # ── Punch-in resolver (employee-linking) ─────────────────────────────────
     PUNCH_RESOLVER_INTERVAL_S: float = 20.0    # tick cadence
     PUNCH_SETTLE_MS: int = 90_000              # wait past T for IEP3 to reconcile the window

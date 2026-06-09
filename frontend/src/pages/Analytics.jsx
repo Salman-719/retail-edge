@@ -9,6 +9,7 @@ import CompositionWidget from '../components/analytics/CompositionWidget'
 import DistributionWidget from '../components/analytics/DistributionWidget'
 import EmployeesWidget from '../components/analytics/EmployeesWidget'
 import FlowMatrixWidget from '../components/analytics/FlowMatrixWidget'
+import AlertsTimeseriesWidget from '../components/analytics/AlertsTimeseriesWidget'
 import HeatmapWidget from '../components/analytics/HeatmapWidget'
 
 const isoDay = (d) => d.toISOString().slice(0, 10)
@@ -71,6 +72,8 @@ export default function Analytics() {
           employeeIds={employeeIds}
           onEmployeeIdsChange={setEmployeeIds}
         />
+
+        <AlertsTimeseriesWidget {...common} />
 
         <HeatmapWidget {...common} />
       </div>

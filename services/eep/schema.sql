@@ -367,16 +367,8 @@ CREATE TABLE shift_instances (
     CONSTRAINT scheduled_end_after_start CHECK (scheduled_end > scheduled_start)
 );
 
-CREATE TABLE alert_configs (
-    id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    store_id                 UUID NOT NULL UNIQUE REFERENCES stores(id) ON DELETE CASCADE,
-    shift_start_grace_min    INTEGER NOT NULL DEFAULT 15,
-    absence_threshold_min    INTEGER NOT NULL DEFAULT 15,
-    queue_people_threshold   INTEGER NOT NULL DEFAULT 10,
-    queue_wait_min_threshold INTEGER NOT NULL DEFAULT 7,
-    queue_alert_cooldown_min INTEGER NOT NULL DEFAULT 15,
-    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- alert_configs retired (D5): per-rule config lives in alert_rules; the old
+-- store-wide defaults now live in app/core/alert_defaults.py (RULE_DEFAULTS).
 
 CREATE TABLE alerts (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -386,6 +378,8 @@ CREATE TABLE alerts (
                     'staff_absence', 'queue_buildup',
                     'camera_offline', 'camera_degraded'
                 )),
+    severity    VARCHAR(10) NOT NULL DEFAULT 'medium'
+                CHECK (severity IN ('low', 'medium', 'high', 'critical')),
     employee_id UUID REFERENCES employees(id) ON DELETE SET NULL,
     zone_id     UUID REFERENCES zones(id) ON DELETE SET NULL,
     details     JSONB,

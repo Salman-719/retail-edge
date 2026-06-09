@@ -293,16 +293,39 @@ export const getSyncEvent = (slug, eventId) =>
 export const requestDraftDiscard = (slug) =>
   api.post(`/store/${slug}/members/draft-discard-request`).then(r => r.data)
 
-// ─── Live Monitoring (Phase 5+) ──────────────────────────────────────────────
+// ─── Live Monitoring (F1/F2) ─────────────────────────────────────────────────
 
-export const getLiveSummary = (slug) =>
-  api.get(`/store/${slug}/live/summary`).then(r => r.data)
+export const getLiveOverview = (slug) =>
+  api.get(`/store/${slug}/live/overview`).then(r => r.data)
+
+export const getCameraHealth = (slug) =>
+  api.get(`/store/${slug}/cameras/health`).then(r => r.data)
 
 export const getActiveAlerts = (slug) =>
   api.get(`/store/${slug}/alerts/active`).then(r => r.data)
 
 export const resolveAlert = (slug, alertId) =>
   api.post(`/store/${slug}/alerts/${alertId}/resolve`).then(r => r.data)
+
+export const getAlertHistory = (slug, params) =>
+  api.get(`/store/${slug}/alerts/history`, { params }).then(r => r.data)
+
+// ─── Alert rules (D3) ────────────────────────────────────────────────────────
+
+export const listAlertRules = (slug) =>
+  api.get(`/store/${slug}/alert-rules`).then(r => r.data)
+
+export const getAlertRule = (slug, ruleId) =>
+  api.get(`/store/${slug}/alert-rules/${ruleId}`).then(r => r.data)
+
+export const createAlertRule = (slug, body) =>
+  api.post(`/store/${slug}/alert-rules`, body).then(r => r.data)
+
+export const updateAlertRule = (slug, ruleId, body) =>
+  api.patch(`/store/${slug}/alert-rules/${ruleId}`, body).then(r => r.data)
+
+export const deleteAlertRule = (slug, ruleId) =>
+  api.delete(`/store/${slug}/alert-rules/${ruleId}`).then(r => r.data)
 
 // ─── Analytics (E1/E3) ───────────────────────────────────────────────────────
 // All return the envelope { store_id, grain, from, to, rows } (heatmap: cells).
@@ -413,11 +436,11 @@ export const getSettings = (slug) =>
 export const patchSettings = (slug, body) =>
   api.patch(`/store/${slug}/settings`, body).then(r => r.data)
 
-export const getAlertConfig = (slug) =>
-  api.get(`/store/${slug}/alert-config`).then(r => r.data)
+export const getAlertRuleDefaults = (slug) =>
+  api.get(`/store/${slug}/alert-rules/defaults`).then(r => r.data)
 
-export const patchAlertConfig = (slug, body) =>
-  api.patch(`/store/${slug}/alert-config`, body).then(r => r.data)
+export const getAlertTimeseries = (slug, params) =>
+  api.get(`/store/${slug}/alerts/timeseries`, { params }).then(r => r.data)
 
 // ─── Audit (Phase 7+) ────────────────────────────────────────────────────────
 

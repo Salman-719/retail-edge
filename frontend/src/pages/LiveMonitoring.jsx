@@ -1,62 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
 import { usePageTitle } from '../components/PageMeta'
 import { StatsSkeleton } from '../components/Skeletons'
-import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
-import { getActiveVersion } from '../api'
+import AlertCard from '../components/alerts/AlertCard'
+import { getActiveVersion, getLiveOverview, getCameraHealth, getActiveAlerts, resolveAlert } from '../api'
+import { worldToImagePx } from '../lib/floorProjection'
+import { formatDuration } from '../lib/format'
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+const POLL_MS = 60000
 
 const ZONE_COLORS = {
   entrance: '#3b82f6', checkout: '#f59e0b', aisle: '#10b981',
   staff_only: '#ef4444', general: '#8b5cf6',
 }
-
-const ALERT_COLORS = {
-  Queue: { bg: 'bg-amber-50', border: 'border-amber-200', badge: 'bg-amber-100 text-amber-700', dot: 'bg-amber-400' },
-  Overcrowding: { bg: 'bg-red-50', border: 'border-red-200', badge: 'bg-red-100 text-red-700', dot: 'bg-red-500' },
-  Absence: { bg: 'bg-blue-50', border: 'border-blue-200', badge: 'bg-blue-100 text-blue-700', dot: 'bg-blue-400' },
-}
-
-// MOCK: replace with API call to GET /store/{slug}/live/summary
-const MOCK_KPI = {
-  total_people: 34,
-  customers: 29,
-  staff_on_floor: 5,
-  active_alerts: 3,
-}
-
-// MOCK: replace with API call to GET /store/{slug}/live/positions
-// Each entry: { id, x, y, type } where x/y are floor-plan pixel coordinates
-const MOCK_PEOPLE = [
-  { id: 'p1', x: 120, y: 90,  type: 'customer' },
-  { id: 'p2', x: 200, y: 140, type: 'customer' },
-  { id: 'p3', x: 310, y: 80,  type: 'customer' },
-  { id: 'p4', x: 410, y: 210, type: 'staff' },
-  { id: 'p5', x: 520, y: 160, type: 'customer' },
-  { id: 'p6', x: 180, y: 260, type: 'customer' },
-  { id: 'p7', x: 370, y: 310, type: 'customer' },
-  { id: 'p8', x: 600, y: 95,  type: 'staff' },
-  { id: 'p9', x: 260, y: 190, type: 'customer' },
-  { id: 'p10', x: 480, y: 280, type: 'customer' },
-]
-
-// MOCK: replace with API call to GET /store/{slug}/alerts/active
-const MOCK_ALERTS_INIT = [
-  { id: 'a1', type: 'Queue',        zone: 'Checkout 1', ts: '14:22' },
-  { id: 'a2', type: 'Overcrowding', zone: 'Entrance',   ts: '14:18' },
-  { id: 'a3', type: 'Absence',      zone: 'Aisle B',    ts: '14:05' },
-]
-
-// MOCK: replace with API call to GET /store/{slug}/cameras/health
-const MOCK_CAMERAS = [
-  { id: 'c1', name: 'CAM-01', online: true },
-  { id: 'c2', name: 'CAM-02', online: true },
-  { id: 'c3', name: 'CAM-03', online: false },
-  { id: 'c4', name: 'CAM-04', online: true },
-]
-
-// ─── Sub-components ───────────────────────────────────────────────────────────
+const PERSON_FILL = { customer: '#22c55e', staff: '#1B3A5C' }
 
 function useImage(url) {
   const [image, setImage] = useState(null)
@@ -71,16 +29,17 @@ function useImage(url) {
   return image
 }
 
-function FloorPlanCanvas({ floorPlan, zones = [], obstacles = [], cameraConfigs = [], people = [] }) {
+// Floor plan + zones/cameras (already image-px from the backend) + live persons
+// (world metres → image-px via the SHARED helper, then ×scale like zones).
+function FloorPlanCanvas({ floorPlan, zones = [], obstacles = [], cameraConfigs = [], persons = [] }) {
   const containerRef = useRef(null)
   const [size, setSize] = useState({ w: 800, h: 500 })
+  const [hover, setHover] = useState(null)
   const bgImage = useImage(floorPlan?.display_url)
 
   useEffect(() => {
     if (!containerRef.current) return
-    const ro = new ResizeObserver(([entry]) => {
-      setSize({ w: entry.contentRect.width, h: entry.contentRect.height })
-    })
+    const ro = new ResizeObserver(([entry]) => setSize({ w: entry.contentRect.width, h: entry.contentRect.height }))
     ro.observe(containerRef.current)
     return () => ro.disconnect()
   }, [])
@@ -97,68 +56,68 @@ function FloorPlanCanvas({ floorPlan, zones = [], obstacles = [], cameraConfigs 
   const imgH = floorPlan.height_px || 1
   const scale = Math.min(size.w / imgW, size.h / imgH)
   const stageH = Math.round(imgH * scale)
+  const toPx = worldToImagePx(floorPlan)
 
   return (
-    <div ref={containerRef} className="w-full h-full">
+    <div ref={containerRef} className="w-full h-full" style={{ position: 'relative' }}>
       <Stage width={size.w} height={stageH}>
         <Layer>
-          {bgImage && (
-            <KonvaImage image={bgImage} width={imgW * scale} height={imgH * scale} />
-          )}
+          {bgImage && <KonvaImage image={bgImage} width={imgW * scale} height={imgH * scale} />}
 
           {obstacles.map(obs => (
-            <Line key={obs.id}
-              points={obs.points.flatMap(([x, y]) => [x * scale, y * scale])}
+            <Line key={obs.id} points={obs.points.flatMap(([x, y]) => [x * scale, y * scale])}
               closed fill="#6b728022" stroke="#6b7280" strokeWidth={1.5} dash={[5, 3]} />
           ))}
 
           {zones.map(zone => (
             <React.Fragment key={zone.id}>
-              <Line
-                points={zone.points.flatMap(([x, y]) => [x * scale, y * scale])}
-                closed
-                fill={(ZONE_COLORS[zone.type] || '#888') + '28'}
-                stroke={ZONE_COLORS[zone.type] || '#888'}
-                strokeWidth={1.5}
-              />
+              <Line points={zone.points.flatMap(([x, y]) => [x * scale, y * scale])} closed
+                fill={(ZONE_COLORS[zone.type] || '#888') + '28'} stroke={ZONE_COLORS[zone.type] || '#888'} strokeWidth={1.5} />
               {zone.points[0] && (
-                <Text
-                  x={zone.points[0][0] * scale + 4}
-                  y={zone.points[0][1] * scale + 4}
-                  text={zone.name}
-                  fontSize={11}
-                  fill={ZONE_COLORS[zone.type] || '#888'}
-                />
+                <Text x={zone.points[0][0] * scale + 4} y={zone.points[0][1] * scale + 4}
+                  text={zone.name} fontSize={11} fill={ZONE_COLORS[zone.type] || '#888'} />
               )}
             </React.Fragment>
           ))}
 
           {cameraConfigs.map(cc => (
-            <React.Fragment key={cc.id}>
-              <Circle
-                x={cc.position_x * scale} y={cc.position_y * scale}
-                radius={7} fill="#1B3A5C" stroke="#fff" strokeWidth={1.5}
-              />
-              <Text
-                x={cc.position_x * scale + 10} y={cc.position_y * scale - 6}
-                text={cc.physical_camera_name} fontSize={10} fill="#1f2937"
-              />
-            </React.Fragment>
+            <Circle key={cc.id} x={cc.position_x * scale} y={cc.position_y * scale}
+              radius={7} fill="#1B3A5C" stroke="#fff" strokeWidth={1.5} />
           ))}
 
-          {/* MOCK: replace with live positions from GET /store/{slug}/live/positions */}
-          {people.map(p => (
-            <Circle
-              key={p.id}
-              x={p.x * scale} y={p.y * scale}
-              radius={6}
-              fill={p.type === 'staff' ? '#1B3A5C' : '#22c55e'}
-              stroke="#fff" strokeWidth={1.5}
-              opacity={0.85}
-            />
-          ))}
+          {persons.map(p => {
+            const [ix, iy] = toPx(p.world_x, p.world_y)
+            return (
+              <Circle
+                key={p.global_id}
+                x={ix * scale} y={iy * scale}
+                radius={6}
+                fill={PERSON_FILL[p.type] || '#22c55e'}
+                stroke="#fff" strokeWidth={1.5} opacity={0.9}
+                onMouseEnter={() => setHover({ p, x: ix * scale, y: iy * scale })}
+                onMouseLeave={() => setHover(null)}
+              />
+            )
+          })}
         </Layer>
       </Stage>
+
+      {hover && (
+        <div
+          className="absolute z-10 pointer-events-none bg-gray-900/90 text-white text-xs rounded-lg px-2.5 py-1.5 shadow-lg"
+          style={{ left: hover.x + 10, top: Math.max(0, hover.y - 10) }}
+        >
+          <div className="font-semibold capitalize">{hover.p.type}{hover.p.employee_name ? ` · ${hover.p.employee_name}` : ''}</div>
+          <div className="text-gray-300">Zone: {hover.p.current_zone_name || '—'}</div>
+          <div className="text-gray-300">Dwell: {formatDuration(hover.p.dwell_ms)}</div>
+        </div>
+      )}
+
+      {persons.length === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center text-sm text-gray-400 pointer-events-none">
+          No one on the floor right now
+        </div>
+      )}
     </div>
   )
 }
@@ -167,135 +126,108 @@ function KpiCard({ label, value, highlight }) {
   return (
     <div className={`bg-white border rounded-xl px-5 py-4 flex flex-col gap-1 ${highlight ? 'border-red-300' : 'border-gray-200'}`}>
       <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">{label}</span>
-      <span className={`text-3xl font-bold tabular-nums ${highlight ? 'text-red-600' : 'text-gray-900'}`}>
-        {value}
-      </span>
+      <span className={`text-3xl font-bold tabular-nums ${highlight ? 'text-red-600' : 'text-gray-900'}`}>{value}</span>
     </div>
   )
 }
 
-function AlertCard({ alert, onDismiss }) {
-  const style = ALERT_COLORS[alert.type] || ALERT_COLORS.Queue
-  return (
-    <div className={`rounded-lg border p-3 ${style.bg} ${style.border}`}>
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className={`w-2 h-2 rounded-full flex-shrink-0 mt-0.5 ${style.dot}`} />
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${style.badge}`}>
-                {alert.type}
-              </span>
-              <span className="text-sm font-medium text-gray-800 truncate">{alert.zone}</span>
-            </div>
-            <p className="text-xs text-gray-500 mt-0.5">{alert.ts}</p>
-          </div>
-        </div>
-        {/* MOCK: replace onDismiss with POST /store/{slug}/alerts/{id}/resolve */}
-        <button
-          onClick={() => onDismiss(alert.id)}
-          title="Dismiss alert"
-          className="text-gray-400 hover:text-gray-600 flex-shrink-0 text-xs leading-none mt-0.5"
-        >
-          ✕
-        </button>
-      </div>
-    </div>
-  )
+function cameraStyle(cam) {
+  if (cam.online) return 'bg-green-50 border-green-200 text-green-700'
+  if (cam.status === 'unknown') return 'bg-gray-50 border-gray-200 text-gray-500'
+  return 'bg-amber-50 border-amber-200 text-amber-700'
 }
-
-// ─── Main Component ───────────────────────────────────────────────────────────
+function cameraDot(cam) {
+  if (cam.online) return 'bg-green-500'
+  if (cam.status === 'unknown') return 'bg-gray-400'
+  return 'bg-amber-500'
+}
 
 export default function LiveMonitoring() {
   const { slug } = useParams()
   usePageTitle('Live Monitoring')
 
-  const [demoBannerVisible, setDemoBannerVisible] = useState(true)
-
-  // MOCK: replace with API call to GET /store/{slug}/live/summary
-  const [kpi] = useState(MOCK_KPI)
-
-  // MOCK: replace with API call to GET /store/{slug}/alerts/active + websocket/polling
-  const [alerts, setAlerts] = useState(MOCK_ALERTS_INIT)
-
-  // MOCK: replace with API call to GET /store/{slug}/cameras/health
-  const [cameras] = useState(MOCK_CAMERAS)
-
-  // MOCK: replace with API call to GET /store/{slug}/live/positions
-  const [people] = useState(MOCK_PEOPLE)
-
   const [config, setConfig] = useState(null)
   const [loadingConfig, setLoadingConfig] = useState(true)
+  const [overview, setOverview] = useState(null)
+  const [alerts, setAlerts] = useState([])
+  const [cameraHealth, setCameraHealth] = useState(null)
+  const [loadingLive, setLoadingLive] = useState(true)
+  const [dismissingId, setDismissingId] = useState(null)
+  const [nowTick, setNowTick] = useState(Date.now())
 
   useEffect(() => {
-    getActiveVersion(slug)
-      .then(v => setConfig(v))
-      .catch(() => setConfig(null))
-      .finally(() => setLoadingConfig(false))
+    getActiveVersion(slug).then(setConfig).catch(() => setConfig(null)).finally(() => setLoadingConfig(false))
   }, [slug])
 
-  function dismissAlert(id) {
-    setAlerts(prev => prev.filter(a => a.id !== id))
+  async function loadAlerts() {
+    try { const a = await getActiveAlerts(slug); setAlerts(Array.isArray(a) ? a : []) } catch { /* keep last */ }
   }
+
+  useEffect(() => {
+    let cancelled = false
+    async function tick() {
+      try { const o = await getLiveOverview(slug); if (!cancelled) setOverview(o) } catch { /* keep last */ }
+      try { const c = await getCameraHealth(slug); if (!cancelled) setCameraHealth(c) } catch { /* keep last */ }
+      await loadAlerts()
+      if (!cancelled) setLoadingLive(false)
+    }
+    tick()
+    const poll = setInterval(tick, POLL_MS)
+    const clock = setInterval(() => setNowTick(Date.now()), 1000)
+    return () => { cancelled = true; clearInterval(poll); clearInterval(clock) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug])
+
+  async function dismiss(alert) {
+    setDismissingId(alert.id)
+    setAlerts(list => list.filter(a => a.id !== alert.id)) // optimistic
+    try { await resolveAlert(slug, alert.id) } catch { loadAlerts() } finally { setDismissingId(null) }
+  }
+
+  const kpi = overview?.kpis
+  const persons = overview?.persons || []
+  const updatedAgo = overview ? Math.max(0, Math.round((nowTick - overview.generated_at_ms) / 1000)) : null
 
   return (
     <div className="page-enter flex flex-col h-full overflow-hidden">
-
-      {/* ── Header ──────────────────────────────────────────────────────────── */}
       <header className="bg-white border-b border-gray-200 px-6 py-4 shrink-0 flex items-center justify-between">
         <div>
           <h1 className="page-title">Live Monitoring</h1>
-          <p className="page-subtitle">Real-time multi-camera tracking</p>
+          <p className="page-subtitle">Near-live store activity · one update per ~60s window</p>
         </div>
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-          <span className="text-xs text-gray-500">Live</span>
+          <span className="text-xs text-gray-500">
+            {updatedAgo === null ? 'Connecting…' : `Updated ${updatedAgo}s ago`}
+          </span>
         </div>
       </header>
 
-      {/* ── Demo data banner ────────────────────────────────────────────────── */}
-      {demoBannerVisible && (
-        <div className="bg-amber-50 border-b border-amber-200 text-amber-800 text-xs px-6 py-2 flex items-center justify-between shrink-0">
-          <span>Showing demo data — live backend not connected.</span>
-          <button onClick={() => setDemoBannerVisible(false)} className="ml-4 text-amber-600 hover:text-amber-900 leading-none">✕</button>
-        </div>
-      )}
-
       <div className="flex-1 overflow-auto p-5 space-y-4">
 
-        {/* ── KPI Bar ─────────────────────────────────────────────────────── */}
-        {/* MOCK: replace kpi state with API call to GET /store/{slug}/live/summary */}
-        {loadingConfig && <StatsSkeleton count={4} />}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <KpiCard label="Total People"   value={kpi.total_people} />
-          <KpiCard label="Customers"      value={kpi.customers} />
-          <KpiCard label="Staff On Floor" value={kpi.staff_on_floor} />
-          <KpiCard label="Active Alerts"  value={kpi.active_alerts} highlight={kpi.active_alerts > 0} />
-        </div>
+        {/* KPI Bar */}
+        {loadingLive && !kpi ? (
+          <StatsSkeleton count={4} />
+        ) : (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <KpiCard label="Total People"   value={kpi?.total_people ?? 0} />
+            <KpiCard label="Customers"      value={kpi?.customers ?? 0} />
+            <KpiCard label="Staff On Floor" value={kpi?.staff_on_floor ?? 0} />
+            <KpiCard label="Active Alerts"  value={kpi?.active_alerts ?? 0} highlight={(kpi?.active_alerts ?? 0) > 0} />
+          </div>
+        )}
 
-        {/* ── Main Panel ──────────────────────────────────────────────────── */}
         <div className="flex flex-col lg:flex-row gap-4">
-
-          {/* Floor plan — 70% on lg+ */}
+          {/* Floor plan */}
           <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-col min-h-[280px] lg:flex-[0_0_70%]">
-            {/* Title row */}
             <div className="flex items-center justify-between shrink-0">
-              <h2 className="text-sm font-semibold text-gray-700">
-                Floor Plan
-              </h2>
+              <h2 className="text-sm font-semibold text-gray-700">Floor Plan</h2>
               <div className="flex items-center gap-4 text-xs text-gray-500">
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-green-500 inline-block" /> Customer
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-blue-900 inline-block" /> Staff
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-gray-600 inline-block" /> Camera
-                </span>
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-green-500 inline-block" /> Customer</span>
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-blue-900 inline-block" /> Staff</span>
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-gray-600 inline-block" /> Camera</span>
               </div>
             </div>
-
             <div className="flex-1 min-h-0 mt-3">
               {loadingConfig ? (
                 <div className="flex items-center justify-center h-full text-gray-400 text-sm">Loading floor plan…</div>
@@ -305,62 +237,58 @@ export default function LiveMonitoring() {
                   zones={config?.zones || []}
                   obstacles={config?.obstacles || []}
                   cameraConfigs={config?.camera_configs || []}
-                  people={people}
+                  persons={persons}
                 />
               )}
             </div>
           </div>
 
-          {/* Alerts feed — 30% on lg+, capped on small screens */}
+          {/* Alerts feed (reuses D1 active alerts + D4 AlertCard + D2 dismiss) */}
           <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-col max-h-[300px] lg:max-h-none lg:flex-1">
             <div className="flex items-center justify-between mb-3 shrink-0">
               <h2 className="text-sm font-semibold text-gray-700">Active Alerts</h2>
               {alerts.length > 0 && (
-                <span className="text-xs bg-red-100 text-red-700 font-semibold px-2 py-0.5 rounded-full">
-                  {alerts.length}
-                </span>
+                <span className="text-xs bg-red-100 text-red-700 font-semibold px-2 py-0.5 rounded-full">{alerts.length}</span>
               )}
             </div>
-            {/* MOCK: replace alerts state with GET /store/{slug}/alerts/active */}
             <div className="flex-1 overflow-y-auto space-y-2 min-h-0">
               {alerts.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full text-gray-400 text-sm gap-2">
-                  <span className="text-2xl">✓</span>
-                  <span>No active alerts</span>
+                  <span className="text-2xl">✓</span><span>No active alerts</span>
                 </div>
               ) : (
-                alerts.map(a => (
-                  <AlertCard key={a.id} alert={a} onDismiss={dismissAlert} />
-                ))
+                alerts.map(a => <AlertCard key={a.id} alert={a} onDismiss={dismiss} dismissing={dismissingId === a.id} />)
               )}
             </div>
           </div>
         </div>
 
-        {/* ── Camera Health Strip ──────────────────────────────────────────── */}
-        {/* Uses config.camera_configs when available, falls back to MOCK_CAMERAS */}
-        <div className="bg-white border border-gray-200 rounded-xl px-5 py-3 flex items-center gap-2 flex-wrap shrink-0">
-          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-2">Camera Status</span>
-          {(config?.camera_configs?.length > 0
-            ? config.camera_configs.map(cc => ({
-                id: cc.id,
-                name: cc.physical_camera_name,
-                online: cc.status === 'verified',
-              }))
-            : cameras
-          ).map(cam => (
-            <div
-              key={cam.id}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium ${
-                cam.online
-                  ? 'bg-green-50 border-green-200 text-green-700'
-                  : 'bg-red-50 border-red-200 text-red-600'
-              }`}
-            >
-              <span className={`w-2 h-2 rounded-full ${cam.online ? 'bg-green-500' : 'bg-red-500'}`} />
-              {cam.name}
+        {/* Camera health + agent */}
+        <div className="bg-white border border-gray-200 rounded-xl px-5 py-3 shrink-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-2">Camera Status</span>
+            {(cameraHealth?.cameras || []).map(cam => (
+              <div key={cam.physical_camera_id} title={cam.status}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium ${cameraStyle(cam)}`}>
+                <span className={`w-2 h-2 rounded-full ${cameraDot(cam)}`} />
+                {cam.name}
+                {!cam.online && <span className="opacity-70">· {cam.status}</span>}
+              </div>
+            ))}
+            {cameraHealth && cameraHealth.cameras.length === 0 && (
+              <span className="text-xs text-gray-400">No cameras configured</span>
+            )}
+          </div>
+          {cameraHealth?.agent && (
+            <div className="mt-2 text-xs text-gray-500 flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${cameraHealth.agent.online ? 'bg-green-500' : 'bg-red-500'}`} />
+              Edge device {cameraHealth.agent.online ? 'online' : 'offline'}
+              {cameraHealth.agent.heartbeat_age_seconds != null && (
+                <span>· last seen {Math.round(cameraHealth.agent.heartbeat_age_seconds)}s ago</span>
+              )}
+              {cameraHealth.agent.agent_version && <span>· v{cameraHealth.agent.agent_version}</span>}
             </div>
-          ))}
+          )}
         </div>
 
       </div>

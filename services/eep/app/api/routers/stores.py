@@ -10,7 +10,6 @@ from app.core.audit import write_audit_log
 from app.core.auth import get_current_user_payload
 from app.core.database import get_db
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
-from app.models.alert_config import AlertConfig
 from app.models.store import Store
 from app.models.store_settings import StoreSettings
 from app.schemas.store import CreateStoreRequest, PatchStoreRequest, StoreDetail, StoreListItem
@@ -79,9 +78,6 @@ async def create_store(
 
     # Auto-create store_settings with defaults
     db.add(StoreSettings(store_id=store.id))
-
-    # Auto-create alert_configs with defaults
-    db.add(AlertConfig(store_id=store.id))
 
     await write_audit_log(
         db, "store_created", store_id=store.id, user_id=user_id,
