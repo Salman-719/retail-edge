@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
 from app.core.database import get_db
+from app.core.ratelimit import MAX_LIST_ROWS
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
 from app.models.employee import Employee
 from app.models.shift_pattern import ShiftPattern
@@ -253,7 +254,7 @@ async def list_shifts(
         query = query.where(ShiftInstance.scheduled_start < end_dt)
     if employee_id:
         query = query.where(ShiftInstance.employee_id == employee_id)
-    query = query.order_by(ShiftInstance.scheduled_start)
+    query = query.order_by(ShiftInstance.scheduled_start).limit(MAX_LIST_ROWS)
     result = await db.execute(query)
     return result.scalars().all()
 

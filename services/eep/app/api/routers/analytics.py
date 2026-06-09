@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import analytics_grains as ag
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.s3_client import generate_presigned_url_public
+from app.core.s3_client import safe_presign_public
 from app.middleware.store_auth import StoreContext, get_store_context
 from app.models.floor_plan import FloorPlan
 from app.models.version import StoreConfigVersion
@@ -395,7 +395,7 @@ async def heatmap(
             world_y_max=fp.world_y_max,
             width_px=fp.width_px,
             height_px=fp.height_px,
-            display_url=generate_presigned_url_public(fp.display_s3_key) if fp.display_s3_key else None,
+            display_url=safe_presign_public(fp.display_s3_key),
             image_uploaded=fp.image_uploaded,
         )
 

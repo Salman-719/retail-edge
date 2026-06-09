@@ -1,7 +1,11 @@
+import logging
+
 import boto3
 from botocore.exceptions import ClientError
 from app.core.config import settings
 from app.core.resilience import s3_config
+
+log = logging.getLogger(__name__)
 
 
 def _client():
@@ -76,6 +80,23 @@ def generate_presigned_url_public(s3_key: str, expiry: int = 3600) -> str:
         Params={"Bucket": settings.S3_BUCKET, "Key": s3_key},
         ExpiresIn=expiry,
     )
+
+
+def safe_presign_public(s3_key: str | None, expiry: int = 3600) -> str | None:
+    """Presign for a browser, degrading to None on any failure.
+
+    A presigned URL is optional ENRICHMENT on read responses (the floor-plan /
+    camera-frame image). One unsignable or misconfigured key must never 500 the
+    whole config/analytics response — it just yields a null url. Core DB data is
+    never degraded this way.
+    """
+    if not s3_key:
+        return None
+    try:
+        return generate_presigned_url_public(s3_key, expiry)
+    except Exception:
+        log.warning("presign failed for key=%s — returning null url", s3_key)
+        return None
 
 
 def delete_object(s3_key: str) -> None:

@@ -40,6 +40,10 @@ _RETRY_AFTER_S = int(os.environ.get("RATE_LIMIT_RETRY_AFTER_S", "60"))
 MAX_IMAGE_UPLOAD_BYTES = int(os.environ.get("MAX_IMAGE_UPLOAD_BYTES", "10000000"))  # ~10MB
 MAX_XML_UPLOAD_BYTES = int(os.environ.get("MAX_XML_UPLOAD_BYTES", "2000000"))       # ~2MB
 
+# Defensive hard cap on list-endpoint result sets so a pathological row count can
+# never produce an unbounded payload (well above any realistic store's data).
+MAX_LIST_ROWS = int(os.environ.get("MAX_LIST_ROWS", "1000"))
+
 
 def check_upload_size(content: bytes, cap: int) -> None:
     """413 (envelope) when an uploaded file exceeds its cap. Call right after

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
 from app.core.database import get_db
-from app.core.s3_client import generate_presigned_url_public
+from app.core.s3_client import safe_presign_public
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
 from app.models.camera_config import CameraConfig
 from app.models.floor_plan import FloorPlan
@@ -98,7 +98,7 @@ async def get_active_version(
     fp = fp_result.scalar_one_or_none()
     fp_response = None
     if fp:
-        display_url = generate_presigned_url_public(fp.display_s3_key) if fp.display_s3_key else None
+        display_url = safe_presign_public(fp.display_s3_key)
         fp_response = FloorPlanResponse(
             id=fp.id,
             version_id=fp.version_id,
@@ -135,7 +135,7 @@ async def get_active_version(
     )
     camera_configs = []
     for cc, pc in configs_result.all():
-        frame_url = generate_presigned_url_public(cc.frame_s3_key) if cc.frame_s3_key else None
+        frame_url = safe_presign_public(cc.frame_s3_key)
         camera_configs.append(CameraConfigSummary(
             id=cc.id,
             physical_camera_id=cc.physical_camera_id,
