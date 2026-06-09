@@ -1,77 +1,106 @@
 # CI/CD Secrets Reference
 
-The current production path is EKS + Helm. CI validates the Helm/observability
-configuration, builds and health-checks the MLflow server image, smoke-tests the
-offline promotion tools, and publishes tagged GHCR images. Terraform/Helm
-deployment is still run explicitly from the operator shell or CloudShell.
+All secrets are stored in **GitHub → Settings → Secrets and variables → Actions**.
+Secrets marked **Environment** must also be added under the `production` GitHub
+Environment (Settings → Environments → production → Environment secrets) so that
+Jobs 3–7, which use `environment: production`, can read them.
 
-## Required For Image Publishing
+---
 
-| Secret | Scope | Purpose |
+## Required secrets
+
+### Container registry
+
+| Secret name | Scope | What it should contain |
 |---|---|---|
-| `REGISTRY_USERNAME` | repository | GitHub user or machine account with GHCR package access |
-| `REGISTRY_PASSWORD` | repository | GitHub PAT with `write:packages` |
+| `REGISTRY_USERNAME` | Repository | Your GitHub username (or a machine account with `write:packages` permission on GHCR). Used by `docker/login-action` to push images to `ghcr.io`. |
+| `REGISTRY_PASSWORD` | Repository | A GitHub Personal Access Token (classic) with `write:packages` scope. Generate at GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic). |
 
-Images are pushed as:
+### Deploy host (SSH)
 
-```text
-ghcr.io/<owner>/retailvision/<service>:<tag>
+| Secret name | Scope | What it should contain |
+|---|---|---|
+| `DEPLOY_HOST` | Environment | Hostname or IP of the production server (e.g. `retailvision.example.com`). The pipeline SSHs to this host to pull images and restart services. |
+| `DEPLOY_USER` | Environment | SSH username on the deploy host (e.g. `ubuntu` or `deploy`). This user must be in the `docker` group. |
+| `DEPLOY_SSH_KEY` | Environment | The **private** half of an Ed25519 key pair. Generate with: `ssh-keygen -t ed25519 -C "github-actions" -f deploy_key`. Copy the contents of `deploy_key` (private) here. Add `deploy_key.pub` to `~/.ssh/authorized_keys` on the server. **Never** commit either file. |
+
+### MLflow
+
+| Secret name | Scope | What it should contain |
+|---|---|---|
+| `MLFLOW_TRACKING_URI` | Environment | Full URL to your MLflow tracking server, e.g. `http://mlflow.internal:5000`. Must be reachable from the GitHub Actions runner. For self-hosted runners on your VPC this is straightforward; for hosted runners you need a public endpoint or VPN. |
+
+### Prometheus & Grafana
+
+| Secret name | Scope | What it should contain |
+|---|---|---|
+| `PROMETHEUS_URL` | Environment | Base URL of the Prometheus server, e.g. `http://prometheus.internal:9090`. Used by `canary_eval.py` (Job 4) and the target health check (Job 6). |
+| `GRAFANA_PASSWORD` | Environment | Grafana admin password. Matches `GRAFANA_PASSWORD` in your `.env` / compose file. Used only for the Job 6 `/api/health` check (read-only). |
+
+### Application secrets (passed to containers on deploy)
+
+These are not read directly by the pipeline YAML but are needed by the
+`docker compose up` command on the deploy host. They must exist in the
+server's `/opt/retailvision/.env` file **or** be exported in the deploy
+user's shell environment before `docker compose` runs.
+
+| Secret name | What it should contain |
+|---|---|
+| `POSTGRES_PASSWORD` | PostgreSQL password for the `retailvision` user. |
+| `DATABASE_URL_EEP` | Full `postgresql+asyncpg://` connection string for the EEP service. |
+| `JWT_SECRET` | Random 32-byte hex string. Generate: `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `S3_ACCESS_KEY` | MinIO / S3 access key (root user). |
+| `S3_SECRET_KEY` | MinIO / S3 secret key (root password). |
+
+### Notifications
+
+| Secret name | Scope | What it should contain |
+|---|---|---|
+| `SLACK_WEBHOOK_URL` | Repository | Incoming Webhook URL from your Slack app. Create at api.slack.com → Your Apps → Incoming Webhooks → Add New Webhook. The rollback job (Job 7) posts to this URL on any pipeline failure. Set to a dummy value (e.g. `https://hooks.slack.com/disabled`) if you do not want Slack notifications — the step uses `continue-on-error` implicitly via the slack action's own error handling. |
+
+---
+
+## How to override window durations for production
+
+The pipeline sets short CI defaults at the top of `promotion.yml`:
+
+```yaml
+env:
+  SHADOW_WINDOW_SECONDS: "30"
+  CANARY_WINDOW_SECONDS: "60"
 ```
 
-The production Helm chart pulls `eep`, `frontend`, `iep3`, `iep4`, `iep5`,
-`iep6`, and `mlflow`. These packages must be public or the cluster must be given
-an image pull secret.
+To use longer production windows **without editing the YAML**, add these as
+**Environment variables** (not secrets — they are not sensitive) in the
+`production` GitHub Environment:
 
-## MLOps CI/CD Boundary
+| Variable | CI default | Recommended production value |
+|---|---|---|
+| `SHADOW_WINDOW_SECONDS` | `30` | `300` (5 minutes) |
+| `CANARY_WINDOW_SECONDS` | `60` | `1800` (30 minutes) |
+| `CANARY_PERCENTAGE` | `10` | `10`–`25` depending on traffic |
+| `CANARY_LOOKBACK_MINUTES` | `5` | `30` |
 
-The normal CI workflow starts a local MLflow server and runs:
+GitHub Environment variables override workflow-level `env:` values when the
+job specifies `environment: production`.
 
-- `mlops/compare_shadow.py --smoke`
-- `mlops/run_promotion.py --model-name retailvision --dry-run`
+---
 
-The tagged-image workflow publishes
-`ghcr.io/<owner>/retailvision/mlflow:<tag>`. Production registry promotion is
-manual by design because changing an MLflow stage alone does not deploy a new
-detector or ReID runtime image.
-
-## Optional MLOps Variables
-
-Use these for manual promotion/evaluation jobs or future CI workflows:
-
-| Variable/Secret | Purpose |
-|---|---|
-| `MLFLOW_TRACKING_URI` | MLflow tracking server URL |
-| `PROMETHEUS_URL` | Prometheus URL used by `mlops/canary_eval.py` |
-| `PROMOTION_MODEL_NAME` | MLflow registered model name, default `retailvision` |
-| `CANARY_PERCENTAGE` | EEP request canary split percentage |
-| `SHADOW_WINDOW_SECONDS` | Shadow comparison window |
-| `CANARY_WINDOW_SECONDS` | Canary evaluation window |
-
-For EKS, prefer running MLOps commands from CloudShell or a machine with
-`kubectl` access and port-forward Prometheus when needed:
+## How to create secrets
 
 ```bash
-kubectl -n retailvision port-forward svc/prometheus 9090:9090
-export PROMETHEUS_URL=http://localhost:9090
-export MLFLOW_TRACKING_URI=https://mlflow.$INGRESS_EIP.nip.io
-python mlops/check_state.py --model-name retailvision
+# Using the GitHub CLI (gh):
+gh secret set REGISTRY_USERNAME   --body "your-github-username"
+gh secret set REGISTRY_PASSWORD   --body "ghp_xxxxxxxxxxxxxxxxxxxx"
+gh secret set DEPLOY_HOST         --env production --body "retailvision.example.com"
+gh secret set DEPLOY_USER         --env production --body "ubuntu"
+gh secret set DEPLOY_SSH_KEY      --env production < ~/.ssh/deploy_key
+gh secret set MLFLOW_TRACKING_URI --env production --body "http://mlflow.internal:5000"
+gh secret set PROMETHEUS_URL      --env production --body "http://prometheus.internal:9090"
+gh secret set GRAFANA_PASSWORD    --env production --body "your-grafana-admin-password"
+gh secret set SLACK_WEBHOOK_URL   --body "https://hooks.slack.com/services/T.../B.../xxx"
 ```
 
-## AWS Runtime Secrets
+Or navigate to: **GitHub repo → Settings → Secrets and variables → Actions → New repository secret**.
 
-Runtime app secrets are not stored in GitHub Actions. They live in AWS Secrets
-Manager and are synced into Kubernetes by External Secrets:
-
-- `retailvision/postgres-password`
-- `retailvision/redis-password`
-- `retailvision/jwt-secret`
-- `retailvision/agent-secret`
-- `retailvision/redis-url`
-- `retailvision/s3-access-key`
-- `retailvision/s3-secret-key`
-- `retailvision/openai-api-key`
-- `retailvision/grafana-admin-password`
-
-Terraform creates or references these during EKS provisioning. Do not hard-code
-notification tokens, Grafana passwords, or cloud credentials into monitoring
-files.
+For environment secrets: **Settings → Environments → production → Add secret**.

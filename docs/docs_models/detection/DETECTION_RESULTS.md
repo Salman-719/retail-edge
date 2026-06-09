@@ -24,6 +24,10 @@
   - `hand_ad` (hand_on_ad_in_store.mp4) — 0 people, 1 printed hand → every detection = FP.
   - `crowded` (clip_cashier.mp4, 3072×2048) — 16 people, peak 14 → count accuracy.
 
+**All 24 runs in MLflow:**
+
+![Runs table](../../screenshots/detection/01_runs_table.png)
+
 ---
 
 ## 1. Crowded scene (clip_cashier — 16 people, peak 14)
@@ -58,6 +62,10 @@ The people-detection benchmark. `peak_count_error = |peak_detections_per_frame �
 > come after ReID de-duplication in IEP3, not the detection stage. So treat
 > peak_count_error as a *detection-stage proxy*, not the final occupancy number.
 
+**MLflow Compare — model metrics on the crowded scene:**
+
+![Compare models](../../screenshots/detection/02_compare_models.png)
+
 ---
 
 ## 2. Mannequin scene (clip_mannequin — 0 people, 8 mannequins)
@@ -86,6 +94,10 @@ reinforcing that 0.3+ is the right operating point.
 > makes it under-detect real people (peak 11 vs 14, fails the gate). RT-DETR rejects
 > mannequins *while still detecting people well*; yolo11n rejects them by detecting
 > less of everything. Not equivalent.
+
+**Mannequin FP comparison across all models:**
+
+![Mannequin rejection](../../screenshots/detection/04_mannequin_rejection.png)
 
 ---
 
@@ -134,6 +146,18 @@ concern, not a detection one.
 `avg_confidence` 85.6 ≥ 75 ✅ · `id_switches` 7 ≤ 12 ✅ · `peak_count_error` 1 ≤ 2 ✅ →
 **PROMOTE**. (Mannequin run: 0 FP ✅. Hand-ad run: 532 FP → correctly DO NOT PROMOTE on
 that scene, the documented Case-3 limitation.)
+
+**Winner run metrics in MLflow:**
+
+![Winner metrics](../../screenshots/detection/03_winner_metrics.png)
+
+**Peak-count frame — busiest frame in clip_cashier (13 detections, true peak 14):**
+
+![Peak frame artifacts](../../screenshots/detection/05_artifacts_peakframe.png)
+
+**Detection model registered as Production in MLflow Model Registry:**
+
+![Model registry](../../screenshots/detection/06_registry.png)
 
 ### Known limitations (state in the report)
 1. **2-D printed humans** (hand-ad) are not rejected — needs static-object suppression.
