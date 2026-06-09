@@ -86,6 +86,8 @@ jobs:
         run: pytest tests/unit/iep4 -v
       - name: IEP5 unit tests
         run: pytest tests/unit/iep5 -v
+      - name: Consistency guardrails
+        run: pytest tests/unit/consistency -v
 
   validate-prometheus:
     name: Prometheus Config Validation
