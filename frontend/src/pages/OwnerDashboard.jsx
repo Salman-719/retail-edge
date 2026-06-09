@@ -166,7 +166,8 @@ export default function OwnerDashboard() {
   const { state, dispatch } = useAuth()
   const navigate = useNavigate()
 
-  if (state.ready && state.user?.account_type !== 'owner') {
+  const isAdmin = !!state.user?.is_super_admin
+  if (state.ready && state.user?.account_type !== 'owner' && !isAdmin) {
     return <Navigate to="/login" replace />
   }
 
@@ -309,8 +310,8 @@ export default function OwnerDashboard() {
 
         {/* Page header */}
         <div className="mb-8">
-          <h1 className="page-title">Owner Dashboard</h1>
-          <p className="page-subtitle">Manage your retail locations</p>
+          <h1 className="page-title">{isAdmin ? 'All Stores — Admin' : 'Owner Dashboard'}</h1>
+          <p className="page-subtitle">{isAdmin ? 'Fleet-wide view across all owners' : 'Manage your retail locations'}</p>
           {!loadingStores && stores.length > 0 && (
             <p className="text-xs text-gray-400 mt-3 pl-4">
               {stores.length} {stores.length === 1 ? 'Store' : 'Stores'}

@@ -1,13 +1,9 @@
 import React, { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 
-// Loaded only in dev builds — dynamic import is dead code in `vite build`.
-const VisionDebugConsole = import.meta.env.DEV
-  ? lazy(() => import('./pages/VisionDebugConsole'))
-  : null
-const DevE2E = import.meta.env.DEV
-  ? lazy(() => import('./pages/DevE2E'))
-  : null
+// DevE2E ("Main Vision Debug") ships in production but is admin-gated (A5).
+// Lazy-loaded for bundle size; the backend dev routes are super-admin gated (A4).
+const DevE2E = lazy(() => import('./pages/DevE2E'))
 import { AuthProvider } from './store'
 import PrivateRoute from './components/PrivateRoute'
 import StoreLayout from './components/StoreLayout'
@@ -59,21 +55,16 @@ export default function App() {
           <Route path="shifts" element={<Shifts />} />
           <Route path="members" element={<Members />} />
           <Route path="audit" element={<Audit />} />
-          <Route path="settings" element={<Settings />} />
-          {/* Dev-only: Vision Debug Console. Remove this Route + VisionDebugConsole.jsx before shipping. */}
-          {import.meta.env.DEV && VisionDebugConsole && (
-            <Route
-              path="dev/vision"
-              element={<Suspense fallback={null}><VisionDebugConsole /></Suspense>}
-            />
-          )}
-          {/* Dev-only: end-to-end IEP1→IEP2→IEP3 split-screen tester. */}
-          {import.meta.env.DEV && DevE2E && (
-            <Route
-              path="dev/e2e"
-              element={<Suspense fallback={null}><DevE2E /></Suspense>}
-            />
-          )}
+          <Route path="settings" element={<PrivateRoute adminOnly><Settings /></PrivateRoute>} />
+          {/* End-to-end IEP1→IEP2→IEP3 tester. Ships in prod, super-admin only. */}
+          <Route
+            path="dev/e2e"
+            element={
+              <PrivateRoute adminOnly>
+                <Suspense fallback={null}><DevE2E /></Suspense>
+              </PrivateRoute>
+            }
+          />
         </Route>
 
         {/* Store invite acceptance */}

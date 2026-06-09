@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
+    # ── Admin bootstrap (A3, optional) ───────────────────────────────────────
+    # If BOTH are set and no super-admin exists yet, EEP seeds one on startup
+    # (idempotent — no-op once an admin exists). Treat the password like
+    # JWT_SECRET: never log it. Leave unset to provision admins via the CLI only.
+    ADMIN_BOOTSTRAP_EMAIL: str | None = None
+    ADMIN_BOOTSTRAP_PASSWORD: str | None = None
+
     # ── SMTP ─────────────────────────────────────────────────────────────────
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587

@@ -6,7 +6,7 @@ import React, { createContext, useContext, useReducer, useEffect } from 'react'
 import { getTokens, saveTokens, clearTokens } from './api'
 
 const initialState = {
-  user: null,          // { user_id, account_type }
+  user: null,          // { user_id, account_type, is_super_admin }
   tokens: null,        // { access_token, refresh_token }
   currentStore: null,  // { id, name, slug, status }
   currentMember: null, // { role, is_owner, permissions } — null for owners before fetch
@@ -44,7 +44,7 @@ export function AuthProvider({ children }) {
         const payload = JSON.parse(atob(tokens.access_token.split('.')[1]))
         dispatch({
           type: 'INIT',
-          payload: { tokens, user: { user_id: payload.sub, account_type: payload.account_type } },
+          payload: { tokens, user: { user_id: payload.sub, account_type: payload.account_type, is_super_admin: !!payload.is_super_admin } },
         })
       } catch {
         dispatch({ type: 'INIT', payload: {} })

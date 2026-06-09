@@ -1,5 +1,6 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
+from app.core.auth import require_super_admin
 from app.api.routers.auth import router as auth_router
 from app.api.routers.auth import store_auth_router
 from app.api.routers.stores import router as stores_router
@@ -28,9 +29,10 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(schedules_router, prefix="/api")
     app.include_router(punch_router, prefix="/api")
 
-    from app.core.config import settings
-    if settings.DEBUG_MODE:
-        from app.api.routers.debug import router as debug_router
-        app.include_router(debug_router)
-        from app.api.routers.dev_pipeline import router as dev_pipeline_router
-        app.include_router(dev_pipeline_router)
+    # Dev/debug routers: always mounted (incl. production), gated at the router level
+    # by super-admin — or any authed user when DEBUG_MODE is on (A4). Prefixes live on
+    # the routers themselves (/api/debug, /api/debug/dev), so they are unchanged.
+    from app.api.routers.debug import router as debug_router
+    from app.api.routers.dev_pipeline import router as dev_pipeline_router
+    app.include_router(debug_router, dependencies=[Depends(require_super_admin)])
+    app.include_router(dev_pipeline_router, dependencies=[Depends(require_super_admin)])

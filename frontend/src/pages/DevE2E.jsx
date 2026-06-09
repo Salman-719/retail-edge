@@ -1,6 +1,6 @@
 /*
- * DEV-ONLY end-to-end pipeline tester.
- * Route: /store/:slug/dev/e2e  (only mounted when import.meta.env.DEV)
+ * End-to-end pipeline tester ("Main Vision Debug").
+ * Route: /store/:slug/dev/e2e  (ships in production, super-admin gated — A4/A5)
  *
  * Up to 1/2/4/6 cameras in parallel through the real IEP1 → IEP2 → IEP3
  * pipeline. Only cameras in the active store config version are selectable.

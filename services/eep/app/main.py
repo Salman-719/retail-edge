@@ -68,6 +68,42 @@ def _run_migrations() -> None:
     command.upgrade(cfg, "head")
 
 
+async def _bootstrap_admin() -> None:
+    """Seed a super-admin from env on first boot (A3). Fail-safe and idempotent.
+
+    Runs only when BOTH ADMIN_BOOTSTRAP_EMAIL and ADMIN_BOOTSTRAP_PASSWORD are set
+    AND no super-admin exists yet. Any error is logged and swallowed — a bootstrap
+    failure must never crash startup (an admin can still be created via the CLI).
+    Never logs the password.
+    """
+    from sqlalchemy import select
+
+    from app.cli import create_or_promote_admin
+    from app.core.config import settings as _settings
+
+    email = _settings.ADMIN_BOOTSTRAP_EMAIL
+    password = _settings.ADMIN_BOOTSTRAP_PASSWORD
+    if not (email and password):
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            existing = await db.execute(
+                select(User).where(User.is_super_admin == True).limit(1)  # noqa: E712
+            )
+            if existing.scalar_one_or_none() is not None:
+                return  # an admin already exists — do nothing, do not reset password
+            user, action = await create_or_promote_admin(db, email=email, password=password)
+            await db.commit()
+            logger.info(
+                "Admin bootstrap: %s super-admin %s (user_id=%s)",
+                action, user.email, user.id,
+            )
+    except Exception:
+        logger.exception(
+            "Admin bootstrap failed; continuing startup (create an admin via the CLI)"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _app = app  # local alias — `import app.models` below rebinds the name `app` to the package
@@ -90,6 +126,9 @@ async def lifespan(app: FastAPI):
         import app.models  # noqa: F401 — ensures all mappers are registered
         from app.models.base import Base as ModelBase
         await conn.run_sync(ModelBase.metadata.create_all)
+
+    # Step 2.5: optional one-time super-admin bootstrap (fail-safe).
+    await _bootstrap_admin()
 
     # Step 3: rebuild _running_cameras from Redis before serving any traffic.
     from app.grpc_server.camera_status import rebuild_running_cameras_on_startup
