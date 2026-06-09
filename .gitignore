@@ -69,3 +69,5 @@ infra/aws/backend.tf
 
 # Large test videos (not needed for deploy)
 testing-data/**/*.mp4
+!testing-data/Test3/Cam1.mp4
+!testing-data/Test3/Cam2.mp4

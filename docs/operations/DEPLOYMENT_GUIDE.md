@@ -765,9 +765,10 @@ cp .env.example .env
 ./scripts/start.sh
 ```
 
-The default config publishes Test3 camera 1 and camera 2 as RTSP streams. Test3
-contains still frames, so these are static camera feeds. For moving video, switch
-the simulator to `streams.test1.csv` or add Test2 videos to `streams.csv`.
+The default config publishes `Test3/Cam1.mp4` and `Test3/Cam2.mp4`. Both
+publishers wait for one shared start boundary and loop indefinitely. If either
+publisher exits, the complete group restarts together so the camera timelines
+do not silently drift.
 
 The script prints URLs like:
 
