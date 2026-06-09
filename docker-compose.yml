@@ -111,6 +111,15 @@ services:
       - "--storage.path=/alertmanager"
     restart: unless-stopped
 
+  pushgateway:
+    image: prom/pushgateway:v1.7.0
+    # Receives metrics PUSHED by short-lived jobs that cannot be scraped directly
+    # (IEP5 end-of-shift analytics). Prometheus scrapes the gateway — see the
+    # "pushgateway" job in monitoring/prometheus.yml (honor_labels: true).
+    expose:
+      - "9091"
+    restart: unless-stopped
+
   redis_exporter:
     image: oliver006/redis_exporter:v1.62.0
     environment:
@@ -433,6 +442,8 @@ services:
       PASSTHROUGH_DWELL_MS: ${PASSTHROUGH_DWELL_MS:-30000}
       DEAD_PERIOD_THRESHOLD: ${DEAD_PERIOD_THRESHOLD:-3}
       DEAD_PERIOD_DURATION_MS: ${DEAD_PERIOD_DURATION_MS:-1800000}
+      # One-shot job pushes its metrics here at end (no scrape target exists).
+      IEP5_PUSHGATEWAY_URL: ${IEP5_PUSHGATEWAY_URL:-pushgateway:9091}
     restart: "no"
 
   iep6_agent:

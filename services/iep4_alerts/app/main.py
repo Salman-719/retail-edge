@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 
 from app.daemon import AlertDaemon
 from app.db import close_pool, create_pool, get_pool
+from app.metrics import start_metrics_server
 from app.persistence.postgres import AlertRepository
 from app.settings import get_settings
 
@@ -68,6 +70,12 @@ async def _main() -> None:
         settings.environment, settings.email_enabled,
         settings.database_url_server.split("@")[-1].split("/")[0],
     )
+
+    # Prometheus side HTTP server (same pattern as IEP1/IEP2). Scraped on :8004,
+    # job "iep4". Started before the loop so the target is UP from readiness.
+    metrics_port = int(os.environ.get("IEP4_METRICS_PORT", "8004"))
+    start_metrics_server(metrics_port)
+    logger.info("Prometheus metrics server started on :%d", metrics_port)
 
     pool = await create_pool(settings.database_url_server)
     await _verify_db(pool)

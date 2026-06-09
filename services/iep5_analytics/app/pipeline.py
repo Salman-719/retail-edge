@@ -8,6 +8,7 @@ import logging
 from app.aggregators import employees, heatmap, rollups, sequences, visits, zones
 from app.context import RunContext, day_bounds_ms, rollup_params
 from app.db import get_pool
+from app.metrics import IEP5_GTH_ROWS
 from app.persistence.postgres import AnalyticsRepository
 from app.settings import Iep5Settings
 
@@ -43,6 +44,7 @@ class AnalyticsPipeline:
             return 1
 
         gth_count = await self._repo.count_gth_in_window(day_start_ms, day_end_ms)
+        IEP5_GTH_ROWS.set(gth_count)
         if gth_count == 0:
             logger.warning("IEP5: no global_tracking_history for store=%s date=%s — "
                            "empty shift (valid), writing zero summaries", s.store_id, s.shift_date)

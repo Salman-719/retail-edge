@@ -33,9 +33,13 @@ scrape_configs:
     static_configs:
       - targets: ["iep4-alerts.retailvision.svc.cluster.local:8004"]
 
-  - job_name: iep5
+  # IEP5 is a one-shot k8s Job (exits in seconds) — it PUSHES metrics to the
+  # Pushgateway at job end instead of being scraped. Scrape the gateway with
+  # honor_labels so the pushed job="iep5" + store_id/shift_date labels survive.
+  - job_name: pushgateway
+    honor_labels: true
     static_configs:
-      - targets: ["iep5-analytics.retailvision.svc.cluster.local:8005"]
+      - targets: ["pushgateway.retailvision.svc.cluster.local:9091"]
 
   - job_name: iep6
     static_configs:

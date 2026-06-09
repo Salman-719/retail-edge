@@ -37,6 +37,8 @@ class Iep4Settings(BaseSettings):
     smtp_user:     str = Field(default="")
     smtp_password: str = Field(default="")
     smtp_from:     str = Field(default="")
+    # Bounded SMTP send so a slow/wedged mail server cannot stall the cycle.
+    smtp_timeout_s: float = Field(default=10.0, gt=0)
 
     # development | production. In development, email delivery is skipped.
     environment: str = Field(default="production")

@@ -34,6 +34,7 @@ class EmailDelivery:
         msg["Subject"] = subject
         msg.set_content(body)
 
+        # Bounded send so a wedged SMTP server cannot stall the evaluation cycle.
         await aiosmtplib.send(
             msg,
             hostname=self._s.smtp_host,
@@ -41,5 +42,6 @@ class EmailDelivery:
             username=self._s.smtp_user or None,
             password=self._s.smtp_password or None,
             start_tls=self._s.smtp_port == 587,
+            timeout=self._s.smtp_timeout_s,
         )
         logger.info("Alert email sent to %d recipient(s): %s", len(recipients), subject)

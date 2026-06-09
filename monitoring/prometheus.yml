@@ -35,9 +35,13 @@ scrape_configs:
     static_configs:
       - targets: ["iep4_alerts:8004"]
 
-  - job_name: iep5
+  # IEP5 is a one-shot Job (exits in seconds) — it cannot be scraped directly.
+  # It PUSHES metrics to the Pushgateway at job end; we scrape the gateway with
+  # honor_labels so the pushed job="iep5" + store_id/shift_date labels survive.
+  - job_name: pushgateway
+    honor_labels: true
     static_configs:
-      - targets: ["iep5_analytics:8005"]
+      - targets: ["pushgateway:9091"]
 
   - job_name: iep6
     static_configs:
