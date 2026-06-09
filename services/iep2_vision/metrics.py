@@ -95,6 +95,16 @@ IEP2_IDENTITY_SWITCHES = Counter(
     ["camera_id"],
 )
 
+# Inference requests (YOLO detect / ReID extract) that exceeded their per-request
+# deadline and fell back to an empty result. A sustained non-zero rate means the
+# shared yolo/reid service is wedged or overloaded — the pipeline degrades to
+# empty-but-advancing frames instead of hanging the camera forever.
+IEP2_INFERENCE_TIMEOUTS = Counter(
+    "iep2_inference_timeouts_total",
+    "Inference requests that exceeded their deadline and returned a fallback",
+    ["camera_id", "service"],  # service = "yolo" | "reid"
+)
+
 
 def start_metrics_server(port: int = 9201) -> None:
     """Start the /metrics HTTP server on its own background thread.

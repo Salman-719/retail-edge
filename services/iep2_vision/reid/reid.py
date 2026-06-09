@@ -23,6 +23,17 @@ log = logging.getLogger("iep2.reid")
 EMBEDDING_DIM = 2048
 REID_INPUT_SOCK = os.environ.get("REID_INPUT_SOCK", "ipc:///tmp/sockets/reid_input.sock")
 
+# ── Inference deadline ────────────────────────────────────────────────────────
+# A stalled reid-service must never hang IEP2. extract() awaits its embedding with
+# a deadline; on expiry it returns None (no embedding) — already the handled
+# fallback at every caller in the identity manager (`if emb is not None`).
+REID_REQUEST_TIMEOUT_S = float(os.environ.get("REID_REQUEST_TIMEOUT_S", "3.0"))
+
+try:
+    from ..metrics import IEP2_INFERENCE_TIMEOUTS
+except ImportError:  # pragma: no cover — bare-cwd import inside the container
+    from metrics import IEP2_INFERENCE_TIMEOUTS
+
 
 def _result_sock_addr(camera_id: str) -> str:
     """Per-camera result socket — IEP2 binds, reid-service connects."""
@@ -48,6 +59,7 @@ class ReidClient:
 
         self._pending: dict[str, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
+        self._timeouts = 0  # cumulative inference-deadline fallbacks (batch stats)
 
     async def start(self) -> None:
         self._reader_task = asyncio.create_task(self._reader_loop())
@@ -122,4 +134,15 @@ class ReidClient:
             use_bin_type=True,
         )
         await self._push.send(payload)
-        return await fut
+        try:
+            return await asyncio.wait_for(fut, timeout=REID_REQUEST_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            self._timeouts += 1
+            IEP2_INFERENCE_TIMEOUTS.labels(camera_id=self._camera_id, service="reid").inc()
+            log.warning(
+                "ReID inference timeout camera=%s track=%d req=%s after %.1fs — None fallback",
+                self._camera_id, track_id, req_id, REID_REQUEST_TIMEOUT_S,
+            )
+            return None
+        finally:
+            self._pending.pop(req_id, None)

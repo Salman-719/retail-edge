@@ -21,6 +21,19 @@ log = logging.getLogger("iep2.detector")
 # ── Socket addresses ──────────────────────────────────────────────────────────
 YOLO_INPUT_SOCK = os.environ.get("YOLO_INPUT_SOCK", "ipc:///tmp/sockets/yolo_input.sock")
 
+# ── Inference deadline ────────────────────────────────────────────────────────
+# A stalled yolo-service must never hang IEP2 forever. Each detect() awaits its
+# result with a deadline; the batch path (detect_batch) scales the budget by the
+# number of frames so a large batch queued behind other cameras does not
+# false-timeout its tail. On deadline the frame falls back to [] (no detections).
+YOLO_REQUEST_TIMEOUT_S = float(os.environ.get("YOLO_REQUEST_TIMEOUT_S", "5.0"))
+YOLO_BATCH_PER_FRAME_S = float(os.environ.get("YOLO_BATCH_PER_FRAME_S", "0.1"))
+
+try:
+    from ..metrics import IEP2_INFERENCE_TIMEOUTS
+except ImportError:  # pragma: no cover — bare-cwd import inside the container
+    from metrics import IEP2_INFERENCE_TIMEOUTS
+
 
 def _result_sock_addr(camera_id: str) -> str:
     """Per-camera result socket — IEP2 binds, yolo-service connects."""
@@ -51,6 +64,7 @@ class YoloClient:
         # In-flight requests: request_id → Future[detections]
         self._pending: dict[str, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
+        self._timeouts = 0  # cumulative inference-deadline fallbacks (batch stats)
 
     async def start(self) -> None:
         """Start the background reader loop. Must be called inside a running event loop."""
@@ -120,7 +134,18 @@ class YoloClient:
             use_bin_type=True,
         )
         await self._push.send(payload)
-        return await fut
+        try:
+            return await asyncio.wait_for(fut, timeout=YOLO_REQUEST_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            self._timeouts += 1
+            IEP2_INFERENCE_TIMEOUTS.labels(camera_id=self._camera_id, service="yolo").inc()
+            log.warning(
+                "YOLO inference timeout camera=%s req=%s after %.1fs — empty fallback",
+                self._camera_id, req_id, YOLO_REQUEST_TIMEOUT_S,
+            )
+            return []
+        finally:
+            self._pending.pop(req_id, None)
 
     async def detect_batch(
         self,
@@ -129,12 +154,15 @@ class YoloClient:
     ) -> list[list[dict]]:
         """Send a batch of frames concurrently and await all results.
 
-        Dispatches all frames to yolo-service in one asyncio step, then waits
-        for all responses via asyncio.gather. Order of results matches input order.
-        Frames that fail JPEG encoding are returned as empty detection lists.
+        Dispatches all frames to yolo-service in one asyncio step, then awaits
+        each result under one batch-wide deadline. Order of results matches input
+        order. Frames that fail JPEG encoding, or whose result misses the
+        deadline, are returned as empty detection lists — one slow/lost frame
+        never sinks the rest, and a wedged service never hangs the batch forever.
         """
         loop = asyncio.get_running_loop()
         futs: list[asyncio.Future] = []
+        req_ids: list[str | None] = []  # None marks a pre-resolved (encode-failed) slot
         for frame, ts in zip(frames, timestamps_ms):
             req_id = str(uuid.uuid4())
             fut = loop.create_future()
@@ -144,8 +172,10 @@ class YoloClient:
             if not ok:
                 log.warning("JPEG encode failed for camera %s ts=%d — skipping", self._camera_id, ts)
                 del self._pending[req_id]
-                futs.append(loop.create_future())
-                futs[-1].set_result([])
+                placeholder = loop.create_future()
+                placeholder.set_result([])
+                futs.append(placeholder)
+                req_ids.append(None)
                 continue
 
             payload = msgpack.packb(
@@ -159,5 +189,25 @@ class YoloClient:
             )
             await self._push.send(payload)
             futs.append(fut)
+            req_ids.append(req_id)
 
-        return list(await asyncio.gather(*futs))
+        # One wall-clock budget for the whole batch, scaled by frame count so a
+        # large batch queued behind other cameras does not false-timeout its tail.
+        deadline = loop.time() + YOLO_REQUEST_TIMEOUT_S + YOLO_BATCH_PER_FRAME_S * len(frames)
+        results: list[list[dict]] = []
+        for fut, req_id in zip(futs, req_ids):
+            try:
+                remaining = max(0.0, deadline - loop.time())
+                results.append(await asyncio.wait_for(fut, timeout=remaining))
+            except asyncio.TimeoutError:
+                self._timeouts += 1
+                IEP2_INFERENCE_TIMEOUTS.labels(camera_id=self._camera_id, service="yolo").inc()
+                log.warning(
+                    "YOLO batch timeout camera=%s req=%s — empty fallback for frame",
+                    self._camera_id, req_id,
+                )
+                results.append([])
+            finally:
+                if req_id is not None:
+                    self._pending.pop(req_id, None)
+        return results
