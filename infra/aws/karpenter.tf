@@ -21,12 +21,16 @@ module "karpenter" {
 }
 
 resource "helm_release" "karpenter" {
-  namespace  = "kube-system"
-  name       = "karpenter"
-  repository = "oci://public.ecr.aws/karpenter"
-  chart      = "karpenter"
-  version    = var.karpenter_version
-  wait       = true
+  namespace       = "kube-system"
+  name            = "karpenter"
+  repository      = "oci://public.ecr.aws/karpenter"
+  chart           = "karpenter"
+  version         = var.karpenter_version
+  wait            = true
+  wait_for_jobs   = true
+  atomic          = true
+  cleanup_on_fail = true
+  timeout         = 900
 
   values = [yamlencode({
     settings = {
@@ -44,7 +48,7 @@ resource "helm_release" "karpenter" {
     }
   })]
 
-  depends_on = [module.eks]
+  depends_on = [null_resource.aws_lb_webhook_ready]
 }
 
 # EC2NodeClass — how Karpenter builds nodes (AL2023 arm64, discovered subnets/SG,

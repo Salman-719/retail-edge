@@ -121,11 +121,13 @@ iep6:
   enabled: true
   image:
     tag: "1.3.0"
+  replicas: 1
   openaiModel: "gpt-4o-mini"
   enableRawSql: false      # guarded ad-hoc SELECT tool (off by default)
   enableEepActions: false  # state-changing actions via EEP (off = read-only)
-  # The report/alert cron runs as a SINGLETON deployment (iep6-scheduler, replicas:1).
-  # Never scale it — multiple schedulers duplicate scheduled insights/alerts + OpenAI cost.
+  # The same image runs as two deployments:
+  # - iep6-agent: request API, KEDA-scaled, scheduler disabled.
+  # - iep6-scheduler: singleton scheduled jobs, scheduler enabled.
   scheduler:
     enabled: true
   resources:
@@ -135,23 +137,19 @@ iep6:
     limits:
       cpu: "500m"
       memory: "512Mi"
-  # CPU HPA is superseded by KEDA for the agent API (IO-bound → CPU is a poor signal).
+  keda:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    pollingInterval: 15
+    cooldownPeriod: 120
+    inflightThreshold: "10"
+    prometheusServerAddress: "http://prometheus.retailvision.svc:9090"
   hpa:
     enabled: false
     minReplicas: 1
     maxReplicas: 1
     targetCPUUtilizationPercentage: 70
-  # Request-driven autoscaling of the iep6-agent API via KEDA (requires the KEDA
-  # operator — installed in infra/aws/addons.tf). Scales on in-flight HTTP requests.
-  keda:
-    enabled: true
-    minReplicas: 1
-    maxReplicas: 4
-    inflightThreshold: "10"   # target concurrent in-flight requests per replica
-    pollingInterval: 15
-    cooldownPeriod: 120
-    # In-cluster Prometheus (chart Service `prometheus` in the retailvision namespace).
-    prometheusServerAddress: "http://prometheus.retailvision.svc:9090"
 
 # In-cluster PostgreSQL (cheapest option). For managed RDS instead, set
 # postgres.enabled=false and point pgbouncer POSTGRESQL_HOST at the RDS endpoint.

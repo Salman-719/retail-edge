@@ -1,15 +1,9 @@
 {{- if and .Values.iep6.enabled .Values.iep6.keda.enabled }}
 # KEDA ScaledObject — request-driven autoscaling for the IEP6 agent API.
 #
-# The agent is OpenAI/IO-bound: it spends most of its time blocked on the LLM, so
-# CPU is a poor scale signal. Instead we scale on CONCURRENT in-flight HTTP requests
-# (http_requests_inprogress, exposed by the instrumentator in iep6 main.py),
-# summed across agent pods. KEDA targets ~`inflightThreshold` in-flight requests
-# per replica: desiredReplicas = ceil(sum(inflight) / inflightThreshold), clamped
-# to [minReplicas, maxReplicas].
-#
-# KEDA creates and manages its own HPA for the iep6-agent Deployment — do NOT also
-# enable the chart's CPU HPA for iep6 (values: iep6.hpa.enabled=false).
+# The agent is OpenAI/IO-bound, so concurrent in-flight requests are a better
+# scale signal than CPU. Prometheus discovers iep6-agent pods from annotations in
+# iep6-deployment.yaml and relabels the pod app label into the `job` label.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -29,8 +23,6 @@ spec:
       metadata:
         serverAddress: {{ .Values.iep6.keda.prometheusServerAddress | quote }}
         metricName: iep6_http_requests_inprogress
-        # NOTE: verify the `app` label is surfaced by the kubernetes-pods scrape
-        # relabeling after deploy (see runbook); adjust the selector if needed.
-        query: sum(http_requests_inprogress{app="iep6-agent"})
+        query: sum(http_requests_inprogress{job="iep6-agent"})
         threshold: {{ .Values.iep6.keda.inflightThreshold | quote }}
 {{- end }}

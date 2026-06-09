@@ -40,15 +40,16 @@ frontend:
     maxReplicas: 6
 
 iep6:
-  # Scheduler is a singleton deployment (iep6-scheduler); the agent API is KEDA-scaled.
+  # Scheduler is a singleton deployment (iep6-scheduler); the request API is
+  # KEDA-scaled from Prometheus in-flight request metrics.
   scheduler:
     enabled: true
   hpa:
-    enabled: false   # CPU HPA off — KEDA drives the agent API
+    enabled: false
   keda:
     enabled: true
     minReplicas: 1
-    maxReplicas: 8          # higher ceiling in production
+    maxReplicas: 8
     inflightThreshold: "10"
     prometheusServerAddress: "http://prometheus.retailvision.svc:9090"
 

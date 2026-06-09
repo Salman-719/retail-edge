@@ -1,16 +1,3 @@
-{{- if .Values.iep6.enabled }}
-# IEP6 — AI analytics agent (OpenAI). Read-only DB access + calls EEP for actions.
-#
-# Split into two deployments off the SAME image (S2 scaling design):
-#   * iep6-agent     — request-driven API. ENABLE_SCHEDULER=false. KEDA-scaled on
-#                      in-flight requests (see keda-iep6-scaledobject.yaml). The
-#                      "iep6" Service routes to these pods (app=iep6-agent).
-#   * iep6-scheduler — SINGLETON (replicas:1). ENABLE_SCHEDULER=true. Runs the
-#                      report/alert cron. NEVER scale it — multiple replicas would
-#                      duplicate scheduled insights/alerts (and OpenAI spend).
-#
-# Shared container env is defined once below and included by both, so they can
-# never drift. Only ENABLE_SCHEDULER (and replica/label/annotation) differ.
 {{- define "retailvision.iep6.env" -}}
 - name: PG_PASSWORD
   valueFrom:
@@ -46,8 +33,13 @@
 - name: WINDOW_SECONDS
   value: {{ .Values.windowSeconds | quote }}
 {{- end -}}
----
-# ── iep6-agent — request-driven API (KEDA-scaled; scheduler OFF) ────────────────
+
+{{- if .Values.iep6.enabled }}
+# IEP6 — AI analytics agent (OpenAI). Read-only DB access + calls EEP for actions.
+#
+# It is split into two deployments from the same image:
+# - iep6-agent: request API, scheduler disabled, KEDA-scaled.
+# - iep6-scheduler: singleton scheduled jobs, scheduler enabled, never autoscaled.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,8 +48,7 @@ metadata:
   labels:
     app: iep6-agent
 spec:
-  # KEDA owns the replica count once active; this is just the initial floor.
-  replicas: {{ .Values.iep6.keda.minReplicas | default 1 }}
+  replicas: {{ .Values.iep6.keda.minReplicas | default .Values.iep6.replicas }}
   selector:
     matchLabels:
       app: iep6-agent
@@ -96,7 +87,6 @@ spec:
             periodSeconds: 10
 {{- if .Values.iep6.scheduler.enabled }}
 ---
-# ── iep6-scheduler — SINGLETON cron (scheduler ON; NEVER autoscaled) ────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -134,7 +124,6 @@ spec:
             periodSeconds: 15
 {{- end }}
 ---
-# Service routes only to the request-serving agent pods.
 apiVersion: v1
 kind: Service
 metadata:
