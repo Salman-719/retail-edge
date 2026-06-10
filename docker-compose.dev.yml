@@ -1,0 +1,189 @@
+# Local development overrides for x86 / Intel machines (no CUDA, no Jetson).
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d \
+#     postgres pgbouncer redis minio eep live_bridge
+#
+# R5 (M1-S2): DEBUG_MODE=true must live only in this file.
+# Never commit this to CI, staging, or production pipelines.
+
+services:
+
+  iep1-daemon:
+    environment:
+      # Reduce per-camera raw-frame buffer from 30→5 in dev to prevent OOM with
+      # multiple cameras (30 frames × N cams × ~1 MB/frame uncompressed BGR).
+      FRAME_QUEUE_SIZE: "5"
+
+  # Disable the static IEP3 service — EEP spawns per-run IEP3 containers
+  # dynamically via dev_orchestrator.start_iep3() when the dev screen starts.
+  iep3_reconciliation:
+    entrypoint: ["true"]
+    restart: "no"
+
+  eep:
+    environment:
+      DEBUG_MODE: "true"
+      # Give CPU inference services more time to become SERVING before EEP
+      # considers the ML stack unhealthy (ultralytics model load ~30-60 s on CPU).
+      ML_SERVICES_TIMEOUT_S: "300"
+      # Dev pipeline orchestrator (DEBUG_MODE): spawns per-camera IEP2 containers
+      # and embeds live frames so the dev screen shows real video without S3.
+      IEP2_IMAGE: "retail-edge-iep2_vision:latest"
+      LOCAL_REDIS_URL: "redis://redis:6379/0"
+      LIVE_EMBED_FRAME: "true"
+      IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
+      # iep3_manager Docker fallback (used by activate_version_now in dev/production-local).
+      IEP3_IMAGE: "retail-edge-iep3_reconciliation:latest"
+      # IEP4 alert daemon (dev pipeline spawn) + IEP5 analytics job (shift_closer launch).
+      IEP4_IMAGE: "retail-edge-iep4_alerts:latest"
+      IEP5_IMAGE: "retail-edge-iep5_analytics:latest"
+      SERVER_REDIS_URL: "redis://redis:6379/0"
+    volumes:
+      # Dev-only: EEP calls IEP1.AddCamera over this control socket. (docker.sock
+      # for spawning IEP2 containers is already mounted in the base compose.)
+      - iep1-sockets:/tmp/iep1-sockets
+
+  # ── MLflow tracking server (offline ML experiments — detection/tracking/reid) ──
+  # Backend store = a dedicated `mlflow` Postgres DB; artifacts = a `mlflow` MinIO
+  # bucket. Both reuse the existing postgres/minio. The eval clients live in mlops/.
+  # First run: create the DB + bucket (see mlops/README.md / docs/MLFLOW_GUIDE.md §7).
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    command: >
+      sh -c "pip install --no-cache-dir psycopg2-binary boto3 >/dev/null &&
+      mlflow server
+      --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/mlflow
+      --artifacts-destination s3://mlflow
+      --serve-artifacts"
+    ports:
+      - "5000:5000"
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-retailvision}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-retailvision_dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── MLflow eval RUNNER (offline experiments, Python 3.11) ──────────────────────
+  # The eval CLIENT, containerized for reproducibility (matches services' 3.11).
+  # Not a long-running service — run it on demand:
+  #   docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm mlops \
+  #     python mlops/eval/run_detection_eval.py --smoke
+  # Source + clips are bind-mounted, so host edits apply without rebuilding.
+  mlops:
+    build:
+      context: .
+      dockerfile: mlops/Dockerfile
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-retailvision}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-retailvision_dev}
+      CLIPS_DIR: /workspace/testing-data
+      PYTHONPATH: /workspace
+    volumes:
+      - ./mlops:/workspace/mlops          # live code (edit on host, no rebuild)
+      - ./services:/workspace/services:ro # eval may import real detector/tracker/reid
+      - ./testing-data:/workspace/testing-data:ro
+      - ./.git:/workspace/.git:ro         # so log_run() can read git_commit
+      - mlops-model-cache:/workspace/.ultralytics   # persist downloaded weights
+    depends_on:
+      - mlflow
+    profiles:
+      - mlops
+    restart: "no"
+
+  # ── CPU dev replacements for Jetson-only inference services ─────────────────
+  # Both services implement the identical ZMQ wire protocol as their TRT
+  # counterparts. No changes to IEP2, IEP1, EEP, or IEP3 are required.
+
+  yolo-service:
+    build:
+      # Context is repo root so Dockerfile.dev can bake the YOLO11n weights.
+      context: .
+      dockerfile: services/yolo_service/Dockerfile.dev
+    environment:
+      # Dev detector: YOLO11n at confidence 0.5.
+      DETECTOR_MODEL: "yolo11n.pt"
+      YOLO_CONF: "0.5"
+      # Smaller batches and longer timeout suit single-thread CPU inference.
+      YOLO_MAX_BATCH_SIZE: "2"
+      YOLO_BATCH_TIMEOUT_MS: "500"
+      # Device selection: reads the dev-screen CPU/GPU toggle from this Redis,
+      # publishes machine GPU capability. Default CPU until a GPU is requested.
+      SERVER_REDIS_URL: "redis://redis:6379/0"
+      INFERENCE_DEVICE: "cpu"
+
+  reid-service:
+    build:
+      context: ./services/reid_service
+      dockerfile: Dockerfile.dev
+    environment:
+      REID_MAX_BATCH_SIZE: "8"
+      REID_BATCH_TIMEOUT_MS: "200"
+      SERVER_REDIS_URL: "redis://redis:6379/0"
+      INFERENCE_DEVICE: "cpu"
+
+  # ── RTSP stream simulator (dev only) ─────────────────────────────────────────
+  # mediamtx acts as an RTSP server; FFmpeg publishers push test videos to it
+  # at the encoded FPS (e.g. 25 fps from a real recording), throttling delivery
+  # to a realistic rate. IEP1 connects as an RTSP client — no frame flood.
+  #
+  # Usage:
+  #   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  #     --profile rtsp up -d rtsp-server rtsp-cam1 rtsp-cam2
+  #
+  # Then register cameras in EEP with:
+  #   Camera 1 stream URL: rtsp://rtsp-server:8554/cam1
+  #   Camera 2 stream URL: rtsp://rtsp-server:8554/cam2
+
+  rtsp-server:
+    image: bluenviron/mediamtx:latest
+    ports:
+      - "8554:8554"
+    # No network alias needed — other containers reach it as 'rtsp-server' via the default network
+    profiles:
+      - dev
+
+  rtsp-cam1:
+    image: jrottenberg/ffmpeg:4.4-alpine
+    # -re: read at native framerate  -stream_loop -1: loop indefinitely
+    command: [
+      "-re", "-stream_loop", "-1",
+      "-i", "/data/Test1/Camera1.mp4",
+      "-c", "copy", "-f", "rtsp",
+      "rtsp://rtsp-server:8554/cam1"
+    ]
+    volumes:
+      - ./testing-data:/data:ro
+    depends_on:
+      - rtsp-server
+    profiles:
+      - dev
+    restart: on-failure
+
+  rtsp-cam2:
+    image: jrottenberg/ffmpeg:4.4-alpine
+    command: [
+      "-re", "-stream_loop", "-1",
+      "-i", "/data/Test1/Camera2.mp4",
+      "-c", "copy", "-f", "rtsp",
+      "rtsp://rtsp-server:8554/cam2"
+    ]
+    volumes:
+      - ./testing-data:/data:ro
+    depends_on:
+      - rtsp-server
+    profiles:
+      - dev
+    restart: on-failure
+
+volumes:
+  # Persists ultralytics model weights downloaded by the mlops eval runner so
+  # they aren't re-fetched on every `docker compose run --rm mlops ...`.
+  mlops-model-cache:

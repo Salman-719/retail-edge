@@ -1,0 +1,64 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Profile: CPU (laptop/Mac, no NVIDIA GPU). yolo/reid use the CPU torch images
+# (-cpu, built in CI from Dockerfile.dev). The nvidia.com/gpu request is REMOVED
+# so the pods schedule on a GPU-less node; INFERENCE_DEVICE=cpu.
+# Note: CPU inference is dev/low-throughput, not production realtime.
+# Change `salman-719` to your GHCR owner if you fork.
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/your-org/retailvision/iep1
+    newName: ghcr.io/salman-719/retailvision/iep1
+    newTag: "1.3.0"
+  - name: ghcr.io/your-org/retailvision/yolo
+    newName: ghcr.io/salman-719/retailvision/yolo
+    newTag: "1.3.0-cpu"
+  - name: ghcr.io/your-org/retailvision/reid
+    newName: ghcr.io/salman-719/retailvision/reid
+    newTag: "1.3.0-cpu"
+
+patches:
+  # 1) Drop the GPU resource request (JSON6902 — strategic merge can't delete a map key).
+  - target: { kind: Deployment, name: yolo-service }
+    patch: |
+      - op: remove
+        path: /spec/template/spec/containers/0/resources/limits/nvidia.com~1gpu
+  - target: { kind: Deployment, name: reid-service }
+    patch: |
+      - op: remove
+        path: /spec/template/spec/containers/0/resources/limits/nvidia.com~1gpu
+  # 2) CPU device + smaller batches (strategic merge → replaces existing env by name,
+  #    matches docker-compose.dev.yml).
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: yolo-service
+        namespace: retailvision
+      spec:
+        template:
+          spec:
+            containers:
+              - name: yolo-service
+                env:
+                  - { name: INFERENCE_DEVICE, value: "cpu" }
+                  - { name: YOLO_MAX_BATCH_SIZE, value: "2" }
+                  - { name: YOLO_BATCH_TIMEOUT_MS, value: "500" }
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: reid-service
+        namespace: retailvision
+      spec:
+        template:
+          spec:
+            containers:
+              - name: reid-service
+                env:
+                  - { name: INFERENCE_DEVICE, value: "cpu" }
+                  - { name: REID_MAX_BATCH_SIZE, value: "8" }
+                  - { name: REID_BATCH_TIMEOUT_MS, value: "200" }

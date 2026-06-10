@@ -1,0 +1,88 @@
+name: Build & Push Images
+
+# Builds all service images and pushes them to GitHub Container Registry.
+#   ghcr.io/<owner>/retailvision/<service>:<tag>
+# Cloud services (eep, iep3, frontend, ...) are multi-arch (amd64 + arm64) so they
+# run on Graviton or x86. Edge GPU services (yolo, reid) are arm64-only for Jetson.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to push (e.g. 1.0.0)"
+        required: true
+        default: "latest"
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: eep,         context: services/eep,                platforms: "linux/amd64,linux/arm64" }
+          - { name: iep1,        context: services/iep1_ingestion,     platforms: "linux/amd64,linux/arm64" }
+          - { name: iep2,        context: services/iep2_vision,        platforms: "linux/amd64,linux/arm64" }
+          - { name: iep3,        context: services/iep3_reconciliation, platforms: "linux/amd64,linux/arm64" }
+          - { name: iep4,        context: services/iep4_alerts,        platforms: "linux/amd64,linux/arm64" }
+          - { name: iep5,        context: services/iep5_analytics,     platforms: "linux/amd64,linux/arm64" }
+          - { name: iep6,        context: services/iep6_agent,         platforms: "linux/amd64,linux/arm64" }
+          - { name: live-bridge, context: services/live_bridge,        platforms: "linux/amd64,linux/arm64" }
+          - { name: edge-agent,  context: services/edge_agent,         platforms: "linux/amd64,linux/arm64" }
+          - { name: frontend,    context: frontend,                    platforms: "linux/amd64,linux/arm64" }
+          # MLflow tracking server (lean, multi-arch) — runs on the Graviton/arm64
+          # cloud node. The heavy eval-runner (mlops/Dockerfile) is built locally
+          # for GPU dev boxes, not pushed here.
+          - { name: mlflow,      context: ".",   file: mlops/Dockerfile.server, platforms: "linux/amd64,linux/arm64" }
+          # CPU + CUDA variants of the GPU services, built from Dockerfile.dev
+          # (plain python base → buildable in CI). Pushed with a -cpu/-cuda tag
+          # suffix and selected by the edge overlays (cpu/cuda profiles).
+          # The Jetson yolo/reid (:<tag>, L4T TensorRT) are built ON the device —
+          # see docs/operations/DEPLOYMENT_GUIDE.md (Part C4).
+          - { key: yolo-cpu,  name: yolo, context: ".",                    file: services/yolo_service/Dockerfile.dev, tag_suffix: "-cpu",  platforms: "linux/amd64,linux/arm64" }
+          - { key: reid-cpu,  name: reid, context: services/reid_service,  file: services/reid_service/Dockerfile.dev, tag_suffix: "-cpu",  platforms: "linux/amd64,linux/arm64" }
+          - { key: yolo-cuda, name: yolo, context: ".",                    file: services/yolo_service/Dockerfile.dev, tag_suffix: "-cuda", platforms: "linux/amd64", build_args: "TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121" }
+          - { key: reid-cuda, name: reid, context: services/reid_service,  file: services/reid_service/Dockerfile.dev, tag_suffix: "-cuda", platforms: "linux/amd64", build_args: "TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push ${{ matrix.key || matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file || format('{0}/Dockerfile', matrix.context) }}
+          build-args: ${{ matrix.build_args }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/retailvision/${{ matrix.name }}:${{ steps.meta.outputs.tag }}${{ matrix.tag_suffix }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/retailvision/${{ matrix.name }}:latest${{ matrix.tag_suffix }}
+          cache-from: type=gha,scope=${{ matrix.key || matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.key || matrix.name }},mode=max

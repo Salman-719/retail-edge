@@ -8,9 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
 from app.core.database import get_db
+from app.core.ratelimit import MAX_LIST_ROWS
 from app.middleware.store_auth import StoreContext, get_store_context, require_owner_or_manager
 from app.models.employee import Employee
-from app.models.section import Section
 from app.models.shift_pattern import ShiftPattern
 from app.models.shift_instance import BreakRecord, ShiftAssignment, ShiftInstance
 from app.schemas.shifts import (
@@ -42,16 +42,6 @@ async def _get_employee_or_404(employee_id: uuid.UUID, store_id: uuid.UUID, db: 
     if not emp:
         raise HTTPException(status_code=404, detail={"error": "Employee not found in this store", "code": "EMPLOYEE_NOT_FOUND"})
     return emp
-
-
-async def _get_section_or_404(section_id: uuid.UUID, store_id: uuid.UUID, db: AsyncSession) -> Section:
-    result = await db.execute(
-        select(Section).where(Section.id == section_id, Section.store_id == store_id)
-    )
-    s = result.scalar_one_or_none()
-    if not s:
-        raise HTTPException(status_code=404, detail={"error": "Section not found in this store", "code": "SECTION_NOT_FOUND"})
-    return s
 
 
 async def _get_pattern_or_404(pattern_id: uuid.UUID, store_id: uuid.UUID, db: AsyncSession) -> ShiftPattern:
@@ -137,11 +127,30 @@ async def create_shift_pattern(
 ):
     require_owner_or_manager(ctx)
     await _get_employee_or_404(body.employee_id, ctx.store_id, db)
-    await _get_section_or_404(body.section_id, ctx.store_id, db)
+
+    # Check for overlapping active pattern on the same employee + day
+    existing_result = await db.execute(
+        select(ShiftPattern).where(
+            ShiftPattern.employee_id == body.employee_id,
+            ShiftPattern.day_of_week == body.day_of_week,
+            ShiftPattern.is_active == True,
+        )
+    )
+    for existing in existing_result.scalars().all():
+        if body.start_time < existing.end_time and body.end_time > existing.start_time:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Time overlaps with an existing shift pattern",
+                    "code": "SHIFT_CONFLICT",
+                    "conflicting_id": str(existing.id),
+                    "conflicting_start": str(existing.start_time),
+                    "conflicting_end": str(existing.end_time),
+                },
+            )
 
     pattern = ShiftPattern(
         employee_id=body.employee_id,
-        section_id=body.section_id,
         day_of_week=body.day_of_week,
         start_time=body.start_time,
         end_time=body.end_time,
@@ -245,7 +254,7 @@ async def list_shifts(
         query = query.where(ShiftInstance.scheduled_start < end_dt)
     if employee_id:
         query = query.where(ShiftInstance.employee_id == employee_id)
-    query = query.order_by(ShiftInstance.scheduled_start)
+    query = query.order_by(ShiftInstance.scheduled_start).limit(MAX_LIST_ROWS)
     result = await db.execute(query)
     return result.scalars().all()
 
@@ -258,14 +267,12 @@ async def create_shift(
 ):
     require_owner_or_manager(ctx)
     await _get_employee_or_404(body.employee_id, ctx.store_id, db)
-    await _get_section_or_404(body.section_id, ctx.store_id, db)
 
     if body.shift_pattern_id is not None:
         await _get_pattern_or_404(body.shift_pattern_id, ctx.store_id, db)
 
     shift = ShiftInstance(
         employee_id=body.employee_id,
-        section_id=body.section_id,
         shift_pattern_id=body.shift_pattern_id,
         scheduled_start=body.scheduled_start,
         scheduled_end=body.scheduled_end,
@@ -623,7 +630,6 @@ async def generate_shifts_from_patterns(
 
             shift = ShiftInstance(
                 employee_id=pattern.employee_id,
-                section_id=pattern.section_id,
                 shift_pattern_id=pattern.id,
                 scheduled_start=scheduled_start,
                 scheduled_end=scheduled_end,

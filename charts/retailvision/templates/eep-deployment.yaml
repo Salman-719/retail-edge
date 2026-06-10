@@ -1,0 +1,181 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eep
+  namespace: retailvision
+  labels:
+    app: eep
+spec:
+  replicas: {{ .Values.eep.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: eep
+  template:
+    metadata:
+      labels:
+        app: eep
+    spec:
+      serviceAccountName: eep
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: eep
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: eep
+          image: "{{ .Values.global.imageRegistry }}/eep:{{ .Values.eep.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.eep.httpPort }}
+              name: http
+            - containerPort: {{ .Values.eep.grpcPort }}
+              name: grpc
+          env:
+            - name: WINDOW_SECONDS
+              value: {{ .Values.windowSeconds | quote }}
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: postgres-password
+            # Through pgbouncer (transaction pooling). $(PG_PASSWORD) is expanded
+            # by kubelet from the env var defined above.
+            - name: DATABASE_URL_EEP
+              value: "postgresql+asyncpg://{{ .Values.postgres.user }}:$(PG_PASSWORD)@{{ .Values.database.host }}:5432/{{ .Values.postgres.database }}"
+            # Alembic (startup migrations) needs psycopg2 + a DIRECT postgres
+            # connection (CREATE INDEX CONCURRENTLY can't run via pgbouncer txn
+            # pooling). Without this, alembic falls back to alembic.ini's dev
+            # password and fails auth.
+            - name: ALEMBIC_DATABASE_URL
+              value: "postgresql+psycopg2://{{ .Values.postgres.user }}:$(PG_PASSWORD)@postgres:5432/{{ .Values.postgres.database }}"
+            # EEP reads REDIS_URL (not SERVER_REDIS_URL) — see config.py
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: redis-url
+            # ── S3 / object storage ──
+            # boto3 rejects an empty endpoint_url, so when s3.endpointUrl is blank
+            # (real AWS) derive the regional endpoint. Set s3.endpointUrl for MinIO.
+            - name: S3_ENDPOINT_URL
+              value: {{ .Values.s3.endpointUrl | default (printf "https://s3.%s.amazonaws.com" .Values.s3.region) | quote }}
+            - name: S3_PUBLIC_URL
+              value: {{ .Values.s3.publicUrl | quote }}
+            - name: S3_BUCKET
+              value: {{ .Values.s3.bucket | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: s3-secret-key
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: jwt-secret
+            - name: AGENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: agent-secret
+            - name: GRPC_PORT
+              value: {{ .Values.eep.grpcPort | quote }}
+            - name: GRPC_SERVER_CERT_PATH
+              value: "/certs/tls.crt"
+            - name: GRPC_SERVER_KEY_PATH
+              value: "/certs/tls.key"
+            - name: DEBUG_MODE
+              value: "false"
+            - name: CANARY_PERCENTAGE
+              value: {{ .Values.eep.canaryPercentage | quote }}
+            - name: LIVE_STALE_MS
+              value: {{ .Values.eep.liveStaleMs | quote }}
+            - name: HEATMAP_CELL_SIZE_M
+              value: {{ .Values.eep.heatmapCellSizeM | quote }}
+            # ── Dynamic pipeline provisioning (iep3/iep4/iep5 managers) ──
+            # EEP provisions per-store workers via the k8s API; these tell the
+            # managers which namespace + images to use and how children connect.
+            - name: K8S_NAMESPACE
+              value: "retailvision"
+            # Plain (psycopg/asyncpg-agnostic) URL passed to IEP3/IEP4/IEP5 children.
+            - name: DATABASE_URL_SERVER
+              value: "postgresql://{{ .Values.postgres.user }}:$(PG_PASSWORD)@{{ .Values.database.host }}:5432/{{ .Values.postgres.database }}"
+            - name: SERVER_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: redis-url
+            - name: IEP3_IMAGE
+              value: "{{ .Values.global.imageRegistry }}/iep3:{{ .Values.iep3.image.tag }}"
+            - name: VOTE_DISTANCE_THRESHOLD_M
+              value: {{ .Values.iep3.matcher.voteDistanceThresholdM | quote }}
+            - name: MIN_VOTE_RATE
+              value: {{ .Values.iep3.matcher.minVoteRate | quote }}
+            - name: MIN_VOTES
+              value: {{ .Values.iep3.matcher.minVotes | quote }}
+            - name: TEMPORAL_TOLERANCE_MS
+              value: {{ .Values.iep3.matcher.temporalToleranceMs | quote }}
+            - name: AMBIGUITY_MARGIN
+              value: {{ .Values.iep3.matcher.ambiguityMargin | quote }}
+            - name: REID_FALLBACK_THRESHOLD
+              value: {{ .Values.iep3.matcher.reidFallbackThreshold | quote }}
+            - name: MAX_EMBEDDINGS
+              value: {{ .Values.iep3.matcher.maxEmbeddings | quote }}
+            - name: IEP4_IMAGE
+              value: "{{ .Values.global.imageRegistry }}/iep4:{{ .Values.iep4.image.tag }}"
+            - name: IEP5_IMAGE
+              value: "{{ .Values.global.imageRegistry }}/iep5:{{ .Values.iep5.image.tag }}"
+            # ── SMTP (IEP4 alert emails + EEP notifications); blank = disabled ──
+            - name: SMTP_HOST
+              value: {{ .Values.eep.smtp.host | quote }}
+            - name: SMTP_PORT
+              value: {{ .Values.eep.smtp.port | quote }}
+            - name: SMTP_USER
+              value: {{ .Values.eep.smtp.user | quote }}
+            - name: SMTP_FROM
+              value: {{ .Values.eep.smtp.from | quote }}
+            {{- if .Values.eep.smtp.passwordSecretKey }}
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: retailvision-secrets
+                  key: {{ .Values.eep.smtp.passwordSecretKey }}
+            {{- end }}
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /certs
+              readOnly: true
+          resources: {{ toYaml .Values.eep.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.eep.httpPort }}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.eep.httpPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: eep-tls

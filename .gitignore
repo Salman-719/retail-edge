@@ -1,3 +1,7 @@
+# MLflow — local-file backend (we use the Postgres+MinIO backend instead, but
+# guard against accidental file-mode runs creating an mlruns/ dir)
+mlruns/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -54,3 +58,22 @@ htmlcov/
 
 #file
 docsme/
+
+# TLS private keys — never commit
+*.key
+certs/*.key
+# Terraform
+infra/aws/.terraform/
+infra/aws/.terraform.lock.hcl
+infra/aws/terraform.tfvars
+infra/aws/backend.tf
+*.tfplan
+*.tfstate
+*.tfstate.*
+
+# Large test videos (not needed for deploy)
+testing-data/**/*.mp4
+# Exceptions: looping source clips used by the camera-simulator (streams.csv)
+!testing-data/Test3/Cam1.mp4
+!testing-data/Test3/Cam2.mp4
+mlops/outputs/

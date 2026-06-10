@@ -1,0 +1,22 @@
+# MLflow tracking server + model registry image (multi-arch: amd64 + arm64).
+# Deliberately lean — only the server deps, NOT the eval/training stack (torch,
+# ultralytics, boxmot) that lives in mlops/Dockerfile. This is what the cloud
+# k3s node (Graviton/arm64) runs; see charts/retailvision/templates/mlflow.yaml.
+FROM python:3.11-slim
+
+# ca-certificates first (avoids intermittent PyPI SSL EOF on slow links).
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# mlflow pinned to match the client in mlops/requirements.txt. boto3 for S3
+# artifact storage; psycopg2-binary so a Postgres backend store is also possible
+# (the chart defaults to SQLite, but this keeps the option open).
+RUN pip install --no-cache-dir --timeout 300 --retries 20 \
+        mlflow==2.16.2 boto3>=1.34 psycopg2-binary>=2.9
+
+EXPOSE 5000
+
+# Args are supplied by the Deployment (backend-store-uri, artifacts-destination,
+# --serve-artifacts). Default to an ephemeral local server for smoke tests.
+ENTRYPOINT ["mlflow"]
+CMD ["server", "--host", "0.0.0.0", "--port", "5000"]

@@ -15,8 +15,8 @@ class Zone(Base):
     version_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("store_config_versions.id", ondelete="CASCADE"), nullable=False
     )
-    section_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("sections.id", ondelete="CASCADE"), nullable=False
+    store_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[str] = mapped_column(String(30), nullable=False)

@@ -1,0 +1,158 @@
+groups:
+  - name: retailvision_pipeline
+    rules:
+      # Pipeline stalled: the detector is processing no frames. Uses a 1m window
+      # so the total detection lag is ~2m (1m rate + 1m for), down from ~4m.
+      - alert: NoFramesFlowing
+        expr: rate(detector_frames_total[1m]) == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No frames processed by the detector for 1m"
+          description: "rate(detector_frames_total[1m]) is 0 — the vision pipeline appears stalled or stopped."
+
+      # IEP1 frame stall: a specific camera stopped capturing frames entirely.
+      - alert: IEP1FrameStall
+        expr: rate(iep1_frames_captured_total[2m]) == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IEP1 camera {{ $labels.camera_id }} stalled"
+          description: "No frames captured by IEP1 for camera {{ $labels.camera_id }} in the last 2m — check RTSP stream or camera config."
+
+      # A pipeline stage is falling behind: a Redis stream is backing up.
+      - alert: RedisStreamBacklog
+        expr: redis_stream_length{stream=~"stream:iep.*"} > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis stream {{ $labels.stream }} backlog > 1000"
+          description: "Stream {{ $labels.stream }} has been over 1000 entries for 5m — a downstream consumer is falling behind."
+
+      # IEP3 reconciliation is slow: p95 batch reconcile time too high.
+      - alert: IEP3ReconcileSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(iep3_batch_reconcile_seconds_bucket[5m]))) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IEP3 p95 reconcile time > 10s"
+          description: "IEP3 batch reconciliation p95 has exceeded 10s for 5m — reconciliation may be falling behind the window."
+
+      # ReID match rate collapse: fewer than 30% of LocalIDs are being matched to
+      # a GlobalID. Could indicate a model regression, threshold misconfiguration,
+      # or severe embedding drift. Guard: only fires when IEP3 is actively processing
+      # batches — avoids stale-gauge false positives when the pipeline is idle.
+      - alert: ReIDMatchRateLow
+        expr: iep3_reid_match_rate < 0.30 and rate(iep3_batches_processed_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ReID match rate dropped below 30%"
+          description: "iep3_reid_match_rate = {{ $value | humanizePercentage }} — fewer than 30% of LocalIDs are being cross-camera matched. Check ReID model or threshold."
+
+      # Embedding norm collapse: mean L2 norm of raw ReID embeddings has dropped
+      # well below the healthy range (10–30). Threshold of 5.0 catches severe drift
+      # and degenerate (near-zero) outputs while avoiding noise from occasional low
+      # batches. This is a proxy for TRT inference failure or model weight corruption.
+      - alert: EmbeddingNormCollapse
+        expr: histogram_quantile(0.50, sum by (le) (rate(reid_embedding_norm_bucket[5m]))) < 5.0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ReID embedding norm p50 < 5.0 — possible model failure"
+          description: "Median L2 norm of raw ReID embeddings is below 5.0 (healthy: 10–30) — the model may be drifting or outputting near-zero vectors. Check TRT engine and GPU health."
+
+      # Detector confidence collapse: mean person detection confidence has fallen
+      # below 0.35, suggesting the scene has changed drastically or the model is
+      # being fed very different inputs than it was trained on (input drift).
+      - alert: DetectorConfidenceLow
+        expr: detector_inference_confidence_mean < 0.35
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Detector mean confidence < 0.35 — possible input drift"
+          description: "detector_inference_confidence_mean = {{ $value | humanize }} — sustained low confidence may indicate input distribution shift or camera obstruction."
+
+      # IEP1 Redis publish latency: XADD calls are taking longer than expected,
+      # delaying window manifests into the pipeline even when frames are captured.
+      # p95 > 200ms for 5m is a signal the Redis connection or server is struggling.
+      - alert: IEP1ManifestPublishSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(iep1_manifest_publish_seconds_bucket[5m]))) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IEP1 Redis XADD p95 latency > 200ms"
+          description: "IEP1 manifest publish p95 has exceeded 200ms for 5m — frames are being captured but window manifests are delayed into the pipeline. Check Redis health."
+
+  - name: retailvision_model_drift
+    rules:
+      # ReID cosine similarity collapse: p50 cross-camera similarity has dropped
+      # below 0.55 while IEP3 is actively processing batches. Sustained low
+      # similarity means the ReID model is failing to match the same person across
+      # cameras — could be model weight drift, TRT engine regression, or a scene
+      # change that breaks the training distribution.
+      - alert: ReIDCosineSimilarityLow
+        expr: job:iep3_cosine_p50:rate5m < 0.55 and rate(iep3_batches_processed_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ReID cosine similarity p50 dropped below 0.55"
+          description: "job:iep3_cosine_p50:rate5m = {{ $value | humanize }} -- cross-camera person matching is degraded. Check ReID model version and embedding quality."
+
+      # Detector detections-per-frame collapse: average persons detected per frame
+      # has dropped abnormally low while frames are still flowing. This is distinct
+      # from DetectorConfidenceLow — here the model IS running but finding no one,
+      # which could indicate camera occlusion, empty scene, or YOLO model regression.
+      - alert: DetectorDetectionRateLow
+        expr: |
+          rate(iep2_detections_per_frame_sum[5m]) / rate(iep2_detections_per_frame_count[5m]) < 0.1
+          and rate(iep2_frames_processed_total[2m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Detector finding < 0.1 persons per frame on average"
+          description: "Average detections/frame = {{ $value | humanize }} while frames are flowing. Scene may be empty, camera obstructed, or YOLO model regressed."
+
+      # Tracker fragmentation: BoTSORT identity switch rate is abnormally high,
+      # indicating the tracker is losing and re-acquiring the same person repeatedly.
+      # This degrades ReID quality and inflates unique-visitor counts in IEP5.
+      - alert: TrackerHighIdentitySwitches
+        expr: sum(rate(iep2_identity_switches_total[5m])) * 60 > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BoTSORT identity switch rate > 10/min"
+          description: "Tracker is losing and re-acquiring tracks at {{ $value | humanize }} switches/min. Check occlusion patterns, MATCH_THRESH, and TRACK_BUFFER tuning."
+
+  - name: retailvision_infra
+    rules:
+      # Any scrape target is down.
+      - alert: TargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Target {{ $labels.job }} is down"
+          description: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }}) for 1m."
+
+      # EEP gRPC: no Edge Agents connected when cameras should be running.
+      - alert: NoEdgeAgentsConnected
+        expr: eep_grpc_connections_active == 0 and eep_active_cameras > 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No Edge Agents connected but cameras are expected to be running"
+          description: "eep_grpc_connections_active = 0 while eep_active_cameras = {{ $value }}. Edge Agent may have crashed or lost its VPN connection."

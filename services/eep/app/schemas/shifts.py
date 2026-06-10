@@ -14,7 +14,6 @@ VALID_BREAK_TYPES = {"scheduled", "taken"}
 
 class CreateShiftPatternRequest(BaseModel):
     employee_id: uuid.UUID
-    section_id: uuid.UUID
     # 0=Mon … 6=Sun
     day_of_week: int = Field(..., ge=0, le=6)
     start_time: time
@@ -39,7 +38,6 @@ class PatchShiftPatternRequest(BaseModel):
 class ShiftPatternResponse(BaseModel):
     id: uuid.UUID
     employee_id: uuid.UUID
-    section_id: uuid.UUID
     day_of_week: int
     start_time: time
     end_time: time
@@ -55,7 +53,6 @@ class ShiftPatternResponse(BaseModel):
 
 class CreateShiftInstanceRequest(BaseModel):
     employee_id: uuid.UUID
-    section_id: uuid.UUID
     scheduled_start: datetime
     scheduled_end: datetime
     shift_pattern_id: Optional[uuid.UUID] = None
@@ -95,7 +92,6 @@ class PatchShiftInstanceRequest(BaseModel):
 class ShiftInstanceResponse(BaseModel):
     id: uuid.UUID
     employee_id: uuid.UUID
-    section_id: uuid.UUID
     shift_pattern_id: Optional[uuid.UUID]
     scheduled_start: datetime
     scheduled_end: datetime

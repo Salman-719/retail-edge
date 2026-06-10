@@ -2,22 +2,23 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text } from 'react-konva'
 import {
-  activateDraft, computeHomography, createCamera, createDraft, createObstacle, createZone,
+  activateDraft, computeHomography, computeTps, createCamera, createDraft, createObstacle, createZone,
   deleteCameraConfig, deleteCamera, deleteDraft, deleteObstacle, deleteZone,
   getActiveVersion, getDraft, getDraftCameraConfigs, getDraftFloorPlan, getDraftObstacles,
-  getDraftZones, getCalibrations, getSyncEvent, listSections, placeCameraConfig,
-  setFloorPlanScale, uploadCameraFrame, uploadFloorPlan, verifyCalibration,
+  getDraftZones, getCalibrations, patchCamera, placeCameraConfig,
+  setFloorPlanScale, updateCameraConfig, uploadCameraFrame, uploadFloorPlan, verifyCalibration,
+  projectPoint,
 } from '../api'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const STEPS = [
   { n: 1, label: 'Upload Floor Plan' },
-  { n: 2, label: 'Set Scale' },
+  { n: 2, label: 'Scale & Boundary' },
   { n: 3, label: 'Place Cameras' },
   { n: 4, label: 'Camera Frames' },
   { n: 5, label: 'Correspondences' },
-  { n: 6, label: 'Compute Homography' },
+  { n: 6, label: 'Compute Calibration' },
   { n: 7, label: 'Verify Calibration' },
   { n: 8, label: 'Draw Zones' },
   { n: 9, label: 'Activate' },
@@ -28,7 +29,6 @@ const ZONE_COLORS = {
   staff_only: '#ef4444', general: '#8b5cf6',
 }
 
-const ACTIVATION_COUNTDOWN = 30
 
 // ─── Hooks ────────────────────────────────────────────────────────────────────
 
@@ -63,185 +63,368 @@ function FloorPlanStage({
   pendingMarker = null,
   correspondencePoints = [],
   activeConfigId = null,
+  worldBounds = [],
   onCanvasClick,
+  showGrid = false,
   width = 700,
   height = 480,
 }) {
   const bgImage = useKonvaImage(floorPlan?.display_url)
-  const scale = fitScale(floorPlan?.width_px, floorPlan?.height_px, width, height)
-  const stageH = Math.round((floorPlan?.height_px || height) * scale)
+  const baseScale = fitScale(floorPlan?.width_px, floorPlan?.height_px, width, height)
+  const stageH = Math.round((floorPlan?.height_px || height) * baseScale)
+
+  const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [cursor, setCursor] = useState('default')
+  const isDragging = useRef(false)
+  const didMove = useRef(false)
+  const lastPos = useRef(null)
+
+  const scale = baseScale * zoom
+
+  const clampPan = (x, y, z) => {
+    const s = baseScale * z
+    const imgW = (floorPlan?.width_px || width) * s
+    const imgH = (floorPlan?.height_px || height) * s
+    return {
+      x: Math.min(0, Math.max(width - imgW, x)),
+      y: Math.min(0, Math.max(stageH - imgH, y)),
+    }
+  }
+
+  const handleWheel = (e) => {
+    e.evt.preventDefault()
+    const scaleBy = 1.12
+    const newZoom = Math.min(8, Math.max(1, e.evt.deltaY < 0 ? zoom * scaleBy : zoom / scaleBy))
+    const stage = e.target.getStage()
+    const ptr = stage.getPointerPosition()
+    const newX = ptr.x - (ptr.x - pan.x) * (newZoom / zoom)
+    const newY = ptr.y - (ptr.y - pan.y) * (newZoom / zoom)
+    setZoom(newZoom)
+    setPan(clampPan(newX, newY, newZoom))
+  }
+
+  const handleMouseDown = (e) => {
+    if (e.evt.button !== 0) return
+    isDragging.current = true
+    didMove.current = false
+    lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
+    setCursor('grabbing')
+  }
+
+  const handleMouseMove = (e) => {
+    if (!isDragging.current) return
+    const dx = e.evt.clientX - lastPos.current.x
+    const dy = e.evt.clientY - lastPos.current.y
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) didMove.current = true
+    lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
+    setPan(prev => clampPan(prev.x + dx, prev.y + dy, zoom))
+  }
+
+  const handleMouseUp = () => { isDragging.current = false; setCursor('default') }
 
   const handleClick = (e) => {
-    if (!onCanvasClick) return
-    const pos = e.target.getStage().getPointerPosition()
-    onCanvasClick(pos.x / scale, pos.y / scale)
+    if (!onCanvasClick || didMove.current) return
+    const stage = e.target.getStage()
+    const ptr = stage.getPointerPosition()
+    onCanvasClick((ptr.x - pan.x) / scale, (ptr.y - pan.y) / scale)
+  }
+
+  const tx = (x) => x * scale + pan.x
+  const ty = (y) => y * scale + pan.y
+
+  // Grid lines (1m × 1m) — only when showGrid and scale is defined
+  const ppm = floorPlan?.pixels_per_meter
+  const gridLines = []
+  if (showGrid && ppm) {
+    const cellPx = ppm * scale
+    const imgW = (floorPlan?.width_px || width) * scale
+    const imgH = (floorPlan?.height_px || height) * scale
+    const ox = pan.x
+    const oy = pan.y
+    // vertical lines
+    for (let x = 0; x <= imgW + cellPx; x += cellPx) {
+      const cx = ox + x
+      if (cx < -cellPx || cx > width + cellPx) continue
+      gridLines.push(<Line key={`v${x}`} points={[cx, oy, cx, oy + imgH]} stroke="rgba(99,102,241,0.25)" strokeWidth={1 / zoom} />)
+    }
+    // horizontal lines
+    for (let y = 0; y <= imgH + cellPx; y += cellPx) {
+      const cy = oy + y
+      if (cy < -cellPx || cy > stageH + cellPx) continue
+      gridLines.push(<Line key={`h${y}`} points={[ox, cy, ox + imgW, cy]} stroke="rgba(99,102,241,0.25)" strokeWidth={1 / zoom} />)
+    }
+    // meter labels along top and left edges
+    const maxCols = Math.ceil(imgW / cellPx)
+    const maxRows = Math.ceil(imgH / cellPx)
+    for (let i = 1; i < maxCols; i++) {
+      const cx = ox + i * cellPx
+      if (cx >= 0 && cx <= width)
+        gridLines.push(<Text key={`vl${i}`} x={cx + 2} y={oy + 2} text={`${i}m`} fontSize={Math.max(8, 10 / zoom)} fill="rgba(99,102,241,0.6)" />)
+    }
+    for (let i = 1; i < maxRows; i++) {
+      const cy = oy + i * cellPx
+      if (cy >= 0 && cy <= stageH)
+        gridLines.push(<Text key={`hl${i}`} x={ox + 2} y={cy + 2} text={`${i}m`} fontSize={Math.max(8, 10 / zoom)} fill="rgba(99,102,241,0.6)" />)
+    }
   }
 
   return (
-    <Stage
-      width={width}
-      height={stageH}
-      onClick={handleClick}
-      style={{ cursor: onCanvasClick ? 'crosshair' : 'default', background: '#f3f4f6', borderRadius: 8 }}
-    >
-      <Layer>
-        {bgImage && (
-          <KonvaImage
-            image={bgImage}
-            width={(floorPlan?.width_px || width) * scale}
-            height={(floorPlan?.height_px || height) * scale}
-          />
-        )}
-
-        {obstacles.map(obs => (
-          <Line key={obs.id}
-            points={obs.points.flatMap(([x, y]) => [x * scale, y * scale])}
-            closed fill="#6b728022" stroke="#6b7280" strokeWidth={2} dash={[5, 3]} />
-        ))}
-
-        {zones.map(zone => (
-          <React.Fragment key={zone.id}>
-            <Line
-              points={zone.points.flatMap(([x, y]) => [x * scale, y * scale])}
-              closed
-              fill={(ZONE_COLORS[zone.type] || '#888') + '33'}
-              stroke={ZONE_COLORS[zone.type] || '#888'}
-              strokeWidth={2}
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      <Stage
+        width={width}
+        height={stageH}
+        onClick={handleClick}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        style={{ cursor, background: '#f3f4f6', borderRadius: 8, display: 'block' }}
+      >
+        <Layer>
+          {bgImage && (
+            <KonvaImage
+              image={bgImage}
+              x={pan.x} y={pan.y}
+              width={(floorPlan?.width_px || width) * scale}
+              height={(floorPlan?.height_px || height) * scale}
             />
-            {zone.points[0] && (
-              <Text
-                x={zone.points[0][0] * scale + 4}
-                y={zone.points[0][1] * scale + 4}
-                text={zone.name}
-                fontSize={11}
-                fill={ZONE_COLORS[zone.type] || '#888'}
+          )}
+
+          {showGrid && gridLines}
+
+          {worldBounds.length >= 2 && (
+            <Line
+              points={worldBounds.flatMap(([x, y]) => [tx(x), ty(y)])}
+              closed={worldBounds.length >= 3}
+              stroke="#f97316"
+              strokeWidth={2 / zoom}
+              dash={[8, 4]}
+              fill={worldBounds.length >= 3 ? '#f9731611' : undefined}
+            />
+          )}
+          {worldBounds.map(([x, y], i) => (
+            <Circle key={i} x={tx(x)} y={ty(y)} radius={5 / zoom} fill="#f97316" stroke="#fff" strokeWidth={1.5 / zoom} />
+          ))}
+
+          {obstacles.map(obs => (
+            <Line key={obs.id}
+              points={obs.points.flatMap(([x, y]) => [tx(x), ty(y)])}
+              closed fill="#6b728022" stroke="#6b7280" strokeWidth={2 / zoom} dash={[5, 3]} />
+          ))}
+
+          {zones.map(zone => (
+            <React.Fragment key={zone.id}>
+              <Line
+                points={zone.points.flatMap(([x, y]) => [tx(x), ty(y)])}
+                closed
+                fill={(ZONE_COLORS[zone.type] || '#888') + '33'}
+                stroke={ZONE_COLORS[zone.type] || '#888'}
+                strokeWidth={2 / zoom}
               />
-            )}
-          </React.Fragment>
-        ))}
+              {zone.points[0] && (
+                <Text
+                  x={tx(zone.points[0][0]) + 4} y={ty(zone.points[0][1]) + 4}
+                  text={zone.name} fontSize={Math.max(9, 11 / zoom)}
+                  fill={ZONE_COLORS[zone.type] || '#888'}
+                />
+              )}
+            </React.Fragment>
+          ))}
 
-        {cameraConfigs.map(cc => (
-          <React.Fragment key={cc.id}>
-            <Circle
-              x={cc.position_x * scale} y={cc.position_y * scale} radius={9}
-              fill={
-                cc.id === activeConfigId ? '#2563eb' :
-                cc.status === 'verified' ? '#10b981' :
-                cc.status === 'calibrated' ? '#f59e0b' : '#6b7280'
-              }
-              stroke="#fff" strokeWidth={2}
-            />
-            <Text
-              x={cc.position_x * scale + 13} y={cc.position_y * scale - 6}
-              text={cc.physical_camera_name} fontSize={11} fill="#111"
-            />
-          </React.Fragment>
-        ))}
+          {cameraConfigs.map(cc => (
+            <React.Fragment key={cc.id}>
+              <Circle
+                x={tx(cc.position_x)} y={ty(cc.position_y)} radius={9 / zoom}
+                fill={
+                  cc.id === activeConfigId ? '#2563eb' :
+                  cc.status === 'verified' ? '#10b981' :
+                  cc.status === 'calibrated' ? '#f59e0b' : '#6b7280'
+                }
+                stroke="#fff" strokeWidth={2 / zoom}
+              />
+              <Text
+                x={tx(cc.position_x) + 13 / zoom} y={ty(cc.position_y) - 6 / zoom}
+                text={cc.physical_camera_name} fontSize={Math.max(9, 11 / zoom)} fill="#111"
+              />
+            </React.Fragment>
+          ))}
 
-        {/* Scale overlay: origin (orange), ref A (blue), ref line A→B only */}
-        {scalePoints.length > 0 && (
-          <>
-            <Circle x={scalePoints[0][0] * scale} y={scalePoints[0][1] * scale}
-              radius={6} fill="#f97316" stroke="#fff" strokeWidth={2} />
-            <Text x={scalePoints[0][0] * scale + 8} y={scalePoints[0][1] * scale - 8}
-              text="O" fontSize={11} fill="#f97316" />
-          </>
-        )}
-        {scalePoints.length > 1 && (
-          <>
-            <Circle x={scalePoints[1][0] * scale} y={scalePoints[1][1] * scale}
-              radius={6} fill="#2563eb" stroke="#fff" strokeWidth={2} />
-            <Text x={scalePoints[1][0] * scale + 8} y={scalePoints[1][1] * scale - 8}
-              text="A" fontSize={11} fill="#2563eb" />
-          </>
-        )}
-        {scalePoints.length > 2 && (
-          <>
-            <Line
-              points={[
-                scalePoints[1][0] * scale, scalePoints[1][1] * scale,
-                scalePoints[2][0] * scale, scalePoints[2][1] * scale,
-              ]}
-              stroke="#2563eb" strokeWidth={2} dash={[5, 3]}
-            />
-            <Circle x={scalePoints[2][0] * scale} y={scalePoints[2][1] * scale}
-              radius={6} fill="#2563eb" stroke="#fff" strokeWidth={2} />
-            <Text x={scalePoints[2][0] * scale + 8} y={scalePoints[2][1] * scale - 8}
-              text="B" fontSize={11} fill="#2563eb" />
-          </>
-        )}
+          {scalePoints.length > 0 && (
+            <>
+              <Circle x={tx(scalePoints[0][0])} y={ty(scalePoints[0][1])}
+                radius={6 / zoom} fill="#f97316" stroke="#fff" strokeWidth={2 / zoom} />
+              <Text x={tx(scalePoints[0][0]) + 8 / zoom} y={ty(scalePoints[0][1]) - 8 / zoom}
+                text="O" fontSize={Math.max(9, 11 / zoom)} fill="#f97316" />
+            </>
+          )}
+          {scalePoints.length > 1 && (
+            <>
+              <Circle x={tx(scalePoints[1][0])} y={ty(scalePoints[1][1])}
+                radius={6 / zoom} fill="#2563eb" stroke="#fff" strokeWidth={2 / zoom} />
+              <Text x={tx(scalePoints[1][0]) + 8 / zoom} y={ty(scalePoints[1][1]) - 8 / zoom}
+                text="A" fontSize={Math.max(9, 11 / zoom)} fill="#2563eb" />
+            </>
+          )}
+          {scalePoints.length > 2 && (
+            <>
+              <Line
+                points={[tx(scalePoints[1][0]), ty(scalePoints[1][1]), tx(scalePoints[2][0]), ty(scalePoints[2][1])]}
+                stroke="#2563eb" strokeWidth={2 / zoom} dash={[5, 3]}
+              />
+              <Circle x={tx(scalePoints[2][0])} y={ty(scalePoints[2][1])}
+                radius={6 / zoom} fill="#2563eb" stroke="#fff" strokeWidth={2 / zoom} />
+              <Text x={tx(scalePoints[2][0]) + 8 / zoom} y={ty(scalePoints[2][1]) - 8 / zoom}
+                text="B" fontSize={Math.max(9, 11 / zoom)} fill="#2563eb" />
+            </>
+          )}
 
-        {/* Zone/obstacle in-progress drawing */}
-        {overlayPoints.length > 0 && (
-          <>
-            <Line
-              points={overlayPoints.flatMap(([x, y]) => [x * scale, y * scale])}
-              stroke={overlayMode === 'obstacle' ? '#6b7280' : '#2563eb'}
-              strokeWidth={2}
-              dash={overlayMode === 'obstacle' ? [5, 3] : undefined}
-            />
-            {overlayPoints.map(([x, y], i) => (
-              <Circle key={i} x={x * scale} y={y * scale} radius={4}
-                fill={overlayMode === 'obstacle' ? '#6b7280' : '#2563eb'} />
-            ))}
-          </>
-        )}
+          {overlayPoints.length > 0 && (
+            <>
+              <Line
+                points={overlayPoints.flatMap(([x, y]) => [tx(x), ty(y)])}
+                closed={overlayPoints.length >= 3}
+                stroke={overlayMode === 'obstacle' ? '#6b7280' : '#2563eb'}
+                fill={overlayPoints.length >= 3 ? (overlayMode === 'obstacle' ? '#6b728022' : '#2563eb22') : undefined}
+                strokeWidth={2 / zoom}
+                dash={overlayMode === 'obstacle' ? [5, 3] : undefined}
+              />
+              {overlayPoints.map(([x, y], i) => (
+                <Circle key={i} x={tx(x)} y={ty(y)} radius={4 / zoom}
+                  fill={overlayMode === 'obstacle' ? '#6b7280' : '#2563eb'} />
+              ))}
+            </>
+          )}
 
-        {/* Pending camera placement ghost marker */}
-        {pendingMarker && (
-          <Circle
-            x={pendingMarker.x * scale} y={pendingMarker.y * scale}
-            radius={9} fill="#94a3b8" stroke="#fff" strokeWidth={2}
-          />
-        )}
+          {pendingMarker && (
+            <Circle x={tx(pendingMarker.x)} y={ty(pendingMarker.y)}
+              radius={9 / zoom} fill="#94a3b8" stroke="#fff" strokeWidth={2 / zoom} />
+          )}
 
-        {/* Correspondence / verify world points */}
-        {correspondencePoints.map((pt, i) => (
-          <React.Fragment key={i}>
-            <Circle x={pt[0] * scale} y={pt[1] * scale} radius={6} fill="#f97316" stroke="#fff" strokeWidth={2} />
-            <Text x={pt[0] * scale + 8} y={pt[1] * scale - 8} text={`${i + 1}`} fontSize={11} fill="#f97316" />
-          </React.Fragment>
-        ))}
-      </Layer>
-    </Stage>
+          {correspondencePoints.map((pt, i) => (
+            <React.Fragment key={i}>
+              <Circle x={tx(pt[0])} y={ty(pt[1])} radius={6 / zoom} fill="#f97316" stroke="#fff" strokeWidth={2 / zoom} />
+              <Text x={tx(pt[0]) + 8 / zoom} y={ty(pt[1]) - 8 / zoom} text={`${i + 1}`} fontSize={Math.max(9, 11 / zoom)} fill="#f97316" />
+            </React.Fragment>
+          ))}
+        </Layer>
+      </Stage>
+      {zoom > 1 && (
+        <button
+          onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }) }}
+          style={{ position: 'absolute', bottom: 6, right: 6, fontSize: 11, padding: '2px 8px', background: 'rgba(255,255,255,0.85)', border: '1px solid #d1d5db', borderRadius: 4, cursor: 'pointer' }}
+        >
+          Reset zoom
+        </button>
+      )}
+    </div>
   )
 }
 
 // ─── Camera Frame Viewer ──────────────────────────────────────────────────────
 
-function FrameStage({ frameUrl, width = 360, height = 260, points = [], onCanvasClick }) {
+function FrameStage({ frameUrl, width = 360, height = 260, points = [], pendingCount = 0, onCanvasClick }) {
   const image = useKonvaImage(frameUrl)
   const [imgSize, setImgSize] = useState({ w: width, h: height })
+  const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [cursor, setCursor] = useState('default')
+  const isDragging = useRef(false)
+  const didMove = useRef(false)
+  const lastPos = useRef(null)
 
   useEffect(() => {
     if (image) setImgSize({ w: image.width, h: image.height })
   }, [image])
 
-  const scale = fitScale(imgSize.w, imgSize.h, width, height)
+  const baseScale = fitScale(imgSize.w, imgSize.h, width, height)
+  const scale = baseScale * zoom
+  const stageH = Math.round(imgSize.h * baseScale)
 
-  const handleClick = (e) => {
-    if (!onCanvasClick) return
-    const pos = e.target.getStage().getPointerPosition()
-    onCanvasClick(pos.x / scale, pos.y / scale)
+  const clampPan = (x, y, z) => {
+    const s = baseScale * z
+    return {
+      x: Math.min(0, Math.max(width - imgSize.w * s, x)),
+      y: Math.min(0, Math.max(stageH - imgSize.h * s, y)),
+    }
   }
 
+  const handleWheel = (e) => {
+    e.evt.preventDefault()
+    const scaleBy = 1.12
+    const newZoom = Math.min(8, Math.max(1, e.evt.deltaY < 0 ? zoom * scaleBy : zoom / scaleBy))
+    const stage = e.target.getStage()
+    const ptr = stage.getPointerPosition()
+    const newX = ptr.x - (ptr.x - pan.x) * (newZoom / zoom)
+    const newY = ptr.y - (ptr.y - pan.y) * (newZoom / zoom)
+    setZoom(newZoom)
+    setPan(clampPan(newX, newY, newZoom))
+  }
+
+  const handleMouseDown = (e) => {
+    if (e.evt.button !== 0) return
+    isDragging.current = true
+    didMove.current = false
+    lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
+    setCursor('grabbing')
+  }
+
+  const handleMouseMove = (e) => {
+    if (!isDragging.current) return
+    const dx = e.evt.clientX - lastPos.current.x
+    const dy = e.evt.clientY - lastPos.current.y
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) didMove.current = true
+    lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
+    setPan(prev => clampPan(prev.x + dx, prev.y + dy, zoom))
+  }
+
+  const handleMouseUp = () => { isDragging.current = false; setCursor('default') }
+
+  const handleClick = (e) => {
+    if (!onCanvasClick || didMove.current) return
+    const stage = e.target.getStage()
+    const ptr = stage.getPointerPosition()
+    onCanvasClick((ptr.x - pan.x) / scale, (ptr.y - pan.y) / scale)
+  }
+
+  const tx = (x) => x * scale + pan.x
+  const ty = (y) => y * scale + pan.y
+
   return (
-    <Stage
-      width={width}
-      height={Math.round(imgSize.h * scale)}
-      onClick={handleClick}
-      style={{ cursor: onCanvasClick ? 'crosshair' : 'default', background: '#111', borderRadius: 8 }}
-    >
-      <Layer>
-        {image && <KonvaImage image={image} width={imgSize.w * scale} height={imgSize.h * scale} />}
-        {points.map((pt, i) => (
-          <React.Fragment key={i}>
-            <Circle x={pt[0] * scale} y={pt[1] * scale} radius={6} fill="#22c55e" stroke="#fff" strokeWidth={2} />
-            <Text x={pt[0] * scale + 8} y={pt[1] * scale - 8} text={`${i + 1}`} fontSize={11} fill="#22c55e" />
-          </React.Fragment>
-        ))}
-      </Layer>
-    </Stage>
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      <Stage
+        width={width}
+        height={stageH}
+        onClick={handleClick}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        style={{ cursor, background: '#111', borderRadius: 8, display: 'block' }}
+      >
+        <Layer>
+          {image && <KonvaImage image={image} x={pan.x} y={pan.y} width={imgSize.w * scale} height={imgSize.h * scale} />}
+          {points.map((pt, i) => {
+            const isPending = i >= points.length - pendingCount
+            const color = isPending ? '#f97316' : '#22c55e'
+            return (
+              <React.Fragment key={i}>
+                <Circle x={tx(pt[0])} y={ty(pt[1])} radius={7 / zoom} fill={color} stroke="#fff" strokeWidth={2 / zoom} />
+                <Text x={tx(pt[0]) + 9 / zoom} y={ty(pt[1]) - 9 / zoom} text={isPending ? '?' : `${i + 1}`} fontSize={Math.max(10, 12 / zoom)} fill={color} />
+              </React.Fragment>
+            )
+          })}
+        </Layer>
+      </Stage>
+      {zoom > 1 && (
+        <button
+          onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }) }}
+          style={{ position: 'absolute', bottom: 6, right: 6, fontSize: 11, padding: '2px 8px', background: 'rgba(0,0,0,0.6)', color: '#fff', border: '1px solid #444', borderRadius: 4, cursor: 'pointer' }}
+        >
+          Reset zoom
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -259,8 +442,6 @@ export default function StoreConfigEdit() {
 
   // Core data
   const [draft, setDraft] = useState(null)
-  const [sections, setSections] = useState([])
-  const [selectedSection, setSelectedSection] = useState(null)
   const [floorPlan, setFloorPlan] = useState(null)
   const [cameraConfigs, setCameraConfigs] = useState([])
   const [zones, setZones] = useState([])
@@ -270,22 +451,35 @@ export default function StoreConfigEdit() {
   // scalePoints = [origin, refA, refB]; not cleared on save so markers stay visible
   const [scalePoints, setScalePoints] = useState([])
   const [realDistance, setRealDistance] = useState('')
+  const [worldBoundsPoints, setWorldBoundsPoints] = useState([])
+  const [drawingWorldBounds, setDrawingWorldBounds] = useState(false)
+  const [settingScale, setSettingScale] = useState(false)
 
   // Step 3 — camera placement
   const [pendingCameraPlacement, setPendingCameraPlacement] = useState(null)
   const [newCameraName, setNewCameraName] = useState('')
   const [newCameraHeight, setNewCameraHeight] = useState('')
+  const [newCameraLens, setNewCameraLens] = useState('')
+  const [newCameraHFov, setNewCameraHFov] = useState('')
+  const [newCameraVFov, setNewCameraVFov] = useState('')
+  const [newCameraStreamWidth, setNewCameraStreamWidth] = useState('')
+  const [newCameraStreamHeight, setNewCameraStreamHeight] = useState('')
 
   // Steps 4-7 — selected camera; derived from cameraConfigs to avoid stale state
   const [selectedConfigId, setSelectedConfigId] = useState(null)
   const selectedConfig = cameraConfigs.find(cc => cc.id === selectedConfigId) ?? null
+
+  // Step 3 — inline camera config editing
+  const [editingConfigId, setEditingConfigId] = useState(null)
+  const [editCameraForm, setEditCameraForm] = useState({ height_meters: '', stream_url: '' })
+  const [newCameraStreamUrl, setNewCameraStreamUrl] = useState('')
 
   // Steps 5-6 — per-camera correspondences and computed calibration results
   const [correspondencesMap, setCorrespondencesMap] = useState({})
   const [calibResultsMap, setCalibResultsMap] = useState({})
   const [pendingPixelPt, setPendingPixelPt] = useState(null)
 
-  // Step 7 — per-camera verification preview
+  // Step 7 — per-camera verification test points (array of {pixel, mapPt})
   const [verifyPreviewMap, setVerifyPreviewMap] = useState({})
 
   // Step 8 — polygon drawing
@@ -298,7 +492,6 @@ export default function StoreConfigEdit() {
   const [pendingZoneType, setPendingZoneType] = useState('general')
 
   // Step 9 — activation
-  const [activationLabel, setActivationLabel] = useState('')
   const [syncEvent, setSyncEvent] = useState(null)
   const pollRef = useRef(null)
 
@@ -307,13 +500,13 @@ export default function StoreConfigEdit() {
   function isStepComplete(n) {
     switch (n) {
       case 1: return !!floorPlan?.image_uploaded
-      case 2: return !!floorPlan?.scale_defined
+      case 2: return !!floorPlan?.scale_defined && (floorPlan?.boundary_polygon?.length >= 3 || worldBoundsPoints.length >= 3)
       case 3: return cameraConfigs.length > 0
       case 4: return cameraConfigs.length > 0 &&
         cameraConfigs.every(cc => cc.status !== 'pending')
       case 5: return cameraConfigs.length > 0 &&
         cameraConfigs.every(cc =>
-          (correspondencesMap[cc.id]?.length >= 4) ||
+          (correspondencesMap[cc.id]?.length >= 8) ||
           ['calibrated', 'verified'].includes(cc.status)
         )
       case 6: return cameraConfigs.length > 0 &&
@@ -321,6 +514,7 @@ export default function StoreConfigEdit() {
       case 7: return cameraConfigs.length > 0 &&
         cameraConfigs.every(cc => cc.status === 'verified')
       case 8: return zones.length > 0 || obstacles.length > 0 || step8Skipped
+      case 9: return syncEvent?.status === 'activating' || syncEvent?.status === 'scheduled'
       default: return false
     }
   }
@@ -334,6 +528,7 @@ export default function StoreConfigEdit() {
     return true
   }
 
+
   // ─── Bootstrap ───────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -344,13 +539,7 @@ export default function StoreConfigEdit() {
   async function bootstrap() {
     setLoading(true)
     try {
-      const [sects, activeVersion] = await Promise.all([
-        listSections(slug).catch(() => []),
-        getActiveVersion(slug).catch(() => null),
-      ])
-      setSections(sects)
-      const defaultSection = sects.find(s => s.is_default) || sects[0]
-      setSelectedSection(defaultSection)
+      const activeVersion = await getActiveVersion(slug).catch(() => null)
 
       const isEditing = !!activeVersion
       setMode(isEditing ? 'editing' : 'onboarding')
@@ -376,9 +565,7 @@ export default function StoreConfigEdit() {
       }
       setDraft(d)
 
-      if (defaultSection) {
-        await loadSectionData(defaultSection.id, slug)
-      }
+      await loadDraftData(slug)
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
     } finally {
@@ -386,13 +573,13 @@ export default function StoreConfigEdit() {
     }
   }
 
-  async function loadSectionData(sectionId, storeSlug) {
+  async function loadDraftData(storeSlug) {
     const s = storeSlug || slug
     const [fp, zs, obs, ccs] = await Promise.all([
-      getDraftFloorPlan(s, sectionId).catch(() => null),
-      getDraftZones(s, sectionId).catch(() => []),
-      getDraftObstacles(s, sectionId).catch(() => []),
-      getDraftCameraConfigs(s, sectionId).catch(() => []),
+      getDraftFloorPlan(s).catch(() => null),
+      getDraftZones(s).catch(() => []),
+      getDraftObstacles(s).catch(() => []),
+      getDraftCameraConfigs(s).catch(() => []),
     ])
 
     setFloorPlan(fp)
@@ -407,54 +594,54 @@ export default function StoreConfigEdit() {
       setScalePoints([])
     }
 
-    // Initialise per-camera correspondence map
-    const corrMap = {}
-    for (const cc of ccs) corrMap[cc.id] = []
-    setCorrespondencesMap(corrMap)
-
-    // Load stored calibration data for cameras that were previously calibrated
-    const calibMap = {}
-    for (const cc of ccs.filter(c => ['calibrated', 'verified'].includes(c.status))) {
-      const calibs = await getCalibrations(s, cc.id).catch(() => [])
-      const current = calibs.find(c => c.is_current)
-      if (current) calibMap[cc.id] = current
+    // Restore world bounds polygon if previously saved
+    if (fp?.boundary_polygon?.length >= 3) {
+      setWorldBoundsPoints(fp.boundary_polygon)
+    } else {
+      setWorldBoundsPoints([])
     }
+
+    // Load stored calibration data and pre-populate correspondences for calibrated cameras
+    const corrMap = {}
+    const calibMap = {}
+    for (const cc of ccs) {
+      corrMap[cc.id] = []
+      if (['calibrated', 'verified'].includes(cc.status)) {
+        const calibs = await getCalibrations(s, cc.id).catch(() => [])
+        const current = calibs.find(c => c.is_current)
+        if (current) {
+          calibMap[cc.id] = current
+          if (current.correspondences?.length) {
+            const raw = current.correspondences
+            // TPS format: {frame_px, frame_py, map_px, map_py, ...}
+            // Homography format: {pixel: [x,y], world: [x,y]}
+            // Normalise to {pixel, world} so step-5 rendering is format-agnostic.
+            corrMap[cc.id] = raw[0]?.frame_px !== undefined
+              ? raw.map(c => ({ pixel: [c.frame_px, c.frame_py], world: [c.map_px, c.map_py] }))
+              : raw
+          }
+        }
+      }
+    }
+    setCorrespondencesMap(corrMap)
     setCalibResultsMap(calibMap)
 
     setSelectedConfigId(ccs[0]?.id ?? null)
     setPendingPixelPt(null)
     setInProgressPoints([])
     setPendingPolygon(null)
-    setVerifyPreviewMap({})
+    setVerifyPreviewMap({})   // each camera's entry is an array of {pixel, mapPt}
     setPendingCameraPlacement(null)
-  }
-
-  async function switchSection(section) {
-    setSelectedSection(section)
-    setFloorPlan(null)
-    setZones([])
-    setObstacles([])
-    setCameraConfigs([])
-    setSelectedConfigId(null)
-    setScalePoints([])
-    setRealDistance('')
-    setCorrespondencesMap({})
-    setCalibResultsMap({})
-    setInProgressPoints([])
-    setPendingPolygon(null)
-    setPendingCameraPlacement(null)
-    setVerifyPreviewMap({})
-    if (draft) await loadSectionData(section.id, slug)
   }
 
   // ─── Step 1: Floor plan upload ────────────────────────────────────────────
 
   async function handleFloorPlanUpload(e) {
     const file = e.target.files?.[0]
-    if (!file || !selectedSection) return
+    if (!file || !draft) return
     setSaving(true)
     try {
-      const fp = await uploadFloorPlan(slug, selectedSection.id, file)
+      const fp = await uploadFloorPlan(slug, file)
       setFloorPlan(fp)
       // Backend cascade-wipes zones/obstacles/configs on re-upload; mirror in state
       setZones([])
@@ -486,16 +673,18 @@ export default function StoreConfigEdit() {
     setFloorPlan(prev => prev ? { ...prev, scale_defined: false } : null)
   }
 
-  async function handleSetScale() {
-    if (scalePoints.length < 3 || !realDistance || !selectedSection) return
+  async function handleSetScale(boundsOverride) {
+    if (scalePoints.length < 3 || !realDistance || !draft) return
     setSaving(true)
+    const bounds = boundsOverride !== undefined ? boundsOverride : worldBoundsPoints
     try {
-      const updated = await setFloorPlanScale(slug, selectedSection.id, {
+      const updated = await setFloorPlanScale(slug, {
         origin_x: scalePoints[0][0],
         origin_y: scalePoints[0][1],
         ref_point_1: scalePoints[1],
         ref_point_2: scalePoints[2],
         real_distance_meters: parseFloat(realDistance),
+        ...(bounds.length >= 3 ? { boundary_polygon: bounds } : {}),
       })
       setFloorPlan(updated)
       // Keep scalePoints so the markers remain visible on the canvas
@@ -503,6 +692,27 @@ export default function StoreConfigEdit() {
       setError(err?.response?.data?.error || err.message)
     } finally {
       setSaving(false)
+    }
+  }
+
+  function handleWorldBoundsClick(x, y) {
+    setWorldBoundsPoints(prev => [...prev, [x, y]])
+  }
+
+  async function handleCloseWorldBounds() {
+    if (worldBoundsPoints.length < 3 || !draft) return
+    setDrawingWorldBounds(false)
+    // Save immediately if scale is already defined
+    if (floorPlan?.scale_defined && scalePoints.length >= 3 && realDistance) {
+      await handleSetScale(worldBoundsPoints)
+    }
+  }
+
+  async function handleClearWorldBounds() {
+    setWorldBoundsPoints([])
+    setDrawingWorldBounds(false)
+    if (floorPlan?.scale_defined && scalePoints.length >= 3 && realDistance) {
+      await handleSetScale([])
     }
   }
 
@@ -517,20 +727,34 @@ export default function StoreConfigEdit() {
 
   async function handlePlaceCameraSubmit(e) {
     e.preventDefault()
-    if (!newCameraName.trim() || !selectedSection) return
+    if (!newCameraName.trim() || !draft) return
     setSaving(true)
     try {
-      const cam = await createCamera(slug, { name: newCameraName.trim() })
-      const cc = await placeCameraConfig(slug, selectedSection.id, {
+      const cam = await createCamera(slug, {
+        name: newCameraName.trim(),
+        ...(newCameraStreamUrl.trim() ? { cloud_stream_url: newCameraStreamUrl.trim() } : {}),
+        ...(newCameraLens !== '' ? { lens_focal_length_mm: parseFloat(newCameraLens) } : {}),
+        ...(newCameraHFov !== '' ? { h_fov_deg: parseFloat(newCameraHFov) } : {}),
+        ...(newCameraVFov !== '' ? { v_fov_deg: parseFloat(newCameraVFov) } : {}),
+        ...(newCameraStreamWidth !== '' ? { stream_width: parseInt(newCameraStreamWidth, 10) } : {}),
+        ...(newCameraStreamHeight !== '' ? { stream_height: parseInt(newCameraStreamHeight, 10) } : {}),
+      })
+      const cc = await placeCameraConfig(slug, {
         physical_camera_id: cam.id,
         position_x: pendingCameraPlacement.x,
         position_y: pendingCameraPlacement.y,
         height_meters: newCameraHeight ? parseFloat(newCameraHeight) : null,
       })
-      setCameraConfigs(prev => [...prev, cc])
+      setCameraConfigs(prev => [...prev, { ...cc, stream_url: newCameraStreamUrl.trim() || null }])
       setCorrespondencesMap(prev => ({ ...prev, [cc.id]: [] }))
       setSelectedConfigId(cc.id)
       setPendingCameraPlacement(null)
+      setNewCameraStreamUrl('')
+      setNewCameraLens('')
+      setNewCameraHFov('')
+      setNewCameraVFov('')
+      setNewCameraStreamWidth('')
+      setNewCameraStreamHeight('')
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
     } finally {
@@ -549,6 +773,29 @@ export default function StoreConfigEdit() {
       setCalibResultsMap(prev => { const n = { ...prev }; delete n[cc.id]; return n })
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
+    }
+  }
+
+  async function handleUpdateCameraConfig(e) {
+    e.preventDefault()
+    if (!editingConfigId) return
+    setSaving(true)
+    try {
+      const cc = cameraConfigs.find(c => c.id === editingConfigId)
+      const configBody = {}
+      if (editCameraForm.height_meters !== '') configBody.height_meters = parseFloat(editCameraForm.height_meters)
+      const [updated] = await Promise.all([
+        updateCameraConfig(slug, editingConfigId, configBody),
+        patchCamera(slug, cc.physical_camera_id, { cloud_stream_url: editCameraForm.stream_url.trim() || null }),
+      ])
+      setCameraConfigs(prev => prev.map(c =>
+        c.id === editingConfigId ? { ...c, ...updated, stream_url: editCameraForm.stream_url.trim() || null } : c
+      ))
+      setEditingConfigId(null)
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message)
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -574,16 +821,25 @@ export default function StoreConfigEdit() {
     }))
   }
 
-  async function handleComputeHomographyFor(configId) {
+  async function handleComputeCalibrationFor(configId) {
     const corr = correspondencesMap[configId] || []
-    if (corr.length < 4) return
+    if (corr.length < 8) return
     setSaving(true)
     try {
-      const result = await computeHomography(slug, configId, corr)
+      // Map stored correspondence format { pixel, world } → TPS format { frame_px, frame_py, map_px, map_py }
+      const tpsCorr = corr.map(c => ({
+        frame_px: c.pixel[0],
+        frame_py: c.pixel[1],
+        map_px:   c.world[0],
+        map_py:   c.world[1],
+      }))
+      const result = await computeTps(slug, configId, tpsCorr)
       setCalibResultsMap(prev => ({ ...prev, [configId]: result }))
       setCameraConfigs(prev => prev.map(c =>
         c.id === configId ? { ...c, status: 'calibrated' } : c
       ))
+      // Clear verification test points when recalibrating
+      setVerifyPreviewMap(prev => ({ ...prev, [configId]: [] }))
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
     } finally {
@@ -593,19 +849,28 @@ export default function StoreConfigEdit() {
 
   // ─── Step 7: Verify ───────────────────────────────────────────────────────
 
-  function projectPixelToWorld(configId, px, py) {
-    const H = calibResultsMap[configId]?.homography_matrix
-    if (!H) return null
-    const X = H[0][0] * px + H[0][1] * py + H[0][2]
-    const Y = H[1][0] * px + H[1][1] * py + H[1][2]
-    const W = H[2][0] * px + H[2][1] * py + H[2][2]
-    return [X / W, Y / W]
-  }
-
-  function handleFrameClickForVerify(x, y) {
+  async function handleFrameClickForVerify(x, y) {
     if (!selectedConfigId) return
-    const world = projectPixelToWorld(selectedConfigId, x, y)
-    setVerifyPreviewMap(prev => ({ ...prev, [selectedConfigId]: { pixel: [x, y], world } }))
+    const configId = selectedConfigId
+    // Add pending entry immediately so the frame dot appears right away.
+    setVerifyPreviewMap(prev => ({
+      ...prev,
+      [configId]: [...(prev[configId] || []), { pixel: [x, y], mapPt: null }],
+    }))
+    try {
+      const res = await projectPoint(slug, configId, x, y)
+      // Use map_px/map_py (canvas pixels) for the floor plan overlay.
+      const mapPt = (res.map_px != null && res.map_py != null) ? [res.map_px, res.map_py] : null
+      setVerifyPreviewMap(prev => {
+        const pts = (prev[configId] || []).slice()
+        // Resolve the most-recently-added pending point for this pixel.
+        const idx = pts.findLastIndex(p => p.pixel[0] === x && p.pixel[1] === y && p.mapPt === null)
+        if (idx >= 0) pts[idx] = { pixel: [x, y], mapPt }
+        return { ...prev, [configId]: pts }
+      })
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message)
+    }
   }
 
   async function handleVerifyCalibration() {
@@ -622,6 +887,7 @@ export default function StoreConfigEdit() {
       setSaving(false)
     }
   }
+
 
   // ─── Step 8: Drawing zones and obstacles ─────────────────────────────────
 
@@ -644,7 +910,7 @@ export default function StoreConfigEdit() {
 
   async function handlePendingPolygonSubmit(e) {
     e.preventDefault()
-    if (!pendingPolygon || !selectedSection) return
+    if (!pendingPolygon || !draft) return
     if (pendingPolygon.mode === 'zone' && !pendingName.trim()) {
       setError('Zone name is required')
       return
@@ -652,14 +918,14 @@ export default function StoreConfigEdit() {
     setSaving(true)
     try {
       if (pendingPolygon.mode === 'zone') {
-        const z = await createZone(slug, selectedSection.id, {
+        const z = await createZone(slug, {
           name: pendingName.trim(),
           type: pendingZoneType,
           points: pendingPolygon.points,
         })
         setZones(prev => [...prev, z])
       } else {
-        const obs = await createObstacle(slug, selectedSection.id, {
+        const obs = await createObstacle(slug, {
           name: pendingName.trim() || `Obstacle ${obstacles.length + 1}`,
           points: pendingPolygon.points,
         })
@@ -668,7 +934,13 @@ export default function StoreConfigEdit() {
       setPendingPolygon(null)
       setPendingName('')
     } catch (err) {
-      setError(err?.response?.data?.error || err.message)
+      const detail = err?.response?.data?.detail
+      const msg = (typeof detail === 'object' ? detail?.error : detail) || err?.response?.data?.error || err.message
+      if (err?.response?.status === 409 || detail?.code === 'ZONE_OVERLAP') {
+        setError(msg || 'This polygon overlaps with an existing zone. Zones cannot overlap each other.')
+      } else {
+        setError(msg || 'Failed to save polygon. Please try again.')
+      }
     } finally {
       setSaving(false)
     }
@@ -676,7 +948,7 @@ export default function StoreConfigEdit() {
 
   async function handleDeleteZone(zoneId) {
     try {
-      await deleteZone(slug, selectedSection.id, zoneId)
+      await deleteZone(slug, zoneId)
       setZones(prev => prev.filter(z => z.id !== zoneId))
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
@@ -685,7 +957,7 @@ export default function StoreConfigEdit() {
 
   async function handleDeleteObstacle(obsId) {
     try {
-      await deleteObstacle(slug, selectedSection.id, obsId)
+      await deleteObstacle(slug, obsId)
       setObstacles(prev => prev.filter(o => o.id !== obsId))
     } catch (err) {
       setError(err?.response?.data?.error || err.message)
@@ -697,24 +969,22 @@ export default function StoreConfigEdit() {
   async function handleActivate() {
     setSaving(true)
     try {
-      const event = await activateDraft(slug, {
-        countdown_sec: ACTIVATION_COUNTDOWN,
-        label: activationLabel || null,
-      })
+      const event = await activateDraft(slug, { mode: 'immediate' })
       setSyncEvent(event)
-      pollRef.current = setInterval(async () => {
-        const updated = await getSyncEvent(slug, event.id)
-        setSyncEvent(updated)
-        if (updated.status === 'executed') {
-          clearInterval(pollRef.current)
-          navigate(`/store/${slug}/config`)
-        } else if (updated.status === 'failed') {
-          clearInterval(pollRef.current)
-          setError('Activation failed: ' + (updated.error || 'unknown error'))
-        }
-      }, 2000)
+      navigate(`/store/${slug}/config`)
     } catch (err) {
-      setError(err?.response?.data?.error || err.message)
+      const detail = err?.response?.data?.detail
+      const msg = (typeof detail === 'object' ? detail?.error : detail) || err?.response?.data?.error || err.message
+      const status = err?.response?.status
+      if (status === 500) {
+        setError('Activation failed: the server encountered an error processing this configuration. Check that all cameras are calibrated and all required fields are complete, then try again.')
+      } else if (status === 409) {
+        setError(msg || 'A configuration is already being activated. Please wait and try again.')
+      } else if (status === 422) {
+        setError(msg || 'Configuration is incomplete. Please review all steps before activating.')
+      } else {
+        setError(msg || 'Activation failed. Please try again.')
+      }
     } finally {
       setSaving(false)
     }
@@ -727,7 +997,7 @@ export default function StoreConfigEdit() {
   }
 
   const activeCorrespondences = selectedConfigId ? (correspondencesMap[selectedConfigId] || []) : []
-  const verifyPreview = selectedConfigId ? (verifyPreviewMap[selectedConfigId] ?? null) : null
+  const verifyTestPoints = selectedConfigId ? (verifyPreviewMap[selectedConfigId] || []) : []
 
   return (
     <div className="flex h-full">
@@ -745,7 +1015,14 @@ export default function StoreConfigEdit() {
             return (
               <button
                 key={s.n}
-                onClick={() => navigable && setStep(s.n)}
+                onClick={() => {
+                  if (!navigable) return
+                  if ((s.n === 5 || s.n === 7) && cameraConfigs.length > 0) {
+                    setSelectedConfigId(cameraConfigs[0].id)
+                  }
+                  setError(null)
+                  setStep(s.n)
+                }}
                 disabled={!navigable}
                 className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left ${
                   current
@@ -769,22 +1046,6 @@ export default function StoreConfigEdit() {
             )
           })}
         </nav>
-
-        {sections.length > 1 && (
-          <div className="mt-6">
-            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">Section</label>
-            <select
-              value={selectedSection?.id || ''}
-              onChange={e => {
-                const sec = sections.find(s => s.id === e.target.value)
-                if (sec) switchSection(sec)
-              }}
-              className="w-full text-sm border border-gray-200 rounded px-2 py-1.5 bg-white"
-            >
-              {sections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </div>
-        )}
 
         <div className="mt-auto pt-6 space-y-2">
           {mode === 'editing' && (
@@ -822,7 +1083,7 @@ export default function StoreConfigEdit() {
           <div className="space-y-6 max-w-2xl">
             <div>
               <h2 className="text-xl font-semibold mb-1">Upload Floor Plan</h2>
-              <p className="text-sm text-gray-500">Upload a top-down image of {selectedSection?.name || 'this section'}.</p>
+              <p className="text-sm text-gray-500">Upload a top-down image of your store floor.</p>
             </div>
             <label className="flex flex-col items-center justify-center w-full h-48 border-2 border-dashed border-gray-300 rounded-xl cursor-pointer bg-gray-50 hover:bg-gray-100 transition-colors">
               <svg className="w-10 h-10 text-gray-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -841,7 +1102,7 @@ export default function StoreConfigEdit() {
                   <span className="w-5 h-5 bg-green-100 rounded-full flex items-center justify-center text-green-600">✓</span>
                   Floor plan uploaded · {floorPlan.width_px} × {floorPlan.height_px} px
                 </div>
-                <FloorPlanStage floorPlan={floorPlan} />
+                <FloorPlanStage floorPlan={floorPlan} worldBounds={floorPlan?.boundary_polygon || []} />
               </div>
             )}
           </div>
@@ -851,73 +1112,161 @@ export default function StoreConfigEdit() {
         {step === 2 && (
           <div className="space-y-4 max-w-3xl">
             <div>
-              <h2 className="text-xl font-semibold mb-1">Set Scale</h2>
-              <p className="text-sm text-gray-500">
-                Click to place: (1) Origin, (2) Reference point A, (3) Reference point B.
-                Then enter the real-world distance A→B in metres.
-              </p>
+              <h2 className="text-xl font-semibold mb-1">Scale & Boundary</h2>
             </div>
 
-            {floorPlan?.scale_defined && (
-              <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 px-3 py-2 rounded">
-                <span>✓</span>
-                <span>Scale set: {floorPlan.pixels_per_meter?.toFixed(2)} px/m</span>
+            {/* Set Scale card */}
+            <div className="border border-gray-200 rounded-lg p-3 space-y-2 bg-gray-50">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-gray-700">Set Scale</p>
+                {floorPlan?.scale_defined && !drawingWorldBounds && scalePoints.length < 3 && (
+                  <span className="text-xs text-green-600 font-medium">✓ {floorPlan.pixels_per_meter?.toFixed(2)} px/m</span>
+                )}
               </div>
-            )}
-
-            {/* Per-point chips with individual remove buttons */}
-            <div className="flex gap-2 flex-wrap">
-              {[
-                { label: 'Origin (O)', placed: 'text-orange-600 bg-orange-50 border-orange-200' },
-                { label: 'Ref A', placed: 'text-blue-600 bg-blue-50 border-blue-200' },
-                { label: 'Ref B', placed: 'text-blue-600 bg-blue-50 border-blue-200' },
-              ].map((item, i) => (
-                <div key={i} className={`flex items-center gap-1.5 px-2 py-1 rounded border text-xs ${
-                  scalePoints.length > i ? item.placed : 'bg-gray-50 border-gray-200 text-gray-400'
-                }`}>
-                  <span className="font-bold">{i + 1}.</span>
-                  <span>{item.label}</span>
-                  {scalePoints.length > i && (
-                    <>
-                      <span className="text-gray-400">
-                        ({scalePoints[i][0].toFixed(0)}, {scalePoints[i][1].toFixed(0)})
-                      </span>
+              <p className="text-xs text-gray-500">
+                Place Origin, Reference A, and Reference B on the map, then enter the real-world A→B distance.
+              </p>
+              {!settingScale ? (
+                <button
+                  onClick={() => { setSettingScale(true); setDrawingWorldBounds(false); setScalePoints([]); setRealDistance('') }}
+                  className="px-3 py-1.5 rounded border text-sm border-blue-300 text-blue-700 hover:bg-blue-50"
+                >
+                  {floorPlan?.scale_defined ? 'Reset Scale' : 'Set Scale'}
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  {/* Per-point chips */}
+                  <div className="flex gap-2 flex-wrap">
+                    {[
+                      { label: 'Origin (O)', placed: 'text-orange-600 bg-orange-50 border-orange-200' },
+                      { label: 'Ref A', placed: 'text-blue-600 bg-blue-50 border-blue-200' },
+                      { label: 'Ref B', placed: 'text-blue-600 bg-blue-50 border-blue-200' },
+                    ].map((item, i) => (
+                      <div key={i} className={`flex items-center gap-1.5 px-2 py-1 rounded border text-xs ${
+                        scalePoints.length > i ? item.placed : 'bg-gray-50 border-gray-200 text-gray-400'
+                      }`}>
+                        <span className="font-bold">{i + 1}.</span>
+                        <span>{item.label}</span>
+                        {scalePoints.length > i && (
+                          <>
+                            <span className="text-gray-400">
+                              ({scalePoints[i][0].toFixed(0)}, {scalePoints[i][1].toFixed(0)})
+                            </span>
+                            <button
+                              onClick={() => removeScalePoint(i)}
+                              title="Remove this point and all after it"
+                              className="ml-1 text-gray-400 hover:text-red-500 font-bold leading-none"
+                            >✕</button>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {scalePoints.length === 3 && (
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <label className="text-sm text-gray-700">Distance A→B (metres):</label>
+                      <input
+                        type="number" step="0.01" min="0.01"
+                        value={realDistance}
+                        onChange={e => setRealDistance(e.target.value)}
+                        className="w-28 border border-gray-300 rounded px-2 py-1.5 text-sm"
+                        placeholder="e.g. 2.5"
+                      />
                       <button
-                        onClick={() => removeScalePoint(i)}
-                        title="Remove this point and all after it"
-                        className="ml-1 text-gray-400 hover:text-red-500 font-bold leading-none"
-                      >✕</button>
-                    </>
+                        onClick={async () => { await handleSetScale(); setSettingScale(false) }}
+                        disabled={!realDistance || saving}
+                        className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm font-medium disabled:opacity-50"
+                      >
+                        {saving ? 'Saving…' : 'Save Scale'}
+                      </button>
+                      <button
+                        onClick={() => { setSettingScale(false); setScalePoints(floorPlan?.origin_x != null ? [[floorPlan.origin_x, floorPlan.origin_y]] : []) }}
+                        className="text-sm text-gray-500 hover:text-gray-700"
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   )}
                 </div>
-              ))}
+              )}
             </div>
 
             <FloorPlanStage
               floorPlan={floorPlan}
               scalePoints={scalePoints}
-              onCanvasClick={scalePoints.length < 3 ? handleScaleClick : null}
+              worldBounds={drawingWorldBounds ? worldBoundsPoints : (floorPlan?.boundary_polygon || worldBoundsPoints)}
+              onCanvasClick={
+                drawingWorldBounds
+                  ? handleWorldBoundsClick
+                  : (settingScale && scalePoints.length < 3 ? handleScaleClick : null)
+              }
             />
 
-            {scalePoints.length === 3 && (
-              <div className="flex items-center gap-3 flex-wrap">
-                <label className="text-sm text-gray-700">Distance A→B (metres):</label>
-                <input
-                  type="number" step="0.01" min="0.01"
-                  value={realDistance}
-                  onChange={e => setRealDistance(e.target.value)}
-                  className="w-28 border border-gray-300 rounded px-2 py-1.5 text-sm"
-                  placeholder="e.g. 2.5"
-                />
-                <button
-                  onClick={handleSetScale}
-                  disabled={!realDistance || saving}
-                  className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm font-medium disabled:opacity-50"
-                >
-                  {saving ? 'Saving…' : 'Set Scale'}
-                </button>
+            {/* Walkable area boundary drawing */}
+            <div className="border border-gray-200 rounded-lg p-3 space-y-2 bg-gray-50">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-gray-700">Walkable Area Boundary</p>
+                {(worldBoundsPoints.length > 0 || floorPlan?.boundary_polygon?.length >= 3) && !drawingWorldBounds && (
+                  <button
+                    onClick={handleClearWorldBounds}
+                    className="text-xs text-red-400 hover:text-red-600"
+                  >
+                    Clear boundary
+                  </button>
+                )}
               </div>
-            )}
+              <p className="text-xs text-gray-500">
+                Draw a polygon defining the walkable floor area. Tracked positions projected outside this boundary will be clamped to its edge.
+              </p>
+              {!drawingWorldBounds ? (
+                <button
+                  onClick={() => { setDrawingWorldBounds(true); setWorldBoundsPoints([]) }}
+                  className="px-3 py-1.5 rounded border text-sm border-orange-300 text-orange-700 hover:bg-orange-50"
+                >
+                  {(floorPlan?.boundary_polygon?.length >= 3 || worldBoundsPoints.length >= 3) ? 'Redraw Boundary' : 'Draw Boundary'}
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="text-xs text-gray-500">{worldBoundsPoints.length} point{worldBoundsPoints.length !== 1 ? 's' : ''} placed — click the floor plan to add more</span>
+                    {worldBoundsPoints.length >= 3 && (
+                      <button
+                        onClick={handleCloseWorldBounds}
+                        disabled={saving}
+                        className="px-3 py-1.5 rounded border text-sm bg-orange-500 text-white border-orange-500 hover:bg-orange-600 disabled:opacity-50"
+                      >
+                        {saving ? 'Saving…' : `Close & Save (${worldBoundsPoints.length} pts)`}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { setDrawingWorldBounds(false); setWorldBoundsPoints(floorPlan?.boundary_polygon || []) }}
+                      className="text-sm text-gray-500 hover:text-gray-700"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {worldBoundsPoints.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {worldBoundsPoints.map(([x, y], i) => (
+                        <span key={i} className="flex items-center gap-1 px-2 py-0.5 rounded bg-orange-50 border border-orange-200 text-xs text-orange-700">
+                          <span>{i + 1}. ({Math.round(x)}, {Math.round(y)})</span>
+                          <button
+                            onClick={() => setWorldBoundsPoints(prev => prev.filter((_, j) => j !== i))}
+                            className="ml-0.5 text-orange-400 hover:text-red-500 font-bold leading-none"
+                            title="Remove this point"
+                          >✕</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {!drawingWorldBounds && (worldBoundsPoints.length >= 3 || floorPlan?.boundary_polygon?.length >= 3) && (
+                <p className="text-xs text-orange-600 font-medium">
+                  ✓ Boundary set ({(floorPlan?.boundary_polygon || worldBoundsPoints).length} vertices)
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -935,6 +1284,7 @@ export default function StoreConfigEdit() {
               floorPlan={floorPlan}
               cameraConfigs={cameraConfigs}
               pendingMarker={pendingCameraPlacement}
+              worldBounds={floorPlan?.boundary_polygon || []}
               onCanvasClick={!pendingCameraPlacement ? handleMapClickForCamera : null}
             />
 
@@ -959,6 +1309,60 @@ export default function StoreConfigEdit() {
                   step="0.1" min="0.1"
                   className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
                 />
+                <input
+                  type="text"
+                  placeholder="Stream URL (optional, e.g. rtsp://host:8554/cam1)"
+                  value={newCameraStreamUrl}
+                  onChange={e => setNewCameraStreamUrl(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm font-mono"
+                />
+                <p className="text-xs font-medium text-gray-500 pt-1">Lens & field of view (for 3D calibration)</p>
+                <select
+                  value={newCameraLens}
+                  onChange={e => setNewCameraLens(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                >
+                  <option value="">Lens focal length (optional)…</option>
+                  {[2.8, 4.0, 6.0, 8.0, 12.0, 16.0].map(mm => (
+                    <option key={mm} value={mm}>{mm} mm</option>
+                  ))}
+                </select>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    placeholder="Horizontal FOV° (e.g. 97)"
+                    value={newCameraHFov}
+                    onChange={e => setNewCameraHFov(e.target.value)}
+                    step="0.1" min="1" max="180"
+                    className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Vertical FOV° (e.g. 67)"
+                    value={newCameraVFov}
+                    onChange={e => setNewCameraVFov(e.target.value)}
+                    step="0.1" min="1" max="180"
+                    className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    placeholder="Stream width px (e.g. 3072)"
+                    value={newCameraStreamWidth}
+                    onChange={e => setNewCameraStreamWidth(e.target.value)}
+                    step="1" min="1"
+                    className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Stream height px (e.g. 2048)"
+                    value={newCameraStreamHeight}
+                    onChange={e => setNewCameraStreamHeight(e.target.value)}
+                    step="1" min="1"
+                    className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                  />
+                </div>
                 <div className="flex gap-2">
                   <button
                     type="submit"
@@ -982,20 +1386,72 @@ export default function StoreConfigEdit() {
               <div className="space-y-1 max-w-lg">
                 <p className="text-xs font-medium text-gray-500 uppercase mb-2">Placed Cameras</p>
                 {cameraConfigs.map(cc => (
-                  <div key={cc.id}
-                    className="flex items-center justify-between bg-gray-50 border border-gray-100 rounded px-3 py-2 text-sm"
-                  >
-                    <span className="font-medium">{cc.physical_camera_name}</span>
-                    <span className="text-xs text-gray-400 mx-2">
-                      ({Math.round(cc.position_x)}, {Math.round(cc.position_y)})
-                      {cc.height_meters != null ? ` · ${cc.height_meters}m` : ''}
-                    </span>
-                    <button
-                      onClick={() => handleDeleteCamera(cc)}
-                      className="text-xs text-red-400 hover:text-red-600 flex-shrink-0"
-                    >
-                      Delete
-                    </button>
+                  <div key={cc.id} className="bg-gray-50 border border-gray-100 rounded text-sm">
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <span className="font-medium">{cc.physical_camera_name}</span>
+                      <span className="text-xs text-gray-400 mx-2 truncate max-w-xs">
+                        ({Math.round(cc.position_x)}, {Math.round(cc.position_y)})
+                        {cc.height_meters != null ? ` · ${cc.height_meters}m` : ''}
+                        {cc.stream_url ? ` · ${cc.stream_url}` : ''}
+                      </span>
+                      <div className="flex gap-2 flex-shrink-0">
+                        <button
+                          onClick={() => {
+                            if (editingConfigId === cc.id) { setEditingConfigId(null); return }
+                            setEditingConfigId(cc.id)
+                            setEditCameraForm({
+                              height_meters: cc.height_meters ?? '',
+                              stream_url: cc.stream_url ?? '',
+                            })
+                          }}
+                          className="text-xs text-blue-500 hover:text-blue-700"
+                        >
+                          {editingConfigId === cc.id ? 'Cancel' : 'Edit'}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteCamera(cc)}
+                          className="text-xs text-red-400 hover:text-red-600"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                    {editingConfigId === cc.id && (
+                      <form
+                        onSubmit={handleUpdateCameraConfig}
+                        className="border-t border-gray-200 px-3 py-2 space-y-2"
+                      >
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <div className="flex items-center gap-1.5">
+                            <label className="text-xs text-gray-500">Height (m):</label>
+                            <input
+                              type="number" step="0.1" min="0.1"
+                              value={editCameraForm.height_meters}
+                              onChange={e => setEditCameraForm(f => ({ ...f, height_meters: e.target.value }))}
+                              className="w-20 border border-gray-300 rounded px-2 py-1 text-xs"
+                              placeholder="e.g. 3.5"
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            disabled={saving}
+                            className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium disabled:opacity-50"
+                          >
+                            {saving ? 'Saving…' : 'Save'}
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <label className="text-xs text-gray-500 flex-shrink-0">Stream URL:</label>
+                          <input
+                            type="text"
+                            value={editCameraForm.stream_url}
+                            onChange={e => setEditCameraForm(f => ({ ...f, stream_url: e.target.value }))}
+                            className="flex-1 border border-gray-300 rounded px-2 py-1 text-xs font-mono"
+                            placeholder="rtsp://host:8554/cam1"
+                          />
+                        </div>
+                      </form>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1076,7 +1532,7 @@ export default function StoreConfigEdit() {
             <div>
               <h2 className="text-xl font-semibold mb-1">Point Correspondences</h2>
               <p className="text-sm text-gray-500">
-                For each camera: click a point on its frame, then click the matching spot on the floor plan. Repeat ≥ 4 times.
+                For each camera: click a point on its frame, then click the matching spot on the floor plan. Repeat ≥ 8 times, spread across the full frame.
                 {pendingPixelPt && (
                   <span className="ml-2 text-blue-600 font-medium">→ Now click the matching location on the floor plan</span>
                 )}
@@ -1112,56 +1568,64 @@ export default function StoreConfigEdit() {
             )}
 
             {selectedConfig && (
-              <div className="flex gap-4 items-start flex-wrap">
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-gray-500 mb-1 font-medium">
-                    Camera Frame — click a point
-                    {pendingPixelPt && <span className="text-gray-400"> (waiting for floor plan click)</span>}
-                  </p>
-                  {selectedConfig.frame_url ? (
-                    <FrameStage
-                      frameUrl={selectedConfig.frame_url}
-                      width={380} height={280}
-                      points={activeCorrespondences.map(c => c.pixel)}
-                      onCanvasClick={!pendingPixelPt ? handleFrameClickForCorrespondence : null}
+              <div className="flex items-start">
+                {/* Canvases — left column */}
+                <div className="flex-1 min-w-0 space-y-4">
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1 font-medium">
+                      Camera Frame — click a point
+                      {pendingPixelPt && <span className="text-blue-600 font-medium"> → now click the matching spot on the floor plan below</span>}
+                    </p>
+                    {selectedConfig.frame_url ? (
+                      <FrameStage
+                        frameUrl={selectedConfig.frame_url}
+                        width={900} height={480}
+                        points={[
+                          ...activeCorrespondences.map(c => c.pixel),
+                          ...(pendingPixelPt ? [pendingPixelPt] : []),
+                        ]}
+                        pendingCount={pendingPixelPt ? 1 : 0}
+                        onCanvasClick={!pendingPixelPt ? handleFrameClickForCorrespondence : null}
+                      />
+                    ) : (
+                      <div className="flex items-center justify-center h-40 bg-gray-100 rounded text-sm text-gray-400">
+                        No frame uploaded — go back to Step 4
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1 font-medium">Floor Plan — click matching point</p>
+                    <FloorPlanStage
+                      floorPlan={floorPlan}
+                      cameraConfigs={cameraConfigs}
+                      activeConfigId={selectedConfigId}
+                      correspondencePoints={activeCorrespondences.map(c => c.world)}
+                      worldBounds={floorPlan?.boundary_polygon || []}
+                      onCanvasClick={pendingPixelPt ? handleMapClickForCorrespondence : null}
+                      showGrid={true}
+                      width={1400} height={2400}
                     />
-                  ) : (
-                    <div className="flex items-center justify-center h-40 bg-gray-100 rounded text-sm text-gray-400">
-                      No frame uploaded — go back to Step 4
-                    </div>
-                  )}
+                  </div>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-gray-500 mb-1 font-medium">Floor Plan — click matching point</p>
-                  <FloorPlanStage
-                    floorPlan={floorPlan}
-                    cameraConfigs={cameraConfigs}
-                    activeConfigId={selectedConfigId}
-                    correspondencePoints={activeCorrespondences.map(c => c.world)}
-                    onCanvasClick={pendingPixelPt ? handleMapClickForCorrespondence : null}
-                    width={380} height={280}
-                  />
-                </div>
-              </div>
-            )}
 
-            {activeCorrespondences.length > 0 && (
-              <div className="bg-gray-50 rounded p-3 max-w-2xl">
-                <p className="text-xs font-medium text-gray-600 mb-2">{activeCorrespondences.length} pair(s):</p>
-                <div className="space-y-1 max-h-32 overflow-y-auto">
-                  {activeCorrespondences.map((c, i) => (
-                    <div key={i} className="flex items-center justify-between text-xs text-gray-600">
-                      <span>
-                        #{i + 1}: pixel ({c.pixel[0].toFixed(0)}, {c.pixel[1].toFixed(0)})
-                        → world ({c.world[0].toFixed(1)}, {c.world[1].toFixed(1)})
-                      </span>
-                      <button
-                        onClick={() => removeCorrespondence(selectedConfigId, i)}
-                        className="text-red-400 hover:text-red-600 ml-2"
-                      >✕</button>
+                {/* Pairs list — right column */}
+                {activeCorrespondences.length > 0 && (
+                  <div className="w-96 flex-shrink-0 bg-gray-50 rounded p-4 -ml-32 mt-16">
+                    <p className="text-sm font-medium text-gray-600 mb-3">{activeCorrespondences.length} pair(s):</p>
+                    <div className="space-y-0.5 max-h-[680px] overflow-y-auto">
+                      {activeCorrespondences.map((c, i) => (
+                        <div key={i} className="flex items-center justify-between gap-2 text-sm text-gray-600 py-1.5 border-b border-gray-100 last:border-0">
+                          <span className="font-medium text-gray-400 w-5 flex-shrink-0">#{i + 1}</span>
+                          <span className="flex-1 font-mono">({c.pixel[0].toFixed(0)}, {c.pixel[1].toFixed(0)}) → ({c.world[0].toFixed(1)}, {c.world[1].toFixed(1)})</span>
+                          <button
+                            onClick={() => removeCorrespondence(selectedConfigId, i)}
+                            className="text-red-400 hover:text-red-600 flex-shrink-0"
+                          >✕</button>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1171,8 +1635,8 @@ export default function StoreConfigEdit() {
         {step === 6 && (
           <div className="space-y-4 max-w-xl">
             <div>
-              <h2 className="text-xl font-semibold mb-1">Compute Homography</h2>
-              <p className="text-sm text-gray-500">Compute the pixel-to-world mapping for each camera.</p>
+              <h2 className="text-xl font-semibold mb-1">Compute Calibration</h2>
+              <p className="text-sm text-gray-500">Fit a Thin-Plate Spline mapping for each camera. Need ≥ 8 well-spread correspondence pairs.</p>
             </div>
 
             {cameraConfigs.length === 0 && (
@@ -1192,34 +1656,26 @@ export default function StoreConfigEdit() {
                     }`}>{cc.status}</span>
                   </div>
 
-                  {alreadyDone && !calib && (
-                    <p className="text-sm text-green-700">✓ Already calibrated — can proceed to Step 7.</p>
-                  )}
-
-                  {!alreadyDone && (
-                    <button
-                      onClick={() => handleComputeHomographyFor(cc.id)}
-                      disabled={corr.length < 4 || saving}
-                      className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm disabled:opacity-50"
-                    >
-                      {saving ? 'Computing…' : `Compute (${corr.length} pairs)`}
-                    </button>
-                  )}
+                  <button
+                    onClick={() => handleComputeCalibrationFor(cc.id)}
+                    disabled={corr.length < 8 || saving}
+                    className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm disabled:opacity-50"
+                  >
+                    {saving ? 'Computing…' : alreadyDone ? `Recompute (${corr.length} pairs)` : `Compute (${corr.length} pairs)`}
+                  </button>
 
                   {calib && (
                     <div className="grid grid-cols-2 gap-1.5 text-xs text-gray-600 bg-gray-50 rounded p-3">
-                      <span>RMS Error</span>
-                      <span className={`font-mono font-medium ${
-                        (calib.rms_reprojection_error || 0) < 5 ? 'text-green-600' : 'text-yellow-600'
-                      }`}>{calib.rms_reprojection_error?.toFixed(3)} px</span>
-                      <span>Max Error</span>
-                      <span className="font-mono">{calib.max_reprojection_error?.toFixed(3)} px</span>
                       <span>Coverage</span>
-                      <span className="font-mono">{((calib.coverage_score || 0) * 100).toFixed(1)}%</span>
-                      <span>Condition #</span>
-                      <span className={`font-mono ${
-                        (calib.condition_number || 0) < 1000 ? 'text-green-600' : 'text-red-600'
-                      }`}>{calib.condition_number?.toFixed(1)}</span>
+                      <span className={`font-mono font-medium ${
+                        calib.quality === 'excellent' ? 'text-green-600' : 'text-yellow-600'
+                      }`}>{((calib.coverage_score || 0) * 100).toFixed(1)}%</span>
+                      <span>Quality</span>
+                      <span className={`font-mono font-medium ${
+                        calib.quality === 'excellent' ? 'text-green-600' : 'text-yellow-600'
+                      }`}>{calib.quality}</span>
+                      <span>Points</span>
+                      <span className="font-mono">{calib.point_count}</span>
                     </div>
                   )}
                 </div>
@@ -1230,7 +1686,7 @@ export default function StoreConfigEdit() {
 
         {/* ─ Step 7 ──────────────────────────────────────────────────────── */}
         {step === 7 && (
-          <div className="space-y-4">
+          <div className="space-y-4 max-w-5xl">
             <div>
               <h2 className="text-xl font-semibold mb-1">Verify Calibration</h2>
               <p className="text-sm text-gray-500">
@@ -1259,41 +1715,42 @@ export default function StoreConfigEdit() {
 
             {selectedConfig && (
               <>
-                <div className="flex gap-4 items-start flex-wrap">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs text-gray-500 mb-1 font-medium">Camera Frame — click a point to project</p>
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1 font-medium">Camera Frame — click any point to project it onto the floor plan</p>
                     <FrameStage
                       frameUrl={selectedConfig.frame_url}
-                      width={380} height={280}
-                      points={verifyPreview?.pixel ? [verifyPreview.pixel] : []}
+                      width={900} height={480}
+                      points={verifyTestPoints.map(p => p.pixel)}
                       onCanvasClick={handleFrameClickForVerify}
                     />
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs text-gray-500 mb-1 font-medium">Floor Plan — projected location</p>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1 font-medium">Floor Plan — projected locations</p>
                     <FloorPlanStage
                       floorPlan={floorPlan}
                       cameraConfigs={cameraConfigs}
                       activeConfigId={selectedConfigId}
-                      correspondencePoints={verifyPreview?.world ? [verifyPreview.world] : []}
-                      width={380} height={280}
+                      correspondencePoints={verifyTestPoints.filter(p => p.mapPt).map(p => p.mapPt)}
+                      worldBounds={floorPlan?.boundary_polygon || []}
+                      width={1400} height={2400}
                     />
                   </div>
                 </div>
 
-                {verifyPreview?.world && (
-                  <p className="text-sm text-gray-600">
-                    Projected: ({verifyPreview.world[0].toFixed(2)}, {verifyPreview.world[1].toFixed(2)}) m
-                  </p>
+                {verifyTestPoints.length > 0 && (
+                  <div className="flex gap-3 items-center text-sm text-gray-500">
+                    <span>{verifyTestPoints.filter(p => p.mapPt).length} / {verifyTestPoints.length} projected</span>
+                    <button
+                      onClick={() => setVerifyPreviewMap(prev => ({ ...prev, [selectedConfigId]: [] }))}
+                      className="text-xs text-gray-400 hover:text-gray-600 underline"
+                    >
+                      Clear test points
+                    </button>
+                  </div>
                 )}
 
-                {!calibResultsMap[selectedConfigId] && ['calibrated', 'verified'].includes(selectedConfig.status) && (
-                  <p className="text-sm text-amber-600 bg-amber-50 px-3 py-2 rounded">
-                    Calibration loaded from server — live projection preview is unavailable. You can still verify.
-                  </p>
-                )}
-
-                <div className="flex gap-3 items-center">
+                <div className="flex gap-3 items-center flex-wrap">
                   <button
                     onClick={handleVerifyCalibration}
                     disabled={saving || selectedConfig.status === 'verified'}
@@ -1304,6 +1761,7 @@ export default function StoreConfigEdit() {
                   {selectedConfig.status === 'verified' && cameraConfigs.some(cc => cc.status !== 'verified') && (
                     <p className="text-sm text-gray-500">Switch to the next camera above to verify it.</p>
                   )}
+                  <p className="text-xs text-gray-400">To improve calibration, go back to step 5 and add more correspondence points.</p>
                 </div>
               </>
             )}
@@ -1316,7 +1774,7 @@ export default function StoreConfigEdit() {
             <div>
               <h2 className="text-xl font-semibold mb-1">Draw Zones & Obstacles</h2>
               <p className="text-sm text-gray-500">
-                Click to place vertices. Click near the first vertex to close the polygon, then name it.
+                Click to place vertices (minimum 3). Use "Close &amp; Save" to finish the polygon, or click near the first vertex to close it.
               </p>
             </div>
 
@@ -1333,6 +1791,19 @@ export default function StoreConfigEdit() {
                   Draw {dm}
                 </button>
               ))}
+              {inProgressPoints.length >= 3 && (
+                <button
+                  onClick={() => {
+                    setPendingPolygon({ points: [...inProgressPoints], mode: drawMode })
+                    setPendingName('')
+                    setPendingZoneType('general')
+                    setInProgressPoints([])
+                  }}
+                  className="px-3 py-1.5 rounded border text-sm bg-green-600 text-white border-green-600 hover:bg-green-700"
+                >
+                  Close & Save ({inProgressPoints.length} pts)
+                </button>
+              )}
               {inProgressPoints.length > 0 && (
                 <button onClick={() => setInProgressPoints([])}
                   className="text-sm text-gray-500 hover:text-gray-700">
@@ -1357,8 +1828,9 @@ export default function StoreConfigEdit() {
               zones={zones}
               obstacles={obstacles}
               cameraConfigs={cameraConfigs}
-              overlayPoints={inProgressPoints}
-              overlayMode={drawMode}
+              overlayPoints={pendingPolygon ? pendingPolygon.points : inProgressPoints}
+              overlayMode={pendingPolygon ? pendingPolygon.mode : drawMode}
+              worldBounds={floorPlan?.boundary_polygon || []}
               onCanvasClick={!pendingPolygon ? handleMapClickForDrawing : null}
             />
 
@@ -1464,16 +1936,12 @@ export default function StoreConfigEdit() {
               <p className="text-sm text-gray-500">
                 {mode === 'editing'
                   ? 'Review your changes. Save and exit to keep as draft, or activate to deploy immediately.'
-                  : `Review the summary, then activate. The new configuration will go live after a ${ACTIVATION_COUNTDOWN}-second sync countdown.`
+                  : 'Review the summary, then activate. The new configuration will go live immediately.'
                 }
               </p>
             </div>
 
             <div className="bg-gray-50 rounded-lg border border-gray-200 p-4 space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-600">Sections</span>
-                <span className="font-medium">{sections.length}</span>
-              </div>
               <div className="flex justify-between">
                 <span className="text-gray-600">Zones</span>
                 <span className="font-medium">{zones.length}</span>
@@ -1497,67 +1965,29 @@ export default function StoreConfigEdit() {
                   <span className="font-medium">{floorPlan.pixels_per_meter?.toFixed(2)} px/m</span>
                 </div>
               )}
-              <div className="flex justify-between border-t border-gray-200 pt-2 mt-2">
-                <span className="text-gray-600">Sync countdown</span>
-                <span className="font-medium">{ACTIVATION_COUNTDOWN}s</span>
-              </div>
             </div>
 
             {!syncEvent ? (
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm text-gray-700 mb-1">Version label (optional)</label>
-                  <input
-                    value={activationLabel}
-                    onChange={e => setActivationLabel(e.target.value)}
-                    placeholder="e.g. Initial setup"
-                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex gap-3 flex-wrap">
-                  {mode === 'editing' && (
-                    <button
-                      onClick={() => navigate(`/store/${slug}/config`)}
-                      className="px-6 py-2.5 bg-gray-200 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-300"
-                    >
-                      Save Draft &amp; Exit
-                    </button>
-                  )}
-                  <button
-                    onClick={handleActivate}
-                    disabled={saving}
-                    className="px-6 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 disabled:opacity-50"
-                  >
-                    {saving ? 'Scheduling…' : `Activate (${ACTIVATION_COUNTDOWN}s countdown)`}
-                  </button>
-                </div>
+              <div className="flex gap-3 flex-wrap">
+                <button
+                  onClick={() => navigate(`/store/${slug}/config`)}
+                  className="px-6 py-2.5 bg-gray-200 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-300"
+                >
+                  Save Draft &amp; Exit
+                </button>
+                <button
+                  onClick={handleActivate}
+                  disabled={saving}
+                  className="px-6 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 disabled:opacity-50"
+                >
+                  {saving ? 'Activating…' : 'Activate Now'}
+                </button>
               </div>
             ) : (
-              <div>
-                {syncEvent.status === 'pending' && (
-                  <div className="text-center py-6">
-                    <p className="text-5xl font-bold text-blue-600 tabular-nums">
-                      {Math.max(0, Math.round(syncEvent.remaining_seconds ?? 0))}s
-                    </p>
-                    <p className="text-sm text-gray-500 mt-2">Configuration activating…</p>
-                    <div className="mt-4 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-blue-500 rounded-full transition-all"
-                        style={{
-                          width: `${Math.min(100, 100 - ((syncEvent.remaining_seconds ?? 0) / ACTIVATION_COUNTDOWN) * 100)}%`,
-                          transitionDuration: '2000ms',
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
-                {syncEvent.status === 'executed' && (
-                  <div className="text-center py-6">
-                    <p className="text-3xl">🎉</p>
-                    <p className="text-lg font-semibold text-green-700 mt-2">Configuration activated!</p>
-                    <p className="text-sm text-gray-500 mt-1">Redirecting…</p>
-                  </div>
-                )}
+              <div className="text-center py-6">
+                <p className="text-3xl">🎉</p>
+                <p className="text-lg font-semibold text-green-700 mt-2">Configuration activated!</p>
+                <p className="text-sm text-gray-500 mt-1">Redirecting…</p>
               </div>
             )}
           </div>
@@ -1566,21 +1996,29 @@ export default function StoreConfigEdit() {
         {/* ── Navigation ────────────────────────────────────────────────── */}
         <div className="flex items-center justify-between mt-8 pt-4 border-t border-gray-100">
           <button
-            onClick={() => setStep(s => Math.max(1, s - 1))}
+            onClick={() => { setError(null); setStep(s => Math.max(1, s - 1)) }}
             disabled={step === 1}
             className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 disabled:opacity-40"
           >
             ← Back
           </button>
-          {step < 9 && (
+          <div className="flex items-center gap-3">
             <button
-              onClick={() => setStep(s => s + 1)}
-              disabled={mode === 'onboarding' && !isStepComplete(step)}
-              className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+              onClick={() => navigate(`/store/${slug}/config`)}
+              className="px-4 py-2 text-sm border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50"
             >
-              Continue →
+              Save &amp; Exit
             </button>
-          )}
+            {step < 9 && (
+              <button
+                onClick={() => { setError(null); setStep(s => s + 1) }}
+                disabled={mode === 'onboarding' && !isStepComplete(step)}
+                className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+              >
+                Continue →
+              </button>
+            )}
+          </div>
         </div>
       </main>
     </div>

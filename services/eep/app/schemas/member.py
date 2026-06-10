@@ -13,17 +13,11 @@ VALID_PERMISSIONS = {
 class InviteMemberRequest(BaseModel):
     email: EmailStr
     role: str
-    access_scope: str = "full_store"
-    section_ids: list[uuid.UUID] = []
     permissions: dict[str, bool] = {}
 
     def validate_role(self) -> None:
         if self.role not in ("manager", "viewer"):
             raise ValueError("Role must be manager or viewer")
-
-    def validate_scope(self) -> None:
-        if self.access_scope not in ("full_store", "section_scoped"):
-            raise ValueError("access_scope must be full_store or section_scoped")
 
 
 class InviteResponse(BaseModel):
@@ -49,7 +43,6 @@ class MemberListItem(BaseModel):
     name: str
     email: str
     role: str
-    access_scope: str
     permissions: list[str]
     last_active_at: datetime | None = None
     created_at: datetime
@@ -59,7 +52,6 @@ class InvitationListItem(BaseModel):
     id: uuid.UUID
     invited_email: str
     role: str
-    access_scope: str
     expires_at: datetime
     accepted_at: datetime | None
     created_at: datetime
@@ -67,6 +59,4 @@ class InvitationListItem(BaseModel):
 
 class PatchMemberRequest(BaseModel):
     role: str | None = None
-    access_scope: str | None = None
-    section_ids: list[uuid.UUID] | None = None
     permissions: dict[str, bool] | None = None

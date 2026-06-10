@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yolo-service
+  namespace: retailvision
+  labels:
+    app: yolo-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: yolo-service
+  template:
+    metadata:
+      labels:
+        app: yolo-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9400"
+    spec:
+      containers:
+        - name: yolo-service
+          image: ghcr.io/your-org/retailvision/yolo:1.0.0
+          ports:
+            - name: metrics
+              containerPort: 9400
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: "3Gi"
+              cpu: "2"
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+          env:
+            - name: YOLO_MODEL_VARIANT
+              value: "n"
+            - name: YOLO_MAX_BATCH_SIZE
+              value: "32"
+            - name: YOLO_BATCH_TIMEOUT_MS
+              value: "20"
+          volumeMounts:
+            - name: ipc-sockets
+              mountPath: /tmp/sockets
+          livenessProbe:
+            exec:
+              command: ["grpc_health_probe",
+                        "-addr=unix:///tmp/sockets/yolo_health.sock"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 3
+      volumes:
+        - name: ipc-sockets
+          hostPath:
+            path: /dev/shm/sockets
+            type: DirectoryOrCreate

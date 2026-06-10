@@ -12,7 +12,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Explicit copies instead of COPY . . to avoid placing alembic/ at /app/alembic/,
+# which would shadow the installed alembic pip package on sys.path and cause
+# ModuleNotFoundError: No module named 'alembic.config' at runtime.
+COPY app/ ./app/
+COPY alembic.ini .
+# Migrations live at db_migrations/ — matches script_location in alembic.ini.
+COPY alembic/ ./db_migrations/
+COPY schema.sql .
+COPY proto/ ./proto/
 
 EXPOSE 8000
 

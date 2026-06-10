@@ -1,0 +1,78 @@
+global:
+  scrape_interval: 15s
+
+rule_files:
+  - alert_rules.yml
+  - recording_rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: eep
+    static_configs:
+      - targets: ["eep:8000"]
+
+  - job_name: iep1
+    static_configs:
+      - targets: ["iep1-daemon:9200"]
+
+  - job_name: iep2
+    static_configs:
+      - targets: ["iep2_vision:9201"]
+
+  - job_name: iep3
+    static_configs:
+      - targets: ["iep3_reconciliation:9300"]
+
+  - job_name: iep4
+    static_configs:
+      - targets: ["iep4_alerts:8004"]
+
+  # IEP5 is a one-shot Job (exits in seconds) — it cannot be scraped directly.
+  # It PUSHES metrics to the Pushgateway at job end; we scrape the gateway with
+  # honor_labels so the pushed job="iep5" + store_id/shift_date labels survive.
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
+
+  - job_name: iep6
+    static_configs:
+      - targets: ["iep6_agent:8006"]
+
+  - job_name: live_bridge
+    static_configs:
+      - targets: ["live_bridge:8010"]
+
+  - job_name: detector
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["yolo-service:9400"]
+
+  - job_name: reid
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["reid-service:9401"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis_exporter:9121"]
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres_exporter:9187"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["node_exporter:9100"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]

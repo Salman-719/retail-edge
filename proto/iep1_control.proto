@@ -1,0 +1,48 @@
+// iep1_control.proto
+// Version: 1.0.0
+// gRPC control interface for the IEP1 ingestion daemon.
+// Edge Agent is the only caller; service runs on unix socket (never TCP).
+syntax = "proto3";
+
+package retailvision.iep1.v1;
+
+service Iep1Control {
+  rpc AddCamera    (CameraConfig)        returns (AddCameraResponse);
+  rpc RemoveCamera (RemoveCameraRequest) returns (RemoveCameraResponse);
+  rpc GetStatus    (Empty)               returns (Iep1StatusResponse);
+}
+
+message CameraConfig {
+  string camera_id      = 1;
+  string rtsp_url       = 2;
+  float  target_fps     = 3;
+  float  window_seconds = 4;
+  string store_id       = 5;
+  int32  batch_frames   = 6;
+}
+
+message AddCameraResponse {
+  bool   success = 1;
+  string error   = 2;
+}
+
+message RemoveCameraRequest {
+  string camera_id = 1;
+}
+
+message RemoveCameraResponse {
+  bool success = 1;
+}
+
+message Iep1StatusResponse {
+  repeated CameraStatus cameras = 1;
+}
+
+message CameraStatus {
+  string camera_id      = 1;
+  string status         = 2;
+  int64  last_frame_ts  = 3;
+  int64  frames_dropped = 4;
+}
+
+message Empty {}

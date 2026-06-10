@@ -1,0 +1,580 @@
+name: Promotion Ladder
+
+# Runs on every push to main (production branch).
+# Pull requests only run Jobs 1-2 (test + build) — no deployment.
+on:
+  push:
+    branches: [main, production]
+  workflow_dispatch:
+    inputs:
+      model_name:
+        description: "MLflow registered model name"
+        required: false
+        default: "retailvision"
+      dry_run:
+        description: "Set to 'true' to skip subprocess calls"
+        required: false
+        default: "false"
+
+# ── Shared env — CI-safe short windows; override in GitHub Environment "production" ──
+env:
+  REGISTRY:               ghcr.io
+  IMAGE_PREFIX:           ghcr.io/${{ github.repository_owner }}/retailvision
+  MODEL_NAME:             ${{ github.event.inputs.model_name || 'retailvision' }}
+  DRY_RUN:                ${{ github.event.inputs.dry_run || 'false' }}
+
+  # Window durations — keep short for CI; override in repo/environment settings.
+  SHADOW_WINDOW_SECONDS:  "30"
+  CANARY_WINDOW_SECONDS:  "60"
+  CANARY_PERCENTAGE:      "10"
+
+  # Evaluation thresholds — all env-var driven, nothing hardcoded in scripts.
+  CANARY_MAX_ERROR_RATE:  "0.05"
+  CANARY_MAX_LATENCY_P95: "0.5"
+  CANARY_MIN_CONFIDENCE:  "0.40"
+  CANARY_LOOKBACK_MINUTES: "5"
+
+  SHADOW_CONF_DELTA_MAX:       "0.10"
+  SHADOW_SCORE_DELTA_MAX:      "0.10"
+  SHADOW_ERROR_RATE_MAX:       "0.20"
+  SHADOW_ROW_COUNT_RATIO_MIN:  "0.10"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 1 — test
+# Gate: all unit tests, mlops tests, and Prometheus config validation must pass.
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  test:
+    name: "Job 1 · Test"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio requests pydantic pydantic-settings
+
+      - name: Run EEP unit tests (shadow + canary)
+        run: |
+          pytest tests/unit/eep/ -v --tb=short
+
+      - name: Run mlops unit tests (promotion ladder)
+        run: |
+          pytest tests/unit/mlops/ -v --tb=short
+
+      - name: Install promtool
+        run: |
+          PROM_VERSION="2.51.0"
+          curl -sSL \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin \
+              prometheus-${PROM_VERSION}.linux-amd64/promtool
+          promtool --version
+
+      - name: Validate Prometheus configs
+        run: |
+          promtool check config monitoring/prometheus.yml
+          promtool check config monitoring/prometheus-cloud.yml
+          promtool check config monitoring/prometheus-edge.yml
+          promtool check rules  monitoring/alert_rules.yml
+          promtool check rules  monitoring/recording_rules.yml
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 2 — build
+# Gate: Job 1 must pass.
+# Builds all service images, tags with git SHA, pushes to GHCR.
+# ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: "Job 2 · Build & Push"
+    runs-on: ubuntu-latest
+    needs: test
+    # Skip build on PRs — we only push images on merge to main/production.
+    if: github.event_name != 'pull_request'
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Set image tag
+        id: meta
+        run: echo "tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build each service image. GPU-only services (yolo, reid) are built but
+      # the TRT engine is not included — the engine is loaded at runtime from a
+      # mounted volume or pulled from MinIO by the entrypoint script.
+      - name: Build eep
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/eep
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}-eep:${{ steps.meta.outputs.tag }},${{ env.IMAGE_PREFIX }}-eep:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build iep1
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/iep1_ingestion
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}-iep1:${{ steps.meta.outputs.tag }},${{ env.IMAGE_PREFIX }}-iep1:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build iep2
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/iep2_vision
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}-iep2:${{ steps.meta.outputs.tag }},${{ env.IMAGE_PREFIX }}-iep2:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build iep3
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/iep3_reconciliation
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}-iep3:${{ steps.meta.outputs.tag }},${{ env.IMAGE_PREFIX }}-iep3:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build yolo-service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/yolo_service
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}-yolo:${{ steps.meta.outputs.tag }},${{ env.IMAGE_PREFIX }}-yolo:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build reid-service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/reid_service
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}-reid:${{ steps.meta.outputs.tag }},${{ env.IMAGE_PREFIX }}-reid:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build live-bridge
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/live_bridge
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}-live-bridge:${{ steps.meta.outputs.tag }},${{ env.IMAGE_PREFIX }}-live-bridge:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 3 — deploy-shadow
+# Gate: Job 2 must pass.
+# Deploys the new model version to shadow, waits SHADOW_WINDOW_SECONDS,
+# then runs compare_shadow.py. Rolls back and fails on exit code 1.
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy-shadow:
+    name: "Job 3 · Shadow Evaluation"
+    runs-on: ubuntu-latest
+    needs: build
+    environment: production    # reads SHADOW_WINDOW_SECONDS override if set
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install mlops dependencies
+        run: pip install mlflow requests
+
+      - name: Deploy services to shadow host
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key:      ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/retailvision
+            # Pull new images
+            IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+            docker pull ${{ env.IMAGE_PREFIX }}-eep:${IMAGE_TAG}
+            docker pull ${{ env.IMAGE_PREFIX }}-iep2:${IMAGE_TAG}
+            docker pull ${{ env.IMAGE_PREFIX }}-yolo:${IMAGE_TAG}
+            docker pull ${{ env.IMAGE_PREFIX }}-reid:${IMAGE_TAG}
+            # Update image tags in compose override and restart with canary OFF
+            IMAGE_TAG=${IMAGE_TAG} CANARY_PERCENTAGE=0 \
+              docker compose -f docker-compose.yml -f docker-compose.production.yml \
+              up -d --no-deps eep iep2-vision yolo-service reid-service
+
+      - name: Register candidate version in MLflow (move Staging → shadow)
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        run: |
+          python - <<'EOF'
+          import sys, os
+          sys.path.insert(0, "mlops")
+          import promote
+          import mlflow
+          from mlflow.tracking import MlflowClient
+          mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+          client = MlflowClient()
+          versions = client.get_latest_versions("${{ env.MODEL_NAME }}", stages=["Staging"])
+          if not versions:
+              print("No Staging version found — skipping shadow move.")
+              sys.exit(0)
+          v = sorted(versions, key=lambda x: int(x.version))[0].version
+          print(f"Moving version {v} to shadow")
+          promote.move_to_shadow("${{ env.MODEL_NAME }}", v, triggered_by="promotion.yml/deploy-shadow")
+          # Write version to file so later jobs can read it
+          with open("candidate_version.txt", "w") as f:
+              f.write(v)
+          EOF
+
+      - name: Upload candidate version artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-version
+          path: candidate_version.txt
+          retention-days: 1
+
+      - name: Wait for shadow window
+        run: sleep ${{ env.SHADOW_WINDOW_SECONDS }}
+
+      - name: Run compare_shadow.py
+        env:
+          MLFLOW_TRACKING_URI:        ${{ secrets.MLFLOW_TRACKING_URI }}
+          SHADOW_CONF_DELTA_MAX:      ${{ env.SHADOW_CONF_DELTA_MAX }}
+          SHADOW_SCORE_DELTA_MAX:     ${{ env.SHADOW_SCORE_DELTA_MAX }}
+          SHADOW_ERROR_RATE_MAX:      ${{ env.SHADOW_ERROR_RATE_MAX }}
+          SHADOW_ROW_COUNT_RATIO_MIN: ${{ env.SHADOW_ROW_COUNT_RATIO_MIN }}
+        run: python mlops/compare_shadow.py
+
+      # compare_shadow.py exits 1 on failure — the step above fails the job,
+      # which triggers the rollback job via needs/if:failure() below.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 4 — deploy-canary
+# Gate: Job 3 must pass (compare_shadow.py exited 0).
+# Deploys canary, waits CANARY_WINDOW_SECONDS, runs canary_eval.py.
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy-canary:
+    name: "Job 4 · Canary Evaluation"
+    runs-on: ubuntu-latest
+    needs: deploy-shadow
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install mlops dependencies
+        run: pip install mlflow requests
+
+      - name: Download candidate version
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-version
+
+      - name: Enable canary traffic split on deploy host
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key:      ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/retailvision
+            CANARY_PCT="${{ env.CANARY_PERCENTAGE }}"
+            IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+            # Restart EEP with canary percentage set
+            IMAGE_TAG=${IMAGE_TAG} CANARY_PERCENTAGE=${CANARY_PCT} \
+              docker compose -f docker-compose.yml -f docker-compose.production.yml \
+              up -d --no-deps eep
+
+      - name: Register canary in MLflow
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        run: |
+          python - <<'EOF'
+          import sys, os
+          sys.path.insert(0, "mlops")
+          import promote
+          v = open("candidate_version.txt").read().strip()
+          if v:
+              promote.move_to_canary(
+                  "${{ env.MODEL_NAME }}", v,
+                  canary_percentage=int("${{ env.CANARY_PERCENTAGE }}"),
+                  triggered_by="promotion.yml/deploy-canary",
+              )
+          EOF
+
+      - name: Wait for canary window
+        run: sleep ${{ env.CANARY_WINDOW_SECONDS }}
+
+      - name: Run canary_eval.py
+        env:
+          MLFLOW_TRACKING_URI:    ${{ secrets.MLFLOW_TRACKING_URI }}
+          PROMETHEUS_URL:         ${{ secrets.PROMETHEUS_URL }}
+          CANARY_MAX_ERROR_RATE:  ${{ env.CANARY_MAX_ERROR_RATE }}
+          CANARY_MAX_LATENCY_P95: ${{ env.CANARY_MAX_LATENCY_P95 }}
+          CANARY_MIN_CONFIDENCE:  ${{ env.CANARY_MIN_CONFIDENCE }}
+          CANARY_LOOKBACK_MINUTES: ${{ env.CANARY_LOOKBACK_MINUTES }}
+          CANARY_VERSION:         ${{ env.CANARY_PERCENTAGE }}
+          CANARY_MODEL_NAME:      ${{ env.MODEL_NAME }}
+        run: |
+          CANARY_VERSION=$(cat candidate_version.txt) python mlops/canary_eval.py
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 5 — promote
+# Gate: Job 4 must pass (canary_eval.py exited 0).
+# Moves model to Production, disables canary traffic, verifies state.
+# ─────────────────────────────────────────────────────────────────────────────
+  promote:
+    name: "Job 5 · Promote to Production"
+    runs-on: ubuntu-latest
+    needs: deploy-canary
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install mlops dependencies
+        run: pip install mlflow requests
+
+      - name: Download candidate version
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-version
+
+      - name: Promote model version to Production in MLflow
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        run: |
+          python - <<'EOF'
+          import sys, os
+          sys.path.insert(0, "mlops")
+          import promote
+          v = open("candidate_version.txt").read().strip()
+          if v:
+              promote.move_to_production(
+                  "${{ env.MODEL_NAME }}", v,
+                  triggered_by="promotion.yml/promote",
+              )
+          EOF
+
+      - name: Set CANARY_PERCENTAGE=0 on deploy host (new version is now full production)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key:      ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/retailvision
+            IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+            # Canary split off — new image is now the sole production container
+            IMAGE_TAG=${IMAGE_TAG} CANARY_PERCENTAGE=0 \
+              docker compose -f docker-compose.yml -f docker-compose.production.yml \
+              up -d --no-deps eep
+            echo "CANARY_PERCENTAGE=0" > .env.canary
+
+      - name: Run check_state.py
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          PROMOTION_MODEL_NAME: ${{ env.MODEL_NAME }}
+          CANARY_PERCENTAGE: "0"
+        run: |
+          python mlops/check_state.py --model-name "${{ env.MODEL_NAME }}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 6 — verify
+# Gate: Job 5 must pass.
+# Health-checks all services, confirms Prometheus scraping, Grafana loading.
+# ─────────────────────────────────────────────────────────────────────────────
+  verify:
+    name: "Job 6 · Post-deploy Verification"
+    runs-on: ubuntu-latest
+    needs: promote
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install verification dependencies
+        run: pip install requests
+
+      - name: Health check EEP
+        run: |
+          python scripts/ci_verify.py \
+            --eep-url "https://${{ secrets.DEPLOY_HOST }}:8000" \
+            --prometheus-url "${{ secrets.PROMETHEUS_URL }}" \
+            --grafana-url "https://${{ secrets.DEPLOY_HOST }}:3001"
+
+      - name: Confirm Prometheus is scraping all targets
+        env:
+          PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+        run: |
+          python - <<'EOF'
+          import sys, requests, os
+
+          url = os.environ["PROMETHEUS_URL"]
+          resp = requests.get(f"{url}/api/v1/targets", timeout=15)
+          resp.raise_for_status()
+          targets = resp.json()["data"]["activeTargets"]
+          down = [t for t in targets if t["health"] != "up"]
+          if down:
+              for t in down:
+                  print(f"DOWN: {t['labels'].get('job','?')} {t['scrapeUrl']}: {t['lastError']}")
+              sys.exit(1)
+          print(f"All {len(targets)} Prometheus targets are UP.")
+          EOF
+
+      - name: Confirm Grafana is loading
+        run: |
+          curl -fsS \
+            -u "admin:${{ secrets.GRAFANA_PASSWORD }}" \
+            "https://${{ secrets.DEPLOY_HOST }}:3001/api/health" \
+            | python -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('database')=='ok' else 1)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 7 — rollback
+# Triggered only when any of Jobs 3–6 fails.
+# Restores previous images, disables canary, archives MLflow version, notifies.
+# ─────────────────────────────────────────────────────────────────────────────
+  rollback:
+    name: "Job 7 · Rollback"
+    runs-on: ubuntu-latest
+    needs: [deploy-shadow, deploy-canary, promote, verify]
+    # Run if ANY of the above jobs failed or was cancelled.
+    if: failure()
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install mlops dependencies
+        run: pip install mlflow requests
+
+      - name: Download candidate version (may not exist if build failed)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-version
+
+      - name: Determine which job failed
+        id: failure_reason
+        run: |
+          if [ "${{ needs.deploy-shadow.result }}"  = "failure" ]; then
+            echo "reason=shadow evaluation failed (compare_shadow.py exited 1)" >> "$GITHUB_OUTPUT"
+            echo "failed_job=deploy-shadow" >> "$GITHUB_OUTPUT"
+          elif [ "${{ needs.deploy-canary.result }}" = "failure" ]; then
+            echo "reason=canary evaluation failed (canary_eval.py exited 1)" >> "$GITHUB_OUTPUT"
+            echo "failed_job=deploy-canary" >> "$GITHUB_OUTPUT"
+          elif [ "${{ needs.promote.result }}"       = "failure" ]; then
+            echo "reason=promote step failed" >> "$GITHUB_OUTPUT"
+            echo "failed_job=promote" >> "$GITHUB_OUTPUT"
+          else
+            echo "reason=post-deploy verification failed" >> "$GITHUB_OUTPUT"
+            echo "failed_job=verify" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Archive MLflow version and log rollback
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        run: |
+          python - <<'EOF'
+          import sys, os
+          sys.path.insert(0, "mlops")
+          import promote
+
+          version_file = "candidate_version.txt"
+          if not os.path.exists(version_file):
+              print("No candidate_version.txt — nothing to archive in MLflow.")
+              sys.exit(0)
+
+          v = open(version_file).read().strip()
+          if not v:
+              sys.exit(0)
+
+          reason = "${{ steps.failure_reason.outputs.reason }}"
+          promote.rollback(
+              "${{ env.MODEL_NAME }}", v,
+              reason=reason,
+              triggered_by="promotion.yml/rollback",
+          )
+          print(f"Archived version {v}: {reason}")
+          EOF
+
+      - name: Restore previous images on deploy host
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key:      ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/retailvision
+            # Disable canary immediately
+            echo "CANARY_PERCENTAGE=0" > .env.canary
+            # Roll back to :latest (the previous successful build)
+            CANARY_PERCENTAGE=0 \
+              docker compose -f docker-compose.yml -f docker-compose.production.yml \
+              up -d --no-deps eep iep2-vision yolo-service reid-service
+
+      - name: Send failure notification to Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": ":rotating_light: *RetailVision promotion FAILED*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": ":rotating_light: *Promotion pipeline failed and rolled back*\n*Repo:* ${{ github.repository }}\n*Branch:* ${{ github.ref_name }}\n*Commit:* `${{ github.sha }}`\n*Failed job:* `${{ steps.failure_reason.outputs.failed_job }}`\n*Reason:* ${{ steps.failure_reason.outputs.reason }}\n*Run:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

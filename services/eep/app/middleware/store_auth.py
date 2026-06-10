@@ -38,6 +38,7 @@ class StoreContext:
     is_owner: bool
     role: str | None  # None if owner and not in store_members
     permissions: set[str] = field(default_factory=set)
+    is_admin: bool = False  # super-admin: cross-store access, not a store member
 
 
 async def _resolve_slug(slug: str, r: redis.Redis, db: AsyncSession) -> uuid.UUID:
@@ -95,6 +96,7 @@ async def get_store_context(
     payload = decode_access_token(credentials.credentials)
     user_id = uuid.UUID(payload["sub"])
     account_type = payload["account_type"]
+    is_admin = bool(payload.get("is_super_admin"))
 
     # Step 2: slug → store_id (with Redis cache)
     store_id = await _resolve_slug(slug, r, db)
@@ -102,6 +104,20 @@ async def get_store_context(
     store = store_result.scalar_one_or_none()
     if store is None:
         raise HTTPException(status_code=404, detail={"error": "Store not found", "code": "STORE_NOT_FOUND"})
+
+    # Super-admin: cross-store access. Skip membership (Step 3) and perms (Step 4)
+    # entirely — an admin need not be a member. Gate helpers short-circuit on is_admin.
+    if is_admin:
+        return StoreContext(
+            user_id=user_id,
+            account_type=account_type,
+            store_id=store_id,
+            store=store,
+            is_owner=False,
+            role=None,
+            permissions=set(),
+            is_admin=True,
+        )
 
     # Step 3: membership check
     is_owner = (store.created_by == user_id)
@@ -141,20 +157,22 @@ async def get_store_context(
 
 
 def require_owner(ctx: StoreContext) -> None:
-    if not ctx.is_owner:
-        raise HTTPException(status_code=403, detail={"error": "Owner access required", "code": "OWNER_REQUIRED"})
+    if ctx.is_admin or ctx.is_owner:
+        return
+    raise HTTPException(status_code=403, detail={"error": "Owner access required", "code": "OWNER_REQUIRED"})
 
 
 def require_owner_or_manager(ctx: StoreContext) -> None:
-    if not ctx.is_owner and ctx.role != "manager":
-        raise HTTPException(
-            status_code=403,
-            detail={"error": "Owner or manager access required", "code": "MANAGER_REQUIRED"},
-        )
+    if ctx.is_admin or ctx.is_owner or ctx.role == "manager":
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={"error": "Owner or manager access required", "code": "MANAGER_REQUIRED"},
+    )
 
 
 def require_permission(ctx: StoreContext, permission: str) -> None:
-    if ctx.is_owner:
+    if ctx.is_admin or ctx.is_owner:
         return
     if permission not in ctx.permissions:
         raise HTTPException(

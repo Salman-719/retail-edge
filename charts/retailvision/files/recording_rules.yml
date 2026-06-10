@@ -1,0 +1,96 @@
+groups:
+  - name: retailvision_recording
+    interval: 15s
+    rules:
+      # ── Detector ──────────────────────────────────────────────────────────────
+      - record: job:detector_frames:rate5m
+        expr: rate(detector_frames_total[5m])
+
+      - record: job:detector_detections:rate5m
+        expr: rate(detector_detections_total[5m])
+
+      - record: job:detector_inference_p50:rate5m
+        expr: histogram_quantile(0.50, sum by (le) (rate(detector_inference_seconds_bucket[5m])))
+
+      - record: job:detector_inference_p95:rate5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(detector_inference_seconds_bucket[5m])))
+
+      - record: job:detector_confidence_p25:rate5m
+        expr: histogram_quantile(0.25, sum by (le) (rate(detector_detection_confidence_bucket[5m])))
+
+      - record: job:detector_confidence_p50:rate5m
+        expr: histogram_quantile(0.50, sum by (le) (rate(detector_detection_confidence_bucket[5m])))
+
+      - record: job:detector_confidence_p75:rate5m
+        expr: histogram_quantile(0.75, sum by (le) (rate(detector_detection_confidence_bucket[5m])))
+
+      - record: job:detector_batch_size_avg:rate5m
+        expr: rate(detector_batch_size_sum[5m]) / rate(detector_batch_size_count[5m])
+
+      # ── ReID ──────────────────────────────────────────────────────────────────
+      - record: job:reid_crops:rate5m
+        expr: rate(reid_crops_processed_total[5m])
+
+      - record: job:reid_inference_p50:rate5m
+        expr: histogram_quantile(0.50, sum by (le) (rate(reid_inference_seconds_bucket[5m])))
+
+      - record: job:reid_inference_p95:rate5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(reid_inference_seconds_bucket[5m])))
+
+      - record: job:reid_embedding_norm_p50:rate5m
+        expr: histogram_quantile(0.50, sum by (le) (rate(reid_embedding_norm_bucket[5m])))
+
+      - record: job:reid_embedding_norm_p95:rate5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(reid_embedding_norm_bucket[5m])))
+
+      - record: job:reid_batch_size_avg:rate5m
+        expr: rate(reid_batch_size_sum[5m]) / rate(reid_batch_size_count[5m])
+
+      # ── IEP3 ──────────────────────────────────────────────────────────────────
+      - record: job:iep3_batches:rate5m
+        expr: rate(iep3_batches_processed_total[5m])
+
+      - record: job:iep3_reconcile_p95:rate5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(iep3_batch_reconcile_seconds_bucket[5m])))
+
+      - record: job:iep3_cosine_p50:rate5m
+        expr: histogram_quantile(0.50, sum by (le) (rate(iep3_reid_cosine_similarity_bucket[5m])))
+
+      - record: job:iep3_cosine_p95:rate5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(iep3_reid_cosine_similarity_bucket[5m])))
+
+      # ── IEP2 (per camera) ─────────────────────────────────────────────────────
+      - record: camera:iep2_latency_p95:rate5m
+        expr: histogram_quantile(0.95, sum by (le, camera_id) (rate(iep2_frame_latency_seconds_bucket[5m])))
+
+      - record: camera:iep2_confidence_p50:rate5m
+        expr: histogram_quantile(0.50, sum by (le, camera_id) (rate(iep2_detection_confidence_bucket[5m])))
+
+      - record: camera:iep2_track_age_p50:rate5m
+        expr: histogram_quantile(0.50, sum by (le, camera_id) (rate(iep2_track_age_frames_bucket[5m])))
+
+      - record: camera:iep2_track_age_p95:rate5m
+        expr: histogram_quantile(0.95, sum by (le, camera_id) (rate(iep2_track_age_frames_bucket[5m])))
+
+      # ── IEP1 (per camera) ─────────────────────────────────────────────────────
+      - record: camera:iep1_frames_captured:rate5m
+        expr: sum by (camera_id) (rate(iep1_frames_captured_total[5m]))
+
+      - record: camera:iep1_frames_dropped:rate5m
+        expr: sum by (camera_id) (rate(iep1_frames_dropped_total[5m]))
+
+      # ── Tracker (per camera) ──────────────────────────────────────────────────
+      - record: camera:iep2_tracks_active_avg:rate5m
+        expr: avg_over_time(iep2_tracks_active[5m])
+
+      - record: camera:iep2_identity_switches:rate5m
+        expr: sum by (camera_id) (rate(iep2_identity_switches_total[5m]))
+
+      # ── Model drift (aggregate) ───────────────────────────────────────────────
+      - record: job:iep3_cosine_sliding_avg:rate10m
+        expr: avg_over_time(job:iep3_cosine_p50:rate5m[10m])
+
+      - record: job:detector_detections_per_frame_avg:rate5m
+        expr: |
+          sum(rate(iep2_detections_per_frame_sum[5m]))
+          / sum(rate(iep2_detections_per_frame_count[5m]))

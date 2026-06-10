@@ -1,0 +1,47 @@
+# Staging overrides — single-replica EEP, reduced resources, one placeholder store.
+# NOTE: eep.replicas=1 here because Redis-backed _running_cameras (R1) must be
+# deployed before enabling replicas=2. See M4-S1.
+
+eep:
+  replicas: 1
+  hpa:
+    enabled: false   # fixed single replica in staging (see R1 note above)
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+frontend:
+  replicas: 1
+
+postgres:
+  storage: 10Gi
+
+ingress:
+  appHost: app.staging.retailvision.example.com   # override before deploy
+
+s3:
+  bucket: retailvision-staging
+  region: eu-west-1
+
+iep3:
+  stores:
+    - "00000000-0000-0000-0000-000000000001"   # staging store placeholder
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+pgbouncer:
+  replicas: 1
+  defaultPoolSize: 10
+
+redis:
+  maxmemory: "256mb"
+  memoryLimit: "512Mi"

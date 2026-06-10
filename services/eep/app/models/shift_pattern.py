@@ -15,9 +15,6 @@ class ShiftPattern(Base):
     employee_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False
     )
-    section_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("sections.id", ondelete="CASCADE"), nullable=False
-    )
     day_of_week: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     start_time: Mapped[time] = mapped_column(Time, nullable=False)
     end_time: Mapped[time] = mapped_column(Time, nullable=False)

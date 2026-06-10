@@ -81,6 +81,12 @@ export const refreshTokens = (refresh_token) =>
 export const logout = (refresh_token) =>
   api.post('/auth/logout', { refresh_token }).then(r => r.data)
 
+export const forgotPassword = (email) =>
+  api.post('/auth/forgot-password', { email }).then(r => r.data)
+
+export const resetPassword = (token, new_password) =>
+  api.post('/auth/reset-password', { token, new_password }).then(r => r.data)
+
 export const acceptInvite = (slug, token, name, password) =>
   api.post(`/store/${slug}/accept-invite`, { token, name, password }).then(r => r.data)
 
@@ -97,6 +103,9 @@ export const getStore = (slug) =>
 
 export const patchStore = (slug, body) =>
   api.patch(`/store/${slug}`, body).then(r => r.data)
+
+export const deleteStore = (slug) =>
+  api.delete(`/store/${slug}`).then(r => r.data)
 
 export const getMe = (slug) =>
   api.get(`/store/${slug}/me`).then(r => r.data)
@@ -121,20 +130,6 @@ export const patchMember = (slug, memberId, body) =>
 export const removeMember = (slug, memberId) =>
   api.delete(`/store/${slug}/members/${memberId}`).then(r => r.data)
 
-// ─── Sections ────────────────────────────────────────────────────────────────
-
-export const listSections = (slug) =>
-  api.get(`/store/${slug}/sections`).then(r => r.data)
-
-export const createSection = (slug, body) =>
-  api.post(`/store/${slug}/sections`, body).then(r => r.data)
-
-export const patchSection = (slug, sectionId, body) =>
-  api.patch(`/store/${slug}/sections/${sectionId}`, body).then(r => r.data)
-
-export const deleteSection = (slug, sectionId) =>
-  api.delete(`/store/${slug}/sections/${sectionId}`).then(r => r.data)
-
 // ─── Config Versions (read-only) ─────────────────────────────────────────────
 
 export const getActiveVersion = (slug) =>
@@ -157,6 +152,32 @@ export const patchCamera = (slug, cameraId, body) =>
 export const deleteCamera = (slug, cameraId) =>
   api.delete(`/store/${slug}/cameras/${cameraId}`).then(r => r.data)
 
+// ── DEV-ONLY pipeline control (DEBUG_MODE endpoints) ────────────────────────
+export const devPipelineStart = (body) =>
+  api.post('/debug/dev/pipeline/start', body).then(r => r.data)
+
+export const devPipelineStop = (body) =>
+  api.post('/debug/dev/pipeline/stop', body).then(r => r.data)
+
+export const getDevTracking = (cameraId, limit = 50, sinceTs = null) =>
+  api.get('/debug/dev/tracking', {
+    params: { camera_id: cameraId, limit, ...(sinceTs != null ? { since_ts: sinceTs } : {}) },
+  }).then(r => r.data)
+
+export const getDevIep3 = (storeId, limit = 50) =>
+  api.get('/debug/dev/iep3', { params: { store_id: storeId, limit } }).then(r => r.data)
+
+export const getDevLocalGlobal = (storeId, limit = 500) =>
+  api.get('/debug/dev/iep3/local-global', { params: { store_id: storeId, limit } }).then(r => r.data)
+
+export const getDevReconTrace = (storeId, batchNumber = null, limit = 1000) =>
+  api.get('/debug/dev/iep3/trace', {
+    params: { store_id: storeId, limit, ...(batchNumber != null ? { batch_number: batchNumber } : {}) },
+  }).then(r => r.data)
+
+export const getDevGpuStatus = () =>
+  api.get('/debug/dev/gpu-status').then(r => r.data)
+
 // ─── Draft lifecycle ──────────────────────────────────────────────────────────
 
 export const getDraft = (slug) =>
@@ -170,56 +191,56 @@ export const deleteDraft = (slug) =>
 
 // ─── Floor Plan ───────────────────────────────────────────────────────────────
 
-export const uploadFloorPlan = (slug, sectionId, file) => {
+export const uploadFloorPlan = (slug, file) => {
   const fd = new FormData()
   fd.append('file', file)
-  return api.post(`/store/${slug}/draft/sections/${sectionId}/floor-plan/upload`, fd).then(r => r.data)
+  return api.post(`/store/${slug}/draft/floor-plan/upload`, fd).then(r => r.data)
 }
 
-export const getDraftFloorPlan = (slug, sectionId) =>
-  api.get(`/store/${slug}/draft/sections/${sectionId}/floor-plan`).then(r => r.data)
+export const getDraftFloorPlan = (slug) =>
+  api.get(`/store/${slug}/draft/floor-plan`).then(r => r.data)
 
-export const setFloorPlanScale = (slug, sectionId, body) =>
-  api.put(`/store/${slug}/draft/sections/${sectionId}/floor-plan/scale`, body).then(r => r.data)
+export const setFloorPlanScale = (slug, body) =>
+  api.put(`/store/${slug}/draft/floor-plan/scale`, body).then(r => r.data)
 
-export const setFloorPlanWorldBounds = (slug, sectionId, body) =>
-  api.put(`/store/${slug}/draft/sections/${sectionId}/floor-plan/world-bounds`, body).then(r => r.data)
+export const setFloorPlanWorldBounds = (slug, body) =>
+  api.put(`/store/${slug}/draft/floor-plan/world-bounds`, body).then(r => r.data)
 
 // ─── Zones ────────────────────────────────────────────────────────────────────
 
-export const getDraftZones = (slug, sectionId) =>
-  api.get(`/store/${slug}/draft/sections/${sectionId}/zones`).then(r => r.data)
+export const getDraftZones = (slug) =>
+  api.get(`/store/${slug}/draft/zones`).then(r => r.data)
 
-export const createZone = (slug, sectionId, body) =>
-  api.post(`/store/${slug}/draft/sections/${sectionId}/zones`, body).then(r => r.data)
+export const createZone = (slug, body) =>
+  api.post(`/store/${slug}/draft/zones`, body).then(r => r.data)
 
-export const updateZone = (slug, sectionId, zoneId, body) =>
-  api.put(`/store/${slug}/draft/sections/${sectionId}/zones/${zoneId}`, body).then(r => r.data)
+export const updateZone = (slug, zoneId, body) =>
+  api.put(`/store/${slug}/draft/zones/${zoneId}`, body).then(r => r.data)
 
-export const deleteZone = (slug, sectionId, zoneId) =>
-  api.delete(`/store/${slug}/draft/sections/${sectionId}/zones/${zoneId}`).then(r => r.data)
+export const deleteZone = (slug, zoneId) =>
+  api.delete(`/store/${slug}/draft/zones/${zoneId}`).then(r => r.data)
 
 // ─── Obstacles ────────────────────────────────────────────────────────────────
 
-export const getDraftObstacles = (slug, sectionId) =>
-  api.get(`/store/${slug}/draft/sections/${sectionId}/obstacles`).then(r => r.data)
+export const getDraftObstacles = (slug) =>
+  api.get(`/store/${slug}/draft/obstacles`).then(r => r.data)
 
-export const createObstacle = (slug, sectionId, body) =>
-  api.post(`/store/${slug}/draft/sections/${sectionId}/obstacles`, body).then(r => r.data)
+export const createObstacle = (slug, body) =>
+  api.post(`/store/${slug}/draft/obstacles`, body).then(r => r.data)
 
-export const updateObstacle = (slug, sectionId, obstacleId, body) =>
-  api.put(`/store/${slug}/draft/sections/${sectionId}/obstacles/${obstacleId}`, body).then(r => r.data)
+export const updateObstacle = (slug, obstacleId, body) =>
+  api.put(`/store/${slug}/draft/obstacles/${obstacleId}`, body).then(r => r.data)
 
-export const deleteObstacle = (slug, sectionId, obstacleId) =>
-  api.delete(`/store/${slug}/draft/sections/${sectionId}/obstacles/${obstacleId}`).then(r => r.data)
+export const deleteObstacle = (slug, obstacleId) =>
+  api.delete(`/store/${slug}/draft/obstacles/${obstacleId}`).then(r => r.data)
 
 // ─── Camera Configs ───────────────────────────────────────────────────────────
 
-export const getDraftCameraConfigs = (slug, sectionId) =>
-  api.get(`/store/${slug}/draft/sections/${sectionId}/camera-configs`).then(r => r.data)
+export const getDraftCameraConfigs = (slug) =>
+  api.get(`/store/${slug}/draft/camera-configs`).then(r => r.data)
 
-export const placeCameraConfig = (slug, sectionId, body) =>
-  api.post(`/store/${slug}/draft/sections/${sectionId}/camera-configs`, body).then(r => r.data)
+export const placeCameraConfig = (slug, body) =>
+  api.post(`/store/${slug}/draft/camera-configs`, body).then(r => r.data)
 
 export const updateCameraConfig = (slug, configId, body) =>
   api.put(`/store/${slug}/draft/camera-configs/${configId}`, body).then(r => r.data)
@@ -238,6 +259,16 @@ export const uploadCameraFrame = (slug, configId, file) => {
 export const computeHomography = (slug, configId, correspondences) =>
   api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/homography`, { correspondences }).then(r => r.data)
 
+// PnP (M7-S2) — correspondences: [{ frame_px, frame_py, world_x, world_y, world_z }]
+// frame_px/frame_py must be in full stream resolution (not display pixels).
+export const computePnp = (slug, configId, correspondences) =>
+  api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/pnp`, { method: 'pnp', correspondences }).then(r => r.data)
+
+// TPS — correspondences: [{ frame_px, frame_py, map_px, map_py }]
+// map_px/map_py are canvas pixel coords on the floor plan (backend converts to metres).
+export const computeTps = (slug, configId, correspondences) =>
+  api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/tps`, { correspondences }).then(r => r.data)
+
 export const uploadCalibrationFiles = (slug, configId, intrinsicFile, extrinsicFile) => {
   const fd = new FormData()
   fd.append('intrinsic', intrinsicFile)
@@ -248,8 +279,21 @@ export const uploadCalibrationFiles = (slug, configId, intrinsicFile, extrinsicF
 export const verifyCalibration = (slug, configId) =>
   api.post(`/store/${slug}/draft/camera-configs/${configId}/calibration/verify`).then(r => r.data)
 
+// Project a frame pixel to floor world coords using the current calibration
+// (PnP ray-plane or homography). Used by the verification preview.
+export const projectPoint = (slug, configId, framePx, framePy) =>
+  api.post(`/store/${slug}/draft/camera-configs/${configId}/project-point`, { frame_px: framePx, frame_py: framePy }).then(r => r.data)
+
 export const getCalibrations = (slug, configId) =>
   api.get(`/store/${slug}/draft/camera-configs/${configId}/calibrations`).then(r => r.data)
+
+// ─── Punch-in station (draft, employee-linking S2) ────────────────────────────
+
+export const getDraftPunchStation = (slug) =>
+  api.get(`/store/${slug}/draft/punch-station`).then(r => r.data)
+
+export const putDraftPunchStation = (slug, body) =>
+  api.put(`/store/${slug}/draft/punch-station`, body).then(r => r.data)
 
 // ─── Activation ───────────────────────────────────────────────────────────────
 
@@ -265,10 +309,24 @@ export const getSyncEvent = (slug, eventId) =>
 export const requestDraftDiscard = (slug) =>
   api.post(`/store/${slug}/members/draft-discard-request`).then(r => r.data)
 
-// ─── Live Monitoring (Phase 5+) ──────────────────────────────────────────────
+// ─── Live Monitoring (F1/F2) ─────────────────────────────────────────────────
 
-export const getLiveSummary = (slug) =>
-  api.get(`/store/${slug}/live/summary`).then(r => r.data)
+export const getLiveOverview = (slug) =>
+  api.get(`/store/${slug}/live/overview`).then(r => r.data)
+
+export const getCameraHealth = (slug) =>
+  api.get(`/store/${slug}/cameras/health`).then(r => r.data)
+
+// ─── Store Setup (C1) ────────────────────────────────────────────────────────
+
+export const getOperatingHours = (slug) =>
+  api.get(`/store/${slug}/operating-hours`).then(r => r.data)
+
+export const putOperatingHours = (slug, body) =>
+  api.put(`/store/${slug}/operating-hours`, body).then(r => r.data)
+
+export const getActivePunchStation = (slug) =>
+  api.get(`/store/${slug}/punch-station`).then(r => r.data)
 
 export const getActiveAlerts = (slug) =>
   api.get(`/store/${slug}/alerts/active`).then(r => r.data)
@@ -276,16 +334,50 @@ export const getActiveAlerts = (slug) =>
 export const resolveAlert = (slug, alertId) =>
   api.post(`/store/${slug}/alerts/${alertId}/resolve`).then(r => r.data)
 
-// ─── Analytics (Phase 6+) ────────────────────────────────────────────────────
+export const getAlertHistory = (slug, params) =>
+  api.get(`/store/${slug}/alerts/history`, { params }).then(r => r.data)
+
+// ─── Alert rules (D3) ────────────────────────────────────────────────────────
+
+export const listAlertRules = (slug) =>
+  api.get(`/store/${slug}/alert-rules`).then(r => r.data)
+
+export const getAlertRule = (slug, ruleId) =>
+  api.get(`/store/${slug}/alert-rules/${ruleId}`).then(r => r.data)
+
+export const createAlertRule = (slug, body) =>
+  api.post(`/store/${slug}/alert-rules`, body).then(r => r.data)
+
+export const updateAlertRule = (slug, ruleId, body) =>
+  api.patch(`/store/${slug}/alert-rules/${ruleId}`, body).then(r => r.data)
+
+export const deleteAlertRule = (slug, ruleId) =>
+  api.delete(`/store/${slug}/alert-rules/${ruleId}`).then(r => r.data)
+
+// ─── Analytics (E1/E3) ───────────────────────────────────────────────────────
+// All return the envelope { store_id, grain, from, to, rows } (heatmap: cells).
+// params: { from, to, granularity?, zone_ids?, employee_ids? }
+
+export const getStoreSeries = (slug, params) =>
+  api.get(`/store/${slug}/analytics/store-series`, { params }).then(r => r.data)
+
+export const getZoneAnalytics = (slug, params) =>
+  api.get(`/store/${slug}/analytics/zones`, { params }).then(r => r.data)
+
+export const getComposition = (slug, params) =>
+  api.get(`/store/${slug}/analytics/composition`, { params }).then(r => r.data)
+
+export const getDistribution = (slug, params) =>
+  api.get(`/store/${slug}/analytics/distribution`, { params }).then(r => r.data)
+
+export const getEmployeeAnalytics = (slug, params) =>
+  api.get(`/store/${slug}/analytics/employees`, { params }).then(r => r.data)
+
+export const getFlowMatrix = (slug, params) =>
+  api.get(`/store/${slug}/analytics/flow-matrix`, { params }).then(r => r.data)
 
 export const getHeatmap = (slug, params) =>
   api.get(`/store/${slug}/analytics/heatmap`, { params }).then(r => r.data)
-
-export const getZoneTraffic = (slug, params) =>
-  api.get(`/store/${slug}/analytics/zone-traffic`, { params }).then(r => r.data)
-
-export const getTrends = (slug, params) =>
-  api.get(`/store/${slug}/analytics/trends`, { params }).then(r => r.data)
 
 // ─── Employees (Phase 4+) ────────────────────────────────────────────────────
 
@@ -300,15 +392,6 @@ export const patchEmployee = (slug, employeeId, body) =>
 
 export const deleteEmployee = (slug, employeeId) =>
   api.delete(`/store/${slug}/employees/${employeeId}`).then(r => r.data)
-
-export const listEmployeeSections = (slug, employeeId) =>
-  api.get(`/store/${slug}/employees/${employeeId}/sections`).then(r => r.data)
-
-export const assignEmployeeSection = (slug, employeeId, body) =>
-  api.post(`/store/${slug}/employees/${employeeId}/sections`, body).then(r => r.data)
-
-export const removeEmployeeSection = (slug, employeeId, sectionId) =>
-  api.delete(`/store/${slug}/employees/${employeeId}/sections/${sectionId}`).then(r => r.data)
 
 // ─── Shift Patterns (Phase 4+) ───────────────────────────────────────────────
 
@@ -380,11 +463,11 @@ export const getSettings = (slug) =>
 export const patchSettings = (slug, body) =>
   api.patch(`/store/${slug}/settings`, body).then(r => r.data)
 
-export const getAlertConfig = (slug) =>
-  api.get(`/store/${slug}/alert-config`).then(r => r.data)
+export const getAlertRuleDefaults = (slug) =>
+  api.get(`/store/${slug}/alert-rules/defaults`).then(r => r.data)
 
-export const patchAlertConfig = (slug, body) =>
-  api.patch(`/store/${slug}/alert-config`, body).then(r => r.data)
+export const getAlertTimeseries = (slug, params) =>
+  api.get(`/store/${slug}/alerts/timeseries`, { params }).then(r => r.data)
 
 // ─── Audit (Phase 7+) ────────────────────────────────────────────────────────
 

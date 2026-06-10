@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-server
+  namespace: retailvision
+  labels:
+    app: redis-server
+spec:
+  replicas: 1
+  serviceName: redis-server
+  selector:
+    matchLabels:
+      app: redis-server
+  template:
+    metadata:
+      labels:
+        app: redis-server
+    spec:
+      {{- with .Values.stablePool.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.stablePool.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: redis
+          image: "redis:{{ .Values.redis.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 6380
+              name: redis-tls
+          command:
+            - redis-server
+            - /etc/redis/redis.conf
+          volumeMounts:
+            - name: config
+              mountPath: /etc/redis
+              readOnly: true
+            - name: tls-certs
+              mountPath: /certs
+              readOnly: true
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              # k8s quantity (e.g. 1Gi) — distinct from redis.maxmemory which uses
+              # redis units (e.g. 1gb) and only feeds redis.conf.
+              memory: {{ .Values.redis.memoryLimit | quote }}
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "-p", "6380", "--tls",
+                        "--cacert", "/certs/ca.crt", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: redis-server-config
+        - name: tls-certs
+          secret:
+            secretName: redis-server-tls
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-server-config
+  namespace: retailvision
+data:
+  redis.conf: |
+    port 0
+    tls-port 6380
+    tls-cert-file /certs/tls.crt
+    tls-key-file /certs/tls.key
+    tls-ca-cert-file /certs/ca.crt
+    tls-auth-clients no
+    maxmemory {{ .Values.redis.maxmemory }}
+    maxmemory-policy allkeys-lru
+    appendonly yes
+    loglevel notice
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-server
+  namespace: retailvision
+  labels:
+    app: redis-server
+  {{- with .Values.redis.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.redis.service.type }}
+  {{- with .Values.redis.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    app: redis-server
+  ports:
+    - name: redis-tls
+      port: 6380
+      targetPort: 6380

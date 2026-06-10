@@ -41,8 +41,8 @@ async def list_audit_log(
     db: AsyncSession = Depends(get_db),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    action: Optional[str] = Query(None),
-    entity_type: Optional[str] = Query(None),
+    action: Optional[str] = Query(None, max_length=100),
+    entity_type: Optional[str] = Query(None, max_length=100),
     since: Optional[datetime] = Query(None),
     until: Optional[datetime] = Query(None),
 ):

@@ -1,25 +1,13 @@
 import uuid
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel
-
-
-class SectionResponse(BaseModel):
-    id: uuid.UUID
-    name: str
-    type: str
-    display_order: int
-    is_default: bool
-    status: str
-
-    model_config = {"from_attributes": True}
 
 
 class FloorPlanResponse(BaseModel):
     id: uuid.UUID
     version_id: uuid.UUID
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     onboarding_method: str
     display_url: str | None = None
     width_px: int | None = None
@@ -40,7 +28,7 @@ class FloorPlanResponse(BaseModel):
 class ZoneResponse(BaseModel):
     id: uuid.UUID
     version_id: uuid.UUID
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     name: str
     type: str
     points: list[list[float]]
@@ -54,7 +42,7 @@ class ZoneResponse(BaseModel):
 class ObstacleResponse(BaseModel):
     id: uuid.UUID
     version_id: uuid.UUID
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     name: str | None = None
     points: list[list[float]]
 
@@ -79,27 +67,13 @@ class CameraConfigSummary(BaseModel):
     id: uuid.UUID
     physical_camera_id: uuid.UUID
     physical_camera_name: str
-    section_id: uuid.UUID
+    store_id: uuid.UUID
     position_x: float
     position_y: float
     height_meters: float | None = None
     fov_deg: float | None = None
     status: str
     frame_url: str | None = None
-
-    model_config = {"from_attributes": True}
-
-
-class SectionWithConfig(BaseModel):
-    id: uuid.UUID
-    name: str
-    type: str
-    display_order: int
-    is_default: bool
-    floor_plan: FloorPlanResponse | None = None
-    zones: list[ZoneResponse] = []
-    obstacles: list[ObstacleResponse] = []
-    camera_configs: list[CameraConfigSummary] = []
 
     model_config = {"from_attributes": True}
 
@@ -111,15 +85,22 @@ class VersionListItem(BaseModel):
     active_from: datetime | None = None
     active_until: datetime | None = None
     created_at: datetime
+    pending_sync_event_id: uuid.UUID | None = None
 
     model_config = {"from_attributes": True}
 
 
 class ActiveVersionResponse(BaseModel):
+    # SPEC-00A: flattened — sections removed. A store has exactly one floor
+    # plan, one set of zones/obstacles, and one set of camera configs per
+    # config version, so they live directly on the version response.
     id: uuid.UUID
     label: str | None = None
     status: str
     active_from: datetime | None = None
-    sections: list[SectionWithConfig] = []
+    floor_plan: FloorPlanResponse | None = None
+    zones: list[ZoneResponse] = []
+    obstacles: list[ObstacleResponse] = []
+    camera_configs: list[CameraConfigSummary] = []
 
     model_config = {"from_attributes": True}

@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iep1-daemon
+  namespace: retailvision
+  labels:
+    app: iep1-daemon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iep1-daemon
+  template:
+    metadata:
+      labels:
+        app: iep1-daemon
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9200"
+    spec:
+      containers:
+        - name: iep1
+          image: ghcr.io/your-org/retailvision/iep1:1.0.0
+          ports:
+            - name: metrics
+              containerPort: 9200
+          env:
+            - name: LOCAL_REDIS_URL
+              value: "redis://redis-edge:6379/0"
+            - name: WINDOW_SECONDS
+              value: "60"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import sys; sys.exit(0)"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+      # Host networking gives OpenCV direct access to store camera routes. DNS
+      # remains cluster-aware so IEP1 can reach the redis-edge Service.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet

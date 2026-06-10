@@ -1,0 +1,21 @@
+{{- if .Values.redis.tls }}
+# TLS server cert for the in-cluster Redis (port 6380), signed by the internal CA.
+# Produces a secret with tls.crt/tls.key/ca.crt that redis.conf mounts at /certs.
+# Clients (EEP/IEP3) connect with rediss:// and ssl_cert_reqs=none (see the
+# redis-url secret), since the cert is signed by the private CA.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: redis-server-tls
+  namespace: retailvision
+spec:
+  secretName: redis-server-tls
+  issuerRef:
+    name: retailvision-ca-issuer
+    kind: ClusterIssuer
+  dnsNames:
+    - redis-server
+    - redis-server.retailvision.svc.cluster.local
+  duration: 8760h
+  renewBefore: 720h
+{{- end }}

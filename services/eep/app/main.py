@@ -1,6 +1,12 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -10,8 +16,33 @@ from sqlalchemy import delete, text
 
 from app.api import register_routers
 from app.core.database import AsyncSessionLocal, engine
+from app.core.config import settings
+from app.core.canary import CanaryMiddleware
+from app.core.scheduler import start_scheduler, stop_scheduler
+from app.grpc_server.server import start_grpc_server, stop_grpc_server
 import app.models  # noqa: F401 — registers all SQLAlchemy mappers at startup
 from app.models.user import User
+
+logger = logging.getLogger(__name__)
+
+
+async def _close_orphan_sessions() -> None:
+    """Close camera_runtime_sessions that were still open when EEP last crashed.
+
+    In the k3s model, IEP2 crash recovery is k3s's responsibility. EEP only
+    needs to close the audit rows so history stays clean. Cameras that should
+    still be running will be restarted by the scheduler on the next tick.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                text("UPDATE camera_runtime_sessions SET stopped_at = now(), stop_reason = 'eep_restart' WHERE stopped_at IS NULL")
+            )
+            await db.commit()
+            if result.rowcount:
+                logger.info("Closed %d orphan camera_runtime_sessions", result.rowcount)
+    except Exception:
+        logger.exception("_close_orphan_sessions: DB update failed, skipping")
 
 
 async def _cleanup_deactivated_users():
@@ -31,29 +62,136 @@ async def _cleanup_deactivated_users():
             pass
 
 
+def _run_migrations() -> None:
+    """Run Alembic migrations synchronously. Called via run_in_executor."""
+    from alembic.config import Config
+    from alembic import command
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "head")
+
+
+async def _bootstrap_admin() -> None:
+    """Seed a super-admin from env on first boot (A3). Fail-safe and idempotent.
+
+    Runs only when BOTH ADMIN_BOOTSTRAP_EMAIL and ADMIN_BOOTSTRAP_PASSWORD are set
+    AND no super-admin exists yet. Any error is logged and swallowed — a bootstrap
+    failure must never crash startup (an admin can still be created via the CLI).
+    Never logs the password.
+    """
+    from sqlalchemy import select
+
+    from app.cli import create_or_promote_admin
+    from app.core.config import settings as _settings
+
+    email = _settings.ADMIN_BOOTSTRAP_EMAIL
+    password = _settings.ADMIN_BOOTSTRAP_PASSWORD
+    if not (email and password):
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            existing = await db.execute(
+                select(User).where(User.is_super_admin == True).limit(1)  # noqa: E712
+            )
+            if existing.scalar_one_or_none() is not None:
+                return  # an admin already exists — do nothing, do not reset password
+            user, action = await create_or_promote_admin(db, email=email, password=password)
+            await db.commit()
+            logger.info(
+                "Admin bootstrap: %s super-admin %s (user_id=%s)",
+                action, user.email, user.id,
+            )
+    except Exception:
+        logger.exception(
+            "Admin bootstrap failed; continuing startup (create an admin via the CLI)"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Add deactivated_at column if it doesn't exist (safe for existing DBs)
+    _app = app  # local alias — `import app.models` below rebinds the name `app` to the package
+    from app.core.config import settings as _settings
+    logger.info(
+        "EEP starting  window_seconds=%.1f  db_host=%s  debug_mode=%s",
+        _settings.WINDOW_SECONDS,
+        _settings.DATABASE_URL_EEP.split("@")[-1].split("/")[0],
+        _settings.DEBUG_MODE,
+    )
+
+    # Step 1: run schema migrations before any other activity.
+    await asyncio.get_running_loop().run_in_executor(None, _run_migrations)
+
+    # Step 2: ORM safety net — creates tables not yet covered by migrations.
     async with engine.begin() as conn:
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ"
         ))
-        # Phase 4 tables — created via ORM metadata if absent
         import app.models  # noqa: F401 — ensures all mappers are registered
         from app.models.base import Base as ModelBase
         await conn.run_sync(ModelBase.metadata.create_all)
 
+    # Step 2.5: optional one-time super-admin bootstrap (fail-safe).
+    await _bootstrap_admin()
+
+    # Step 3: rebuild _running_cameras from Redis before serving any traffic.
+    from app.grpc_server.camera_status import rebuild_running_cameras_on_startup
+    await rebuild_running_cameras_on_startup()
+
+    # Step 4: rebuild scheduler's _running_cameras from camera_status (Redis-backed).
+    from app.tasks.camera_scheduler import rebuild_running_cameras
+    await rebuild_running_cameras()
+
+    # Step 5: start gRPC server (Edge Agents may connect now).
+    await start_grpc_server()
+
+    # Step 6: start schedule evaluator.
+    start_scheduler()
+
+    # Step 7: initialise k8s/Docker clients for IEP3/IEP4/IEP5 provisioning.
+    # Gracefully fall back to Docker (production-local) or no-op on the laptop.
+    from app.core import iep3_manager, iep4_manager, iep5_manager
+    _loop = asyncio.get_running_loop()
+    await _loop.run_in_executor(None, iep3_manager.init_k8s_clients)
+    await _loop.run_in_executor(None, iep4_manager.init_k8s_clients)
+    await _loop.run_in_executor(None, iep5_manager.init_k8s_clients)
+
+    # Non-blocking background tasks — failures here do not block startup.
     try:
         from app.core.s3_client import ensure_bucket
         ensure_bucket()
     except Exception:
         pass
 
-    asyncio.create_task(_cleanup_deactivated_users())
-    yield
+    # Keep strong references to long-lived background tasks. asyncio only holds a
+    # weak reference to tasks, so an unreferenced create_task() result can be GC'd
+    # before it runs (the resolver's startup log never fired without this).
+    from app.core import punch_resolver
+    _app.state.background_tasks = [
+        asyncio.create_task(_cleanup_deactivated_users()),
+        asyncio.create_task(punch_resolver.run_forever()),  # employee-linking
+    ]
+
+    await _close_orphan_sessions()
+
+    try:
+        yield
+    finally:
+        stop_scheduler()
+        await stop_grpc_server()
+        await engine.dispose()
 
 
 app = FastAPI(title="RetailVision EEP", lifespan=lifespan)
+app.add_middleware(CanaryMiddleware, canary_percentage=settings.CANARY_PERCENTAGE)
+
+# Prometheus metrics: exposes GET /metrics with request count, latency histogram,
+# and error rate. Scraped by Prometheus (job "eep") — see monitoring/prometheus.yml.
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app)
+
+# Prometheus metrics: exposes GET /metrics with request count, latency histogram,
+# and error rate. Scraped by Prometheus (job "eep") — see monitoring/prometheus.yml.
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,17 +202,27 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(RequestValidationError)
-async def validation_error_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(
-        status_code=422,
-        content={"error": str(exc.errors()), "code": "VALIDATION_ERROR"},
-    )
+# Canonical error envelope + handlers: every error becomes
+# {"detail": {"error", "code"}}, and no unhandled exception leaks a stack trace.
+from app.core.errors import register_error_handlers
+register_error_handlers(app)
+
+# Rate limiting (slowapi) + request-size limits. Global per-IP default on every
+# route (auth routes add tighter limits via @limiter.limit); Redis-backed +
+# fail-open. 429 and 413 emit the error envelope.
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from app.core.ratelimit import limiter, rate_limit_handler, BodySizeLimitMiddleware
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
+app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(BodySizeLimitMiddleware)
 
 
 register_routers(app)
 
 
 @app.get("/health")
+@limiter.exempt
 async def health():
     return {"service": "eep", "status": "ok"}

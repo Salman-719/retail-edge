@@ -1,41 +1,26 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
+import { ExternalLink, RefreshCw, ClipboardList } from 'lucide-react'
 import { useAuth } from '../store'
 import { getAuditLog } from '../api'
+import { usePageTitle } from '../components/PageMeta'
+import { TableSkeleton } from '../components/Skeletons'
 
-const ACTION_GROUPS = {
-  Auth: ['login', 'logout', 'password_reset'],
-  Store: ['store_created', 'store_updated'],
-  Members: ['member_invited', 'member_removed', 'member_role_changed', 'permission_changed'],
-  Config: ['draft_created', 'draft_discarded', 'draft_expired', 'config_edited', 'version_activated', 'version_rolled_back'],
-  Employees: ['employee_created', 'employee_updated', 'employee_deleted', 'employee_section_assigned', 'employee_section_removed'],
-  Shifts: ['shift_pattern_created', 'shift_pattern_updated', 'shift_pattern_deleted', 'shift_created', 'shift_updated', 'shift_deleted', 'shift_employee_assigned', 'shift_attendance_updated', 'break_created'],
-}
-
-const ACTION_BADGE = {
-  login: 'bg-green-100 text-green-700',
-  logout: 'bg-gray-100 text-gray-600',
-  store_created: 'bg-blue-100 text-blue-700',
-  store_updated: 'bg-blue-100 text-blue-700',
-  member_invited: 'bg-purple-100 text-purple-700',
-  member_removed: 'bg-red-100 text-red-700',
-  member_role_changed: 'bg-purple-100 text-purple-700',
-  permission_changed: 'bg-purple-100 text-purple-700',
-  draft_created: 'bg-yellow-100 text-yellow-700',
-  draft_discarded: 'bg-orange-100 text-orange-700',
-  version_activated: 'bg-green-100 text-green-700',
-  version_rolled_back: 'bg-orange-100 text-orange-700',
-  employee_created: 'bg-teal-100 text-teal-700',
-  employee_updated: 'bg-teal-100 text-teal-700',
-  employee_deleted: 'bg-red-100 text-red-700',
-  shift_created: 'bg-indigo-100 text-indigo-700',
-  shift_deleted: 'bg-red-100 text-red-700',
-}
-
-const ENTITY_TYPES = ['store', 'store_config_version', 'member', 'employee', 'employee_section', 'shift_pattern', 'shift_instance', 'shift_assignment', 'break_record']
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function actionLabel(action) {
   return action.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+function actionBadgeClass(action) {
+  const label = actionLabel(action)
+  if (label.includes('Deleted') || label.includes('Removed'))
+    return 'border-l-4 border-red-500 bg-red-50 text-red-700'
+  if (label.includes('Created') || label.includes('Activated') || label.includes('Login'))
+    return 'border-l-4 border-green-500 bg-green-50 text-green-700'
+  if (label.includes('Updated') || label.includes('Assigned') || label.includes('Changed'))
+    return 'border-l-4 border-amber-500 bg-amber-50 text-amber-700'
+  return 'border-l-4 border-gray-300 bg-gray-50 text-gray-600'
 }
 
 function formatDate(iso) {
@@ -43,18 +28,76 @@ function formatDate(iso) {
   return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
+function relativeTime(iso) {
+  const diff = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days}d ago`
+  return `${Math.floor(days / 30)}mo ago`
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+function CopyableId({ id }) {
+  const [copied, setCopied] = useState(false)
+  function handleCopy() {
+    navigator.clipboard.writeText(id).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+  return (
+    <span className="relative group/id inline-block">
+      <button
+        onClick={handleCopy}
+        title={id}
+        className="text-xs text-gray-400 font-mono hover:text-blue-600 transition-colors cursor-pointer"
+      >
+        {id.slice(0, 8)}…
+      </button>
+      {copied && (
+        <span className="absolute -top-6 left-0 bg-gray-800 text-white text-xs px-2 py-0.5 rounded whitespace-nowrap z-10">
+          Copied!
+        </span>
+      )}
+    </span>
+  )
+}
+
+function TimeCell({ iso }) {
+  return (
+    <span className="relative group/time cursor-default">
+      <span className="text-xs text-gray-500 whitespace-nowrap">
+        {formatDate(iso)}
+      </span>
+      {/* Tooltip: relative time */}
+      <span className="pointer-events-none absolute bottom-full left-0 mb-1.5 px-2 py-1 bg-gray-800 text-white text-xs rounded whitespace-nowrap opacity-0 group-hover/time:opacity-100 transition-opacity z-10">
+        {relativeTime(iso)}
+      </span>
+    </span>
+  )
+}
+
 function StatePopover({ data, label }) {
   const [open, setOpen] = useState(false)
   if (!data || Object.keys(data).length === 0) return <span className="text-gray-300">—</span>
   return (
     <div className="relative inline-block">
-      <button onClick={() => setOpen(o => !o)} className="text-xs text-blue-600 hover:underline">
-        {label}
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 underline underline-offset-2 transition-colors"
+      >
+        {label === 'After' ? 'View changes' : label}
+        <ExternalLink size={10} />
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 top-5 z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-3 w-64 max-h-48 overflow-auto">
+          <div className="absolute left-0 top-6 z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-3 w-64 max-h-48 overflow-auto">
             <pre className="text-xs text-gray-700 whitespace-pre-wrap">{JSON.stringify(data, null, 2)}</pre>
           </div>
         </>
@@ -63,12 +106,30 @@ function StatePopover({ data, label }) {
   )
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const ACTION_GROUPS = {
+  Auth: ['login', 'logout', 'password_reset'],
+  Store: ['store_created', 'store_updated'],
+  Members: ['member_invited', 'member_removed', 'member_role_changed', 'permission_changed'],
+  Config: ['draft_created', 'draft_discarded', 'draft_expired', 'config_edited', 'version_activated', 'version_rolled_back'],
+  Employees: ['employee_created', 'employee_updated', 'employee_deleted'],
+  Shifts: ['shift_pattern_created', 'shift_pattern_updated', 'shift_pattern_deleted', 'shift_created', 'shift_updated', 'shift_deleted', 'shift_employee_assigned', 'shift_attendance_updated', 'break_created'],
+}
+
+const ENTITY_TYPES = ['store', 'store_config_version', 'member', 'employee', 'shift_pattern', 'shift_instance', 'shift_assignment', 'break_record']
+
 const PAGE_SIZE = 50
+
+const INPUT_CLS = 'border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm bg-white focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-shadow'
+
+// ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Audit() {
   const { slug } = useParams()
   const { state } = useAuth()
   const role = state.currentMember?.role || (state.user?.account_type === 'owner' ? 'owner' : null)
+  usePageTitle('Audit Log')
 
   const [entries, setEntries] = useState([])
   const [total, setTotal] = useState(0)
@@ -121,112 +182,132 @@ export default function Audit() {
   }
 
   return (
-    <div className="flex flex-col h-full overflow-auto">
+    <div className="page-enter flex flex-col h-full overflow-auto">
       <header className="px-6 py-4 border-b border-gray-200 bg-white flex items-center justify-between shrink-0">
         <div>
-          <h1 className="font-semibold text-gray-900">Audit Log</h1>
-          <p className="text-xs text-gray-400 mt-0.5">{total} total events</p>
+          <h1 className="page-title">Audit Log</h1>
+          <p className="page-subtitle">{total} total events</p>
         </div>
-        <button onClick={fetchData}
-          className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors">
+        <button onClick={fetchData} className="btn-outline text-xs py-1.5">
           Refresh
         </button>
       </header>
 
-      {/* Filters */}
-      <div className="px-6 py-3 border-b border-gray-100 bg-white flex flex-wrap items-end gap-3 shrink-0">
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Action</label>
-          <select name="action" value={filters.action} onChange={handleFilterChange}
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All actions</option>
-            {Object.entries(ACTION_GROUPS).map(([group, actions]) => (
-              <optgroup key={group} label={group}>
-                {actions.map(a => <option key={a} value={a}>{actionLabel(a)}</option>)}
-              </optgroup>
-            ))}
-          </select>
+      {/* Filter card */}
+      <div className="px-6 py-4 shrink-0">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-5 py-4 flex flex-wrap items-end gap-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1.5">Action</label>
+            <select name="action" value={filters.action} onChange={handleFilterChange} className={INPUT_CLS}>
+              <option value="">All actions</option>
+              {Object.entries(ACTION_GROUPS).map(([group, actions]) => (
+                <optgroup key={group} label={group}>
+                  {actions.map(a => <option key={a} value={a}>{actionLabel(a)}</option>)}
+                </optgroup>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1.5">Entity Type</label>
+            <select name="entity_type" value={filters.entity_type} onChange={handleFilterChange} className={INPUT_CLS}>
+              <option value="">All types</option>
+              {ENTITY_TYPES.map(t => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1.5">From</label>
+            <input type="datetime-local" name="since" value={filters.since} onChange={handleFilterChange} className={INPUT_CLS} />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1.5">Until</label>
+            <input type="datetime-local" name="until" value={filters.until} onChange={handleFilterChange} className={INPUT_CLS} />
+          </div>
+
+          {/* Spacer + clear link */}
+          <div className="flex-1 flex justify-end items-end">
+            {hasFilters && (
+              <button
+                onClick={clearFilters}
+                className="text-sm text-blue-600 hover:text-blue-800 transition-colors font-medium"
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
         </div>
 
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Entity Type</label>
-          <select name="entity_type" value={filters.entity_type} onChange={handleFilterChange}
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All types</option>
-            {ENTITY_TYPES.map(t => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">From</label>
-          <input type="datetime-local" name="since" value={filters.since} onChange={handleFilterChange}
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-        </div>
-
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Until</label>
-          <input type="datetime-local" name="until" value={filters.until} onChange={handleFilterChange}
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-        </div>
-
-        {hasFilters && (
-          <button onClick={clearFilters}
-            className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors">
-            Clear filters
-          </button>
+        {/* Row count indicator */}
+        {!loading && (
+          <p className="text-sm text-gray-500 mt-2 pl-1">
+            {entries.length > 0
+              ? `Showing ${entries.length} of ${total} event${total !== 1 ? 's' : ''}`
+              : hasFilters
+                ? 'No events match your filters.'
+                : 'No audit events yet.'
+            }
+          </p>
         )}
       </div>
 
       {/* Table */}
-      <div className="flex-1 p-6 min-h-0">
-        {error && (
-          <div className="bg-red-50 text-red-700 text-sm px-4 py-3 rounded-lg border border-red-200 mb-4">{error}</div>
-        )}
-
+      <div className="flex-1 px-6 pb-6 min-h-0">
         {loading ? (
-          <div className="text-sm text-gray-400 py-8 text-center">Loading…</div>
-        ) : entries.length === 0 ? (
-          <div className="text-sm text-gray-400 py-8 text-center">
-            {hasFilters ? 'No events match your filters.' : 'No audit events yet.'}
+          <TableSkeleton rows={8} cols={5} />
+        ) : error ? (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-center space-y-3">
+            <RefreshCw size={28} className="mx-auto text-red-400" />
+            <p className="text-sm font-medium text-red-700">{error}</p>
+            <button onClick={fetchData} className="btn-outline text-xs py-1.5 border-red-300 text-red-600 hover:bg-red-100">
+              Retry
+            </button>
           </div>
-        ) : (
-          <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+        ) : entries.length === 0 && !hasFilters ? (
+          <div className="bg-white border border-gray-200 rounded-xl p-6 text-center space-y-3">
+            <ClipboardList size={28} className="mx-auto text-gray-300" />
+            <p className="text-sm text-gray-400">No audit events recorded yet.</p>
+          </div>
+        ) : entries.length > 0 && (
+          <div className="bg-white border border-gray-100 rounded-xl overflow-hidden shadow-sm">
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-200">
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Time</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Action</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden md:table-cell">Entity</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden lg:table-cell">User</th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden lg:table-cell">Changes</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Time</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Action</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider hidden md:table-cell">Entity</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider hidden lg:table-cell">User</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider hidden lg:table-cell">Changes</th>
                 </tr>
               </thead>
               <tbody>
                 {entries.map((entry, i) => (
-                  <tr key={entry.id} className={`${i < entries.length - 1 ? 'border-b border-gray-100' : ''} hover:bg-gray-50 transition-colors`}>
-                    <td className="px-4 py-3 text-gray-500 whitespace-nowrap text-xs">{formatDate(entry.created_at)}</td>
+                  <tr
+                    key={entry.id}
+                    className={`border-b border-gray-100 last:border-0 hover:bg-blue-50 transition-colors ${i % 2 === 1 ? 'bg-gray-50/50' : 'bg-white'}`}
+                  >
                     <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${ACTION_BADGE[entry.action] || 'bg-gray-100 text-gray-600'}`}>
+                      <TimeCell iso={entry.created_at} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-block rounded-r-full px-3 py-1 text-xs font-medium ${actionBadgeClass(entry.action)}`}>
                         {actionLabel(entry.action)}
                       </span>
                     </td>
                     <td className="px-4 py-3 hidden md:table-cell">
                       {entry.entity_type ? (
                         <div>
-                          <span className="text-xs text-gray-600">{entry.entity_type.replace(/_/g, ' ')}</span>
-                          {entry.entity_id && (
-                            <p className="text-xs text-gray-400 font-mono">{entry.entity_id.slice(0, 8)}…</p>
-                          )}
+                          <span className="text-xs text-gray-600 capitalize">{entry.entity_type.replace(/_/g, ' ')}</span>
+                          {entry.entity_id && <p><CopyableId id={entry.entity_id} /></p>}
                         </div>
                       ) : <span className="text-gray-300">—</span>}
                     </td>
                     <td className="px-4 py-3 hidden lg:table-cell">
-                      {entry.user_id
-                        ? <span className="text-xs text-gray-500 font-mono">{entry.user_id.slice(0, 8)}…</span>
-                        : <span className="text-gray-300">—</span>}
+                      {entry.user_id ? <CopyableId id={entry.user_id} /> : <span className="text-gray-300">—</span>}
                     </td>
                     <td className="px-4 py-3 hidden lg:table-cell">
-                      <div className="flex gap-2">
+                      <div className="flex flex-col gap-1">
                         {entry.before_state && <StatePopover data={entry.before_state} label="Before" />}
                         {entry.after_state && <StatePopover data={entry.after_state} label="After" />}
                         {!entry.before_state && !entry.after_state && <span className="text-gray-300">—</span>}
@@ -246,12 +327,18 @@ export default function Audit() {
               Page {page} of {totalPages} · {total} events
             </p>
             <div className="flex gap-2">
-              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}
-                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+              <button
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
                 Previous
               </button>
-              <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}
-                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+              <button
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages}
+                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
                 Next
               </button>
             </div>

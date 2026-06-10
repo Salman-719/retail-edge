@@ -52,20 +52,6 @@ class PatchEmployeeRequest(BaseModel):
         return v
 
 
-class EmployeeSectionItem(BaseModel):
-    id: uuid.UUID
-    section_id: uuid.UUID
-    is_primary: bool
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class AssignSectionRequest(BaseModel):
-    section_id: uuid.UUID
-    is_primary: bool = False
-
-
 class EmployeeResponse(BaseModel):
     id: uuid.UUID
     store_id: uuid.UUID

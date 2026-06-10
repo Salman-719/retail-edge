@@ -1,0 +1,282 @@
+{{- if .Values.monitoring.enabled }}
+# ── Prometheus (in-cluster) ──────────────────────────────────────────────────
+# Scrapes the stable services statically (EEP, exporters) and discovers the
+# dynamic annotated workers via Kubernetes pod SD using prometheus.io/scrape +
+# prometheus.io/port annotations.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: retailvision
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: retailvision-prometheus
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/metrics", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: retailvision-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: retailvision
+roleRef:
+  kind: ClusterRole
+  name: retailvision-prometheus
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: retailvision
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    {{- if .Values.monitoring.alertmanager.enabled }}
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager:9093"]
+    {{- end }}
+    rule_files:
+      - /etc/prometheus/alert_rules.yml
+      - /etc/prometheus/recording_rules.yml
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+      {{- if .Values.monitoring.alertmanager.enabled }}
+      - job_name: alertmanager
+        static_configs:
+          - targets: ["alertmanager:9093"]
+      {{- end }}
+      - job_name: eep
+        static_configs:
+          - targets: ["eep-http:{{ .Values.eep.httpPort }}"]
+      {{- if .Values.iep6.enabled }}
+      - job_name: iep6
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["iep6:8006"]
+      {{- end }}
+      {{- if .Values.monitoring.exporters.redis.enabled }}
+      - job_name: redis
+        static_configs:
+          - targets: ["redis-exporter:9121"]
+      {{- end }}
+      {{- if .Values.monitoring.exporters.postgres.enabled }}
+      - job_name: postgres
+        static_configs:
+          - targets: ["postgres-exporter:9187"]
+      {{- end }}
+      {{- if .Values.monitoring.exporters.node.enabled }}
+      - job_name: node
+        static_configs:
+          - targets: ["node-exporter:9100"]
+      {{- end }}
+      # Dynamic annotated workers (IEP3 :9300, edge/local pods where reachable).
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ["retailvision"]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+            action: replace
+            regex: (\d+);(.+)
+            replacement: $2:$1
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: job
+          - source_labels: [__meta_kubernetes_pod_label_store_id]
+            target_label: store_id
+  alert_rules.yml: |
+{{ .Files.Get "files/alert_rules.yml" | indent 4 }}
+  recording_rules.yml: |
+{{ .Files.Get "files/recording_rules.yml" | indent 4 }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: retailvision
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.global.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.monitoring.prometheus.storage | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: retailvision
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      {{- with .Values.stablePool.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.stablePool.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: prometheus
+      securityContext:
+        fsGroup: 65534
+        runAsUser: 65534
+        runAsNonRoot: true
+      containers:
+        - name: prometheus
+          image: {{ .Values.monitoring.prometheus.image | quote }}
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time={{ .Values.monitoring.prometheus.retention }}"
+          ports:
+            - containerPort: 9090
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: data
+              mountPath: /prometheus
+          resources: {{ toYaml .Values.monitoring.prometheus.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 15
+            periodSeconds: 15
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: prometheus-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: retailvision
+  labels:
+    app: prometheus
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+{{- if .Values.monitoring.alertmanager.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: retailvision
+data:
+  alertmanager.yml: |
+{{ .Files.Get "files/alertmanager.yml" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: retailvision
+  labels:
+    app: alertmanager
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      {{- with .Values.stablePool.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.stablePool.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 65534
+        runAsUser: 65534
+        runAsNonRoot: true
+      containers:
+        - name: alertmanager
+          image: {{ .Values.monitoring.alertmanager.image | quote }}
+          args:
+            - "--config.file=/etc/alertmanager/alertmanager.yml"
+            - "--storage.path=/alertmanager"
+          ports:
+            - containerPort: 9093
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+              readOnly: true
+            - name: data
+              mountPath: /alertmanager
+          resources: {{ toYaml .Values.monitoring.alertmanager.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9093
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: config
+          configMap:
+            name: alertmanager-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: retailvision
+  labels:
+    app: alertmanager
+spec:
+  type: ClusterIP
+  selector:
+    app: alertmanager
+  ports:
+    - name: http
+      port: 9093
+      targetPort: 9093
+{{- end }}
+{{- end }}

@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reid-service
+  namespace: retailvision
+  labels:
+    app: reid-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reid-service
+  template:
+    metadata:
+      labels:
+        app: reid-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9401"
+    spec:
+      containers:
+        - name: reid-service
+          image: ghcr.io/your-org/retailvision/reid:1.0.0
+          ports:
+            - name: metrics
+              containerPort: 9401
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: "2Gi"
+              cpu: "1"
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+          env:
+            - name: REID_MODEL_VARIANT
+              value: "resnet50_msmt17"
+            - name: REID_MAX_BATCH_SIZE
+              value: "64"
+            - name: REID_BATCH_TIMEOUT_MS
+              value: "20"
+          volumeMounts:
+            - name: ipc-sockets
+              mountPath: /tmp/sockets
+          livenessProbe:
+            exec:
+              command: ["grpc_health_probe",
+                        "-addr=unix:///tmp/sockets/reid_health.sock"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 3
+      volumes:
+        - name: ipc-sockets
+          hostPath:
+            path: /dev/shm/sockets
+            type: DirectoryOrCreate

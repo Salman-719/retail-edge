@@ -1,8 +1,22 @@
+# Shared configuration injected into all pipeline services via YAML anchor.
+# WINDOW_SECONDS and DATABASE_URL_SERVER must be identical across IEP1/IEP2/IEP3 —
+# mismatch causes silent reconciliation failure.
+x-shared-config: &shared-config
+  WINDOW_SECONDS: "${WINDOW_SECONDS:-60}"
+  DATABASE_URL_SERVER: "postgresql://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@pgbouncer:5432/${POSTGRES_DB:-retailvision}"
+  # Server Redis URL — used by IEP3, live_bridge, and edge_agent (for IEP2 ConfigMaps).
+  # IEP1 uses LOCAL_REDIS_URL instead. EEP uses REDIS_URL (unchanged).
+  SERVER_REDIS_URL: "redis://redis:6379/0"
+
 services:
   # ─── Infrastructure ───────────────────────────────────────────────────────────
 
   postgres:
-    image: postgres:15-alpine
+    # TimescaleDB drop-in replacement for postgres:16-alpine (SPEC-000).
+    # Same PG16 engine; bundles the timescaledb shared library and sets
+    # shared_preload_libraries on first init. Pinned — never use :latest or
+    # the -ha (HA clustering) variant. Requires a fresh data volume.
+    image: timescale/timescaledb:2.14.2-pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-retailvision}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-retailvision_dev}
@@ -11,6 +25,8 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # schema.sql used for fast dev resets only; Alembic is the authoritative
+      # migration path (R1). Remove this line in staging/production.
       - ./services/eep/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-retailvision}"]
@@ -20,7 +36,7 @@ services:
     stop_grace_period: 30s
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.2.4-alpine
     ports:
       - "6379:6379"
     volumes:
@@ -32,7 +48,8 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:latest
+    # Pin to a specific release — minio does not use semver, update periodically.
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-retailvision}
@@ -48,12 +65,60 @@ services:
       timeout: 20s
       retries: 3
 
+  pgbouncer:
+    image: edoburu/pgbouncer:1.22.1-p0
+    volumes:
+      - ./infra/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./infra/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    ports:
+      - "5433:5432"   # Host port 5433 avoids clash with postgres on 5432
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "psql -h 127.0.0.1 -p 5432 -U retailvision -d retailvision -c 'SELECT 1' -t 2>/dev/null | grep -q 1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   # ─── Monitoring ───────────────────────────────────────────────────────────────
 
   prometheus:
     image: prom/prometheus:v2.51.0
     ports:
       - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+    ports:
+      - "9121:9121"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  postgres_exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      # Connects directly to postgres (not pgbouncer) — reuses the same creds.
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  node_exporter:
+    image: prom/node-exporter:v1.8.1
+    ports:
+      - "9100:9100"
     restart: unless-stopped
 
   grafana:
@@ -66,6 +131,7 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
     restart: unless-stopped
@@ -87,63 +153,358 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+      - "50051:50051"
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}
-      REDIS_URL: redis://redis:6379/0
+      <<: *shared-config
+      # EEP uses SQLAlchemy asyncpg dialect — must NOT be DATABASE_URL_SERVER.
+      DATABASE_URL_EEP: "postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@pgbouncer:5432/${POSTGRES_DB:-retailvision}"
+      # Alembic uses psycopg2 and connects directly to postgres (bypasses PgBouncer).
+      ALEMBIC_DATABASE_URL: "postgresql+psycopg2://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@postgres:5432/${POSTGRES_DB:-retailvision}"
       S3_ENDPOINT_URL: http://minio:9000
       S3_PUBLIC_URL: http://localhost:9000
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
       S3_BUCKET: ${S3_BUCKET:-retailvision}
+      # EEP reads REDIS_URL (not SERVER_REDIS_URL) — keep explicit
+      REDIS_URL: "redis://redis:6379/0"
+      # gRPC — empty cert paths enable insecure dev mode (no TLS, no auth check).
+      # Set to real cert paths + a strong secret in staging/production.
+      AGENT_SECRET: "${AGENT_SECRET:-dev-agent-secret}"
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
       SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
+      # DEBUG_MODE defaults to false. Override in docker-compose.dev.yml for local dev.
+      DEBUG_MODE: ${DEBUG_MODE:-false}
+      IEP2_IMAGE: ${IEP2_IMAGE:-retailvision-iep2:latest}
+      DOCKER_NETWORK: ${DOCKER_NETWORK:-retail-edge_default}
+      IPC_SOCKETS_VOLUME: ${IPC_SOCKETS_VOLUME:-retail-edge_ipc-sockets}
+      YOLO_HEALTH_TCP_ADDR: yolo-service:50052
+      REID_HEALTH_TCP_ADDR: reid-service:50053
+      ML_SERVICES_TIMEOUT_S: ${ML_SERVICES_TIMEOUT_S:-120}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      postgres:
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
+      yolo-service:
+        condition: service_started
+      reid-service:
+        condition: service_started
+    restart: on-failure
 
-  iep1-ingestion:
+  # ── IEP1 ingestion daemon ─────────────────────────────────────────────────
+  # Single daemon for all cameras on this edge device.  Edge Agent controls it
+  # via gRPC AddCamera / RemoveCamera calls on the iep1-sockets unix socket.
+  # In production this container runs on the Jetson edge device; here it runs
+  # on the same machine as the rest of the stack for dev/test.
+  iep1-daemon:
     build:
-      context: ./services/iep1-ingestion
+      context: ./services/iep1_ingestion
+      dockerfile: Dockerfile
+    environment:
+      # IEP1 writes to edge-local Redis; in compose both are the same instance
+      LOCAL_REDIS_URL: "redis://redis:6379/0"
+      IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
+      IEP1_HEALTH_SOCK: "unix:///tmp/iep1-sockets/iep1_health.sock"
+      TMPFS_FRAME_ROOT: /dev/shm/frames
+      JPEG_QUALITY: ${JPEG_QUALITY:-85}
+    volumes:
+      - iep1-sockets:/tmp/iep1-sockets
+      # Shared frame store: IEP1 writes JEPGs here; IEP2 reads them by tmpfs path.
+      - frame-store:/dev/shm/frames
+      # Dev test videos: IEP1 opens cloud_stream_url via cv2.VideoCapture.
+      # On a real device this is an RTSP URL; in dev use a file path like
+      # /workspace/testing-data/Camera1.mp4 entered as the camera's stream URL.
+      - ./testing-data:/workspace/testing-data:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: on-failure
+
+  # ── YOLO inference service ────────────────────────────────────────────────────
+  # Single GPU process; batches frames from all IEP2 workers into one TRT call.
+  # IMPORTANT: The Dockerfile uses a Jetson JetPack base image (ARM64).
+  # On x86 dev machines, build with Dockerfile.dev (CPU fallback) instead.
+  yolo-service:
+    build:
+      context: ./services/yolo_service
+      dockerfile: Dockerfile
+      args:
+        MODEL_VARIANT: ${YOLO_MODEL_VARIANT:-n}
+    environment:
+      YOLO_MODEL_VARIANT: ${YOLO_MODEL_VARIANT:-n}
+      YOLO_MAX_BATCH_SIZE: ${YOLO_MAX_BATCH_SIZE:-32}
+      YOLO_BATCH_TIMEOUT_MS: ${YOLO_BATCH_TIMEOUT_MS:-20}
+      YOLO_CONF: ${YOLO_CONF:-0.25}
+      YOLO_IOU: ${YOLO_IOU:-0.45}
+      YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
+      YOLO_HEALTH_SOCK: "unix:///tmp/sockets/yolo_health.sock"
+      YOLO_HEALTH_TCP_ADDR: "[::]:50052"
+    volumes:
+      - ipc-sockets:/tmp/sockets
+    ports:
+      - "50052:50052"
+    expose:
+      - "9400"            # Prometheus /metrics (job "detector")
+    restart: on-failure
+
+  # ── ReID embedding service (resnet50_msmt17) ─────────────────────────────────
+  # Single GPU process; batches person crops from all IEP2 workers into one TRT call.
+  # Returns L2-normalised 2048-dim float32 embeddings. Jetson/ARM64 only.
+  reid-service:
+    build:
+      context: ./services/reid_service
+      dockerfile: Dockerfile
+    environment:
+      REID_MAX_BATCH_SIZE: ${REID_MAX_BATCH_SIZE:-64}
+      REID_BATCH_TIMEOUT_MS: ${REID_BATCH_TIMEOUT_MS:-50}
+      REID_INPUT_SOCK: "ipc:///tmp/sockets/reid_input.sock"
+      REID_HEALTH_SOCK: "unix:///tmp/sockets/reid_health.sock"
+      REID_HEALTH_TCP_ADDR: "[::]:50053"
+    volumes:
+      - ipc-sockets:/tmp/sockets
+    ports:
+      - "50053:50053"
+    restart: on-failure
+
+  iep2_vision:
+    build:
+      context: ./services/iep2_vision
+      dockerfile: Dockerfile
+    environment:
+      # pydantic-settings reads these directly — no CLI args (R2 M2-S4)
+      CAMERA_ID: ${CAMERA_ID}
+      CAMERA_CONFIG_ID: ${CAMERA_CONFIG_ID:-}
+      STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
+      WINDOW_SECONDS: "${WINDOW_SECONDS:-60}"
+      DATABASE_URL_SERVER: "postgresql://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD:-retailvision_dev}@pgbouncer:5432/${POSTGRES_DB:-retailvision}"
+      # In compose, local and server Redis are the same instance.
+      # In production: LOCAL_REDIS_URL points to edge-device Redis; SERVER_REDIS_URL to server Redis.
+      LOCAL_REDIS_URL: "redis://redis:6379/0"
+      SERVER_REDIS_URL: "redis://redis:6379/0"
+      YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
+      REID_INPUT_SOCK: "ipc:///tmp/sockets/reid_input.sock"
+      TMPFS_FRAME_ROOT: /dev/shm/frames
+      YOLO_HEALTH_TCP_ADDR: yolo-service:50052
+      REID_HEALTH_TCP_ADDR: reid-service:50053
+    volumes:
+      - ./testing-data:/workspace/testing-data:ro
+      - ipc-sockets:/tmp/sockets
+      - frame-store:/dev/shm/frames
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      yolo-service:
+        condition: service_started
+      reid-service:
+        condition: service_started
+      iep1-daemon:
+        condition: service_started
+
+  iep3_reconciliation:
+    build:
+      context: ./services/iep3_reconciliation
+      dockerfile: Dockerfile
+    environment:
+      <<: *shared-config
+      # STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
+      # EXPECTED_CAMERAS removed — IEP3 now reads expected camera count from DB
+      COORDINATOR_TIMEOUT_S: ${COORDINATOR_TIMEOUT_S:-120}
+      REID_THRESHOLD: ${REID_THRESHOLD:-0.85}
+      MAX_SPEED_MPS: ${MAX_SPEED_MPS:-1.5}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-2048}
+      CENTROID_EMA_ALPHA: ${CENTROID_EMA_ALPHA:-0.3}
+      POSITION_WEIGHT_AREA: ${POSITION_WEIGHT_AREA:-0.7}
+      POSITION_WEIGHT_CONF: ${POSITION_WEIGHT_CONF:-0.3}
+      GRACE_SECONDS: ${GRACE_SECONDS:-300.0}
+      DEFAULT_FRAME_WIDTH: ${DEFAULT_FRAME_WIDTH:-1920}
+      DEFAULT_FRAME_HEIGHT: ${DEFAULT_FRAME_HEIGHT:-1080}
+      EXPECTED_CAMERAS_REFRESH_BATCHES: ${EXPECTED_CAMERAS_REFRESH_BATCHES:-10}
+      ORPHAN_SWEEP_INTERVAL_BATCHES: ${ORPHAN_SWEEP_INTERVAL_BATCHES:-50}
+    expose:
+      - "9300"            # Prometheus /metrics (job "iep3")
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: on-failure
+
+  # IEP4 — alert evaluation daemon. One process per store (same pattern as
+  # IEP3). No HTTP port. STORE_ID must be set to the store this instance serves;
+  # like IEP3, real per-store instances are intended to be spawned by an EEP
+  # manager — set STORE_ID in the environment to run a single instance in dev.
+  iep4_alerts:
+    build:
+      context: ./services/iep4_alerts
+      dockerfile: Dockerfile
+    environment:
+      <<: *shared-config
+      STORE_ID: ${STORE_ID:-}
+      EVALUATION_BATCHES: ${EVALUATION_BATCHES:-5}
+      MAX_LOOKBACK_BATCHES: ${MAX_LOOKBACK_BATCHES:-60}
+      CATCHUP_BATCH_SIZE: ${CATCHUP_BATCH_SIZE:-1}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+    restart: on-failure
+
+  # IEP5 — end-of-shift analytics job. Runs once per (store, shift_date) and
+  # exits; launched by EEP (k8s Job in prod / `docker compose run` in dev), not
+  # by `up`. The `jobs` profile keeps `up` from starting it. Run manually with:
+  #   docker compose ... run --rm -e STORE_ID=<uuid> -e SHIFT_DATE=<YYYY-MM-DD> iep5_analytics
+  iep5_analytics:
+    profiles: ["jobs"]
+    build:
+      context: ./services/iep5_analytics
+      dockerfile: Dockerfile
+    environment:
+      <<: *shared-config
+      STORE_ID: ${STORE_ID:-}
+      SHIFT_DATE: ${SHIFT_DATE:-}
+      HEATMAP_CELL_SIZE_M: ${HEATMAP_CELL_SIZE_M:-0.5}
+      PASSTHROUGH_DWELL_MS: ${PASSTHROUGH_DWELL_MS:-30000}
+      DEAD_PERIOD_THRESHOLD: ${DEAD_PERIOD_THRESHOLD:-3}
+      DEAD_PERIOD_DURATION_MS: ${DEAD_PERIOD_DURATION_MS:-1800000}
+    restart: "no"
+
+  iep6_agent:
+    build:
+      context: ./services/iep6_agent
       dockerfile: Dockerfile
     ports:
-      - "8001:8001"
+      - "8006:8006"
 
-  iep2-vision:
+  live_bridge:
     build:
-      context: ./services/iep2-vision
+      context: ./services/live_bridge
+    ports:
+      - "8010:8010"
+    environment:
+      SERVER_REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_URL: ${S3_PUBLIC_URL:-http://localhost:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-retailvision}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-retailvision_dev}
+      S3_BUCKET: ${S3_BUCKET:-retailvision}
+      PRESIGNED_URL_EXPIRY: 30
+    depends_on:
+      - redis
+      - minio
+    restart: unless-stopped
+
+  # ─── IEP2 Vision Debug Console (dev-only) ────────────────────────────────
+  # Runs the FastAPI upload+WebSocket server on :8002.
+  # The frontend /dev/vision page connects to VITE_IEP2_DEV_API_URL (default http://localhost:8002).
+  # Start alongside the main stack:  docker compose --profile dev up -d iep2_dev
+  iep2_dev:
+    build:
+      context: ./services/iep2_vision
       dockerfile: Dockerfile
     ports:
       - "8002:8002"
+    environment:
+      <<: *shared-config
+      YOLO_INPUT_SOCK: "ipc:///tmp/sockets/yolo_input.sock"
+      REID_INPUT_SOCK: "ipc:///tmp/sockets/reid_input.sock"
+      LOCAL_REDIS_URL: "redis://redis:6379/0"
+      SERVER_REDIS_URL: "redis://redis:6379/0"
+    volumes:
+      - ./testing-data:/workspace/testing-data:ro
+      - ipc-sockets:/tmp/sockets
+      - frame-store:/dev/shm/frames
+    command: ["python", "-m", "uvicorn", "services.iep2_vision.app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      yolo-service:
+        condition: service_started
+      reid-service:
+        condition: service_started
+    profiles:
+      - dev
 
-  iep3-alerts:
+  # ─── Edge Agent (dev-only) ────────────────────────────────────────────────
+  # In production the Edge Agent runs on the physical edge device, not here.
+  # This entry lets you test the full gRPC loop on a single machine.
+  edge_agent_dev:
     build:
-      context: ./services/iep3-alerts
+      context: ./services/edge_agent
       dockerfile: Dockerfile
-    ports:
-      - "8003:8003"
-
-  iep4-analytics:
-    build:
-      context: ./services/iep4-analytics
-      dockerfile: Dockerfile
-    ports:
-      - "8004:8004"
-
-  iep5-agent:
-    build:
-      context: ./services/iep5-agent
-      dockerfile: Dockerfile
-    ports:
-      - "8005:8005"
+    environment:
+      <<: *shared-config
+      EEP_GRPC_URL: eep:50051
+      STORE_ID: ${STORE_ID:-00000000-0000-0000-0000-000000000001}
+      AGENT_VERSION: ${AGENT_VERSION:-0.1.0}
+      AGENT_SECRET: "${AGENT_SECRET:-dev-agent-secret}"
+      IEP1_CONTROL_SOCK: "unix:///tmp/iep1-sockets/iep1_control.sock"
+      IEP1_HEALTH_SOCK: "unix:///tmp/iep1-sockets/iep1_health.sock"
+      # In the compose network, yolo-service and reid-service are reachable by
+      # their service names, not localhost. The Edge Agent defaults to localhost:50052/50053
+      # which only works on a Jetson host where the containers share the host network.
+      YOLO_HEALTH_SOCK:  "yolo-service:50052"
+      REID_HEALTH_SOCK: "reid-service:50053"
+      # IPC_SOCKETS_HOST_PATH is only used by the k8s path (IEP2 pod health sockets).
+      # In compose, IEP2 health sockets land in the ipc-sockets volume at /tmp/sockets.
+      IPC_SOCKETS_HOST_PATH: "/tmp/iep1-sockets"
+    volumes:
+      - iep1-sockets:/tmp/iep1-sockets
+    depends_on:
+      - eep
+      - iep1-daemon
+      - yolo-service
+      - reid-service
+    profiles:
+      - edge
 
 volumes:
   postgres_data:
   redis_data:
   minio_data:
   grafana_data:
+  prometheus_data:
+  # Shared tmpfs for JPEG frames produced by IEP1 daemon and consumed by IEP2.
+  # In production the edge device writes frames locally; in compose they share
+  # this volume so IEP2 can read the tmpfs paths IEP1 writes to manifests.
+  frame-store:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+
+  # Shared tmpfs for IEP1 daemon gRPC control/health unix sockets.
+  # Shared between iep1-daemon and edge_agent_dev containers.
+  iep1-sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+
+  # Shared tmpfs for ZMQ IPC sockets between yolo-service and IEP2 containers.
+  # Lives in RAM — no disk I/O for inter-process frame delivery.
+  ipc-sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      # Lower MTU avoids SSL EOF errors on Windows Docker Desktop + WSL2 where
+      # the host network may have a smaller MTU than Docker's default of 1500.
+      com.docker.network.driver.mtu: "1450"

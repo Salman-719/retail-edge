@@ -34,6 +34,7 @@ class StoreConfigVersion(Base):
         Uuid, ForeignKey("users.id"), nullable=True
     )
     diff_from_previous: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    activate_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )

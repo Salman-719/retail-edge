@@ -1,0 +1,41 @@
+---
+# HTTP — internal cluster access (EEP API, admin, health)
+apiVersion: v1
+kind: Service
+metadata:
+  name: eep-http
+  namespace: retailvision
+  labels:
+    app: eep
+spec:
+  type: ClusterIP
+  selector:
+    app: eep
+  ports:
+    - name: http
+      port: {{ .Values.eep.httpPort }}
+      targetPort: {{ .Values.eep.httpPort }}
+      protocol: TCP
+---
+# gRPC — edge-reachable (TLS terminated at the EEP pod). EKS production sets this
+# to LoadBalancer with AWS NLB annotations and fixed EIPs from Terraform outputs.
+# Dev may keep it ClusterIP or use k3s/klipper LoadBalancer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: eep-grpc
+  namespace: retailvision
+  labels:
+    app: eep
+  {{- with .Values.eep.grpc.serviceAnnotations }}
+  annotations: {{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.eep.grpc.serviceType }}
+  selector:
+    app: eep
+  ports:
+    - name: grpc
+      port: {{ .Values.eep.grpcPort }}
+      targetPort: {{ .Values.eep.grpcPort }}
+      protocol: TCP

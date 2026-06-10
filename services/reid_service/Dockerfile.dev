@@ -1,0 +1,36 @@
+# x86 / Intel CPU dev build — no TRT, no pycuda, no ARM base image.
+# Build context: ./services/reid_service (no files needed from repo root).
+# Do NOT use this in staging or production — use Dockerfile (Jetson TRT).
+
+FROM python:3.11-slim
+
+WORKDIR /workspace
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Torch wheel index. CPU by default; the GPU overlay sets this to a CUDA index
+# (e.g. https://download.pytorch.org/whl/cu121). The CUDA wheel bundles its own
+# CUDA runtime, so the host needs only the NVIDIA driver + Container Toolkit.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir \
+    torch==2.3.1 \
+    torchvision==0.18.1 \
+    --index-url ${TORCH_INDEX_URL}
+
+COPY requirements.dev.txt .
+RUN pip install --no-cache-dir -r requirements.dev.txt
+
+# Pre-download resnet50_msmt17 weights at build time — avoids runtime internet dependency.
+# gdown --fuzzy handles Google Drive's large-file confirmation redirect that
+# breaks the plain uc?id= URL and causes a corrupt HTML download.
+RUN gdown --fuzzy "https://drive.google.com/uc?id=1ep7RypVDOthCRIAqDnn4_N-UhkkFHJsj" -O resnet50_msmt17.pt \
+    && python -c "import torch; ckpt = torch.load('resnet50_msmt17.pt', map_location='cpu', weights_only=False, encoding='latin1'); torch.save(ckpt, 'resnet50_msmt17.pt'); print('weights converted OK')"
+
+# Copy service source — mirrors the module path services.reid_service.*
+COPY . services/reid_service/
+RUN touch services/__init__.py
+
+CMD ["python", "-m", "services.reid_service.service_dev"]

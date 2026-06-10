@@ -1,0 +1,42 @@
+# Copy to terraform.tfvars and fill in. Run: terraform init && terraform apply
+
+aws_region  = "eu-west-1"
+environment = "production"
+
+letsencrypt_email = "ops@retailvision.example.com"
+
+# Globally-unique bucket name (must match Helm values: s3.bucket).
+s3_bucket_name = "retailvision-prod-objects-CHANGEME"
+
+# ── EKS ──
+cluster_version = "1.30"
+# Lock the public API endpoint to your IP/office CIDR for production:
+# eks_public_access_cidrs = ["203.0.113.4/32"]
+
+# ── Stable on-demand node group (stateful + system tier) ──
+stable_instance_type = "t4g.large"
+stable_node_count    = 2
+stable_node_max_count = 4
+node_root_volume_gb  = 60
+
+# ── Private edge data plane ──
+# The gateway has no SSH ingress; manage it through AWS Systems Manager.
+wireguard_enabled       = true
+wireguard_instance_type = "t4g.nano"
+wireguard_port          = 51820
+# Leave open for stores with changing public IPs. Unknown peers cannot complete
+# the WireGuard handshake; narrow this list when stores have static egress IPs.
+wireguard_client_cidrs   = ["0.0.0.0/0"]
+wireguard_tunnel_cidr    = "10.99.0.0/24"
+wireguard_server_address = "10.99.0.1/24"
+
+# ── Karpenter elastic capacity (workers, per-store IEP3/IEP4, IEP5 jobs) ──
+karpenter_cpu_limit = "200"   # max total vCPUs Karpenter may provision
+
+# Hostnames: leave empty to derive app.<ingress-eip>.nip.io / eep.<...>.nip.io.
+# app_host = "app.retailvision.example.com"
+# eep_host = "eep.retailvision.example.com"
+
+# Optional: let Terraform create the Route53 records (needs a real domain).
+# create_dns_records = true
+# route53_zone_id    = "Z0123456789ABCDEFGHIJ"

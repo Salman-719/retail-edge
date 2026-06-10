@@ -15,8 +15,8 @@ class Obstacle(Base):
     version_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("store_config_versions.id", ondelete="CASCADE"), nullable=False
     )
-    section_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("sections.id", ondelete="CASCADE"), nullable=False
+    store_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     points: Mapped[list] = mapped_column(JSONB, nullable=False)
