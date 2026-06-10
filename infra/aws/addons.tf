@@ -139,6 +139,10 @@ resource "helm_release" "ingress_nginx" {
           "service.beta.kubernetes.io/aws-load-balancer-scheme"          = "internet-facing"
           "service.beta.kubernetes.io/aws-load-balancer-eip-allocations" = join(",", aws_eip.ingress[*].id)
           "service.beta.kubernetes.io/aws-load-balancer-subnets"         = join(",", module.vpc.public_subnets)
+          # The NLB spans both public subnets (1 EIP per AZ) but the controller runs
+          # a single replica on the stable pool, so without cross-zone balancing the
+          # EIP in the AZ lacking the pod blackholes traffic (app_host points at it).
+          "service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled" = "true"
         }
       }
     }
