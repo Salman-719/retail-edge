@@ -53,6 +53,10 @@ def start_metrics_server(port: int = 9200) -> None:
     """Start the /metrics HTTP server on its own background thread.
 
     Safe to call once at daemon startup; does not interfere with the asyncio
-    event loop. Raises if the port is already bound.
+    event loop. Idempotent: if the port is already bound (main.py and run_daemon
+    both call this), the existing server keeps serving and we no-op.
     """
-    start_http_server(port)
+    try:
+        start_http_server(port)
+    except OSError:
+        pass

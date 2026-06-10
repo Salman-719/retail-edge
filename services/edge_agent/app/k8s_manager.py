@@ -155,6 +155,22 @@ def _build_iep2_deployment(camera_id: str) -> k8s.V1Deployment:
     container = k8s.V1Container(
         name="iep2",
         image=IEP2_IMAGE,
+        # The image CMD (services.iep2_vision.main) imports metrics.py under two
+        # different module names (package + top-level) → duplicate Prometheus
+        # registration → crash. IEP2's modules use top-level imports with a relative
+        # fallback, so invoke everything top-level (dir on sys.path) → metrics loads
+        # exactly once. (MODEL_VERSION alias lives in metrics.py.)
+        command=[
+            "python", "-c",
+            "import sys,os,asyncio,logging;"
+            "sys.path.insert(0,'/workspace/services/iep2_vision');"
+            "logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO').upper(),"
+            "format='%(asctime)s %(levelname)s %(name)s %(message)s');"
+            "from metrics import start_metrics_server;"
+            "from runtime import Settings,run_daemon;"
+            "start_metrics_server(int(os.environ.get('IEP2_METRICS_PORT','9201')));"
+            "asyncio.run(run_daemon(Settings()))",
+        ],
         ports=[
             k8s.V1ContainerPort(name="metrics", container_port=9201),
         ],

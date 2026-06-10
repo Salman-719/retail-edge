@@ -21,6 +21,10 @@ from prometheus_client import Counter, Gauge, Histogram, start_http_server
 # A canary deployment sets MODEL_VERSION=canary so Prometheus automatically
 # separates production and canary time-series for ML-signal metrics.
 _MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
+# Public alias: runtime.py / detector.py / reid.py import `MODEL_VERSION`. Keep both
+# names in sync so those imports resolve (the rename left them referencing the
+# un-prefixed name, which crashed IEP2 on import).
+MODEL_VERSION = _MODEL_VERSION
 
 # Total frames processed by this IEP2 instance. Rate == 0 means the pipeline
 # has stalled for this camera.

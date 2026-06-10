@@ -236,6 +236,9 @@ async def _add_camera_to_iep1(
                     target_fps=target_fps,
                     window_seconds=window_seconds or WINDOW_SECONDS,
                     store_id=store_id,
+                    # Without this the proto default (0) makes IEP1 set expected_frames=0
+                    # → every manifest "offline" → IEP2 skips it. Use the full window.
+                    batch_frames=int(round((window_seconds or WINDOW_SECONDS) * (target_fps if target_fps > 0 else 5.0))),
                 ),
                 timeout=5.0,
             )

@@ -230,7 +230,10 @@ class CameraWorker:
         return WindowAccumulator(
             sample_fps=self._config.target_fps,
             batch_window_seconds=self._config.window_seconds,
-            batch_frames=self._config.batch_frames,
+            # The proto default (0) — also produced by stale stubs — must be treated
+            # as "unset" so expected_frames falls back to window_seconds*sample_fps;
+            # otherwise expected_frames=0 marks every window "offline" and IEP2 skips it.
+            batch_frames=(self._config.batch_frames or None),
         )
 
     async def _flush_accumulator(
@@ -240,7 +243,16 @@ class CameraWorker:
         window_end: int,
     ) -> None:
         manifest = accumulator.close(window_start, window_end, self._batch_number)
-        await self._publish_manifest(manifest)
+        # Never let a publish failure kill the window loop: the capture thread keeps
+        # running and the queue would fill forever ("dropped frames"). Drop the
+        # window, log, and keep going — IEP1 self-heals when redis recovers.
+        try:
+            await self._publish_manifest(manifest)
+        except Exception as exc:
+            logger.warning(
+                "camera=%s dropping window after publish failure: %s",
+                self._config.camera_id, exc,
+            )
         self._batch_number += 1
 
     async def _window_loop(self) -> None:
