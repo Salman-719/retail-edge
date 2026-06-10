@@ -40,4 +40,8 @@ RUN touch services/__init__.py
 # ultralytics downloads yolo11n.pt into the CWD (/workspace) on first reference.
 RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
 
+# Bake in RT-DETR-X weights — the production detector. Selected at runtime via
+# DETECTOR_MODEL=rtdetr-x.pt (yolo11n stays as the lightweight dev stand-in).
+RUN python -c "from ultralytics import RTDETR; RTDETR('rtdetr-x.pt')"
+
 CMD ["python", "-m", "services.yolo_service.service_dev"]
