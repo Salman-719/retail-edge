@@ -33,13 +33,19 @@ EEP (cloud) ──► gRPC :50051 TLS ──► Edge Agent (edge) ──► k3s
 
 ```json
 {
-  "camera_id": "string",
-  "window_id": "string",
-  "batch_number": "int",
-  "track_count": "int"
+  "camera_id":       "string (UUID)",
+  "store_id":        "string (UUID)",
+  "batch_number":    "string (int, stringified)",
+  "window_start_ms": "string (int64, stringified)",
+  "window_end_ms":   "string (int64, stringified)",
+  "frame_count":     "string (int, stringified)"
 }
 ```
-<!-- TODO: Verify and complete fields -->
+
+All fields are Redis string values (Redis Streams only store string field values).
+IEP3 consumer converts `batch_number`, `window_start_ms`, `window_end_ms`, and
+`frame_count` back to their numeric types on read. Source: `services/iep2_vision/runtime.py`
+`_publish_batch_complete()` and the daemon `xadd` call.
 
 ### stream:iep2:live:{camera_id}
 
@@ -73,9 +79,23 @@ Key endpoints:
 | POST | /auth/login | JWT login | None |
 | POST | /auth/refresh | Refresh JWT | Bearer |
 | GET | /stores | List stores | Bearer |
-| POST | /stores | Create store | Bearer |
+| POST | /stores | Create store | Bearer (superadmin) |
+| GET | /stores/{slug} | Get store details | Bearer |
 | GET | /stores/{slug}/cameras | List cameras | Bearer |
-| TODO | TODO | TODO | TODO |
+| POST | /stores/{slug}/cameras | Add camera config | Bearer (admin) |
+| PUT | /stores/{slug}/cameras/{id} | Update camera config | Bearer (admin) |
+| GET | /stores/{slug}/operating-hours | Get store operating hours | Bearer |
+| PUT | /stores/{slug}/operating-hours | Update store operating hours | Bearer (admin) |
+| GET | /stores/{slug}/zones | List floor zones | Bearer |
+| POST | /stores/{slug}/zones | Create zone | Bearer (admin) |
+| GET | /stores/{slug}/shifts | List shifts | Bearer |
+| GET | /stores/{slug}/analytics/summary | Rollup analytics (E1) | Bearer |
+| GET | /stores/{slug}/analytics/heatmap | Floor heatmap (E3) | Bearer |
+| GET | /stores/{slug}/alerts | List alerts | Bearer |
+| POST | /stores/{slug}/alerts/rules | Create alert rule | Bearer (admin) |
+| PUT | /stores/{slug}/alerts/{id}/resolve | Resolve alert | Bearer |
+| GET | /stores/{slug}/live/{camera_id} | Live feed WebSocket info | Bearer |
+| GET | /admin/audit-log | Audit log (superadmin) | Bearer (superadmin) |
 
 ## 5. Database schema ownership
 

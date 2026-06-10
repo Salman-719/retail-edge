@@ -9,7 +9,7 @@
 | Data type | Stored? | Retention | Access |
 |---|---|---|---|
 | Raw video frames | TODO (thumbnails only via presigned URLs?) | TODO | Store staff only |
-| ReID embeddings (OSNet vectors) | Yes (local_centroids, global_embeddings) | TODO | Internal only |
+| ReID embeddings (resnet50_msmt17, 2048-dim) | Yes (local_centroids, global_embeddings) | TODO | Internal only |
 | Floor trajectories | Yes (tracking_history, global_tracking_history) | TODO | Store staff only |
 | Personal identity (name, face) | **No** | N/A | N/A |
 
@@ -30,8 +30,8 @@
 
 ## 4. Bias and fairness
 
-<!-- TODO: Could the OSNet ReID model perform differently across demographic groups?
-     - Is the OSNet model trained on diverse datasets?
+<!-- TODO: Could the resnet50_msmt17 ReID model perform differently across demographic groups?
+     - Is the resnet50_msmt17 model trained on diverse datasets? (MSMT17: 15 cameras, diverse indoor environments)
      - Could poor lighting (affecting certain skin tones more) cause ReID failures?
      - How would you detect this in production? -->
 

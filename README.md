@@ -2,6 +2,8 @@
 
 Multi-camera retail analytics platform. Tracks customers across cameras in real-time, measures zone occupancy, and produces canonical per-person trajectories for analytics.
 
+Available on: https://app.108.133.40.141.nip.io/
+
 ---
 
 ## Architecture
@@ -35,7 +37,7 @@ CLOUD (Kubernetes / Docker Compose)
 │    60-second window manifests → edge-local Redis                    │
 │                                                                      │
 │  IEP2 vision (one k3s Deployment per camera, created by Edge Agent)  │
-│    XREADGROUP iep1-frames → RT-DETR → BoTSORT → ReID → homography   │
+│    XREADGROUP iep1-frames → RT-DETR-x → BoTSORT → ReID → homography │
 │    → INSERT tracking_history → XADD stream:iep2:batch_complete      │
 │                                                                      │
 │  YOLO service + ReID service (GPU, unix socket IPC)                 │
@@ -71,7 +73,7 @@ Redis topology
 | Frontend | React 18, Vite, React Router v6, Konva.js, Zustand, Tailwind CSS |
 | API Gateway (EEP) | FastAPI 0.115, SQLAlchemy 2 async, Pydantic v2, APScheduler 3.10 |
 | Edge-Cloud Comms | gRPC (grpcio 1.64, TLS + shared-secret auth, bidirectional streaming) |
-| Computer Vision | RT-DETR (Ultralytics), BoTSORT (boxmot), resnet50_msmt17 ReID (boxmot) |
+| Computer Vision | RT-DETR-x (TRT FP16 prod; YOLO11n as low-compute fallback), BoTSORT (boxmot), resnet50_msmt17 ReID (boxmot) |
 | Floor Projection | NumPy homography, Shapely polygons |
 | Database | PostgreSQL 16 + PgBouncer 1.22, asyncpg 0.29 |
 | Cache / Streams | Redis 7.2 (XREADGROUP consumer groups, topology-split) |
@@ -97,19 +99,24 @@ retail-edge/
 │   ├── gen_dev_certs.sh         # Generate dev TLS certs (CA + EEP server cert)
 │   └── bootstrap-edge-k3s.sh   # Bootstrap a Jetson device with k3s
 ├── docs/
+│   ├── services/                # Per-service docs (EEP, IEP1-6, YOLO, ReID, Edge Agent, Live Bridge, Frontend)
 │   ├── decisions/               # Architecture Decision Records
+│   ├── qa/                      # Test strategy and regression guide
 │   └── operations/              # Operational runbooks
 ├── services/
 │   ├── eep/                     # EEP: REST API + gRPC server + scheduler
 │   ├── edge_agent/              # Thin gRPC relay → k3s API
 │   ├── iep1_ingestion/          # Camera ingestion daemon
-│   ├── iep2_vision/             # Per-camera RT-DETR+BoTSORT+ReID worker
+│   ├── iep2_vision/             # Per-camera RT-DETR-x+BoTSORT+ReID worker
 │   ├── iep3_reconciliation/     # Cross-camera identity reconciliation daemon
+│   ├── iep4_alerts/             # Alert rules daemon (one per store)
+│   ├── iep5_analytics/          # End-of-shift analytics job (one-shot k8s Job)
+│   ├── iep6_agent/              # NL analytics agent (FastAPI :8006)
 │   ├── live_bridge/             # WebSocket live frame relay
-│   ├── yolo_service/            # YOLO gRPC inference service (GPU)
-│   └── reid_service/           # resnet50_msmt17 ReID embedding service (GPU)
+│   ├── yolo_service/            # RT-DETR-x inference service (TRT prod; YOLO11n low-compute fallback)
+│   └── reid_service/            # resnet50_msmt17 ReID embedding service (GPU + CPU dev)
 └── tests/
-    ├── unit/iep3/               # IEP3 pure-logic unit tests (no infrastructure)
+    ├── unit/                    # Unit tests (iep1–iep5, eep, consistency, mlops)
     └── e2e/                     # Integration + end-to-end tests
 ```
 
@@ -171,7 +178,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 > **Why the dev overlay?** The base `docker-compose.yml` builds YOLO and ReID
 > from Jetson/ARM64 JetPack base images that cannot build or run on x86.
 > `docker-compose.dev.yml` overrides both to CPU/GPU dev variants (Ultralytics
-> RT-DETR-x for detection; resnet50_msmt17 via boxmot for ReID). The dev
+> RT-DETR-x for detection (YOLO11n as low-compute fallback); resnet50_msmt17 via boxmot for ReID). The dev
 > override must always be included on any non-Jetson machine.
 
 First build takes several minutes (model download, OpenCV, grpcio, k8s client).
@@ -219,14 +226,14 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d yolo-servic
 There are **two ways** to run the frontend, and they are **not equivalent** — pick
 based on what you're doing:
 
-| Method | URL | Build | Dev-only screens (`/dev/vision`, `/dev/e2e`) |
+| Method | URL | Build | Pipeline tester (`/store/<slug>/dev/e2e`) |
 |---|---|---|---|
-| **A. Docker `frontend` service** | http://localhost:3000 | production (`vite build`) | **stripped out** — not available |
-| **B. Vite dev server** (`npm run dev`) | http://localhost:5173 | development | **available** |
+| **A. Docker `frontend` service** | http://localhost:3000 | production (`vite build`) | **available** — lazy-loaded, super-admin only |
+| **B. Vite dev server** (`npm run dev`) | http://localhost:5173 | development | **available** — hot reload |
 
-The dev-only screens are gated behind `import.meta.env.DEV`, which is dead code in
-a production build. So the Docker frontend on `:3000` shows the normal app but
-**never** the dev pipeline screens.
+The `/dev/e2e` pipeline tester ships in the production bundle but is lazy-loaded and
+gated to **super-admin users only** (`<PrivateRoute adminOnly>`). Both the Docker
+frontend and the Vite dev server can access it when logged in as a super-admin.
 
 **A — Docker frontend (production build, no Node.js needed):**
 
@@ -244,7 +251,7 @@ npm run dev          # → http://localhost:5173
 Use this when you need:
 - **`/store/<slug>/dev/e2e`** — the end-to-end IEP1→IEP2→IEP3 split-screen tester
   (CPU/GPU toggle, live feeds, per-camera tracking tables, IEP3 output, replay).
-- **`/store/<slug>/dev/vision`** — the single-camera vision debug console.
+  Requires super-admin login.
 - Hot-reload while editing frontend code.
 
 API docs (either method): **http://localhost:8000/docs**.
@@ -527,7 +534,7 @@ docker compose logs -f iep1-daemon
 
 ### IEP2 Vision Worker
 
-**What it does:** Per-camera RT-DETR → BoTSORT → resnet50_msmt17 ReID → homography → `tracking_history`. One Deployment per active camera (created by Edge Agent on k3s; one compose service in dev).
+**What it does:** Per-camera RT-DETR-x → BoTSORT → resnet50_msmt17 ReID → homography → `tracking_history`. One Deployment per active camera (created by Edge Agent on k3s; one compose service in dev).
 
 **Start with Compose (requires `CAMERA_ID`, `STORE_ID`, Redis URLs, and DB URL):**
 
@@ -552,7 +559,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev up 
 ```
 
 IEP2 reads IEP1 manifests from the Redis stream for `CAMERA_ID` and processes each
-frame batch through RT-DETR → BoTSORT → resnet50_msmt17 → homography → `tracking_history`.
+frame batch through RT-DETR-x → BoTSORT → resnet50_msmt17 → homography → `tracking_history`.
 
 **Verify tracking rows after one batch:**
 ```bash
@@ -575,7 +582,7 @@ docker compose logs -f iep2_vision
 
 ### IEP3 Reconciliation
 
-**What it does:** Cross-camera identity reconciliation daemon. Consumes `stream:iep2:batch_complete`, runs ReID matching, maintains `global_identities` and `global_tracking_history`. No HTTP port.
+**What it does:** Cross-camera identity reconciliation daemon. Consumes `stream:iep2:batch_complete`, runs spatial voting + ReID appearance fallback to link `local_id`s into `global_id`s, maintains `global_identities` and `global_tracking_history`. No HTTP port.
 
 **Start with Compose:**
 ```bash
@@ -751,7 +758,7 @@ No Redis, IEP1, IEP2, or EEP needed. Test data is cleaned up via CASCADE delete.
 
 ### End-to-end pipeline test
 
-See `docs/TESTING_GUIDE.md` Phases 3–6 for the full, platform-accurate E2E
+See [`docs/qa/TEST_STRATEGY.md`](docs/qa/TEST_STRATEGY.md) for the full, platform-accurate E2E
 testing procedure (UI-driven store setup → edge pipeline → accuracy validation),
 with separate Windows (PowerShell) and Linux/Jetson command variants.
 
@@ -825,11 +832,14 @@ with separate Windows (PowerShell) and Linux/Jetson command variants.
 | `WINDOW_SECONDS` | required | Must match IEP1/IEP2 |
 | `DATABASE_URL_SERVER` | required | `postgresql://...` (no `+asyncpg`) |
 | `SERVER_REDIS_URL` | `redis://redis:6379/0` | Server Redis (reads `batch_complete` stream) |
-| `REID_THRESHOLD` | `0.85` | Cosine similarity threshold |
-| `MAX_SPEED_MPS` | `1.5` | Spatial gate max walking speed |
+| `VOTE_DISTANCE_THRESHOLD_M` | `1.0` | Max floor distance (m) for a co-visible vote |
+| `MIN_VOTE_RATE` | `0.6` | Min votes/co-visible windows to confirm spatial match |
+| `MIN_VOTES` | `10` | Min raw vote count before any match is trusted |
+| `TEMPORAL_TOLERANCE_MS` | `150` | Max timestamp gap (ms) for two observations to be co-visible |
+| `AMBIGUITY_MARGIN` | `0.15` | Vote-rate gap below which ReID appearance fallback fires |
+| `REID_FALLBACK_THRESHOLD` | `0.55` | Median cosine similarity to confirm appearance match |
 | `GRACE_SECONDS` | `300.0` | LOST → EXITED grace period |
 | `EMBEDDING_DIM` | `2048` | ReID embedding dimension (resnet50_msmt17) |
-| `CENTROID_EMA_ALPHA` | `0.3` | EMA smoothing for embedding updates |
 | `COORDINATOR_TIMEOUT_S` | `120.0` | Partial-batch timeout |
 | `POSITION_WEIGHT_AREA` | `0.7` | Canonical position scoring: bbox area weight |
 | `POSITION_WEIGHT_CONF` | `0.3` | Canonical position scoring: detection confidence weight |
@@ -1051,7 +1061,7 @@ Camera (RTSP / video file)
           └─ IEP2 vision: XREADGROUP iep1-frames
                ├─ Phase A (startup): drain un-ACKed messages
                ├─ Phase B (normal): block-read new messages
-               ├─ per manifest: tmpfs read → RT-DETR → BoTSORT → resnet50_msmt17 → homography
+               ├─ per manifest: tmpfs read → RT-DETR-x → BoTSORT → resnet50_msmt17 → homography
                ├─ INSERT tracking_history + UPSERT local_centroids
                ├─ XADD server-Redis stream:iep2:batch_complete
                └─ XACK edge-local-Redis stream:iep1:{camera_id}
@@ -1059,8 +1069,9 @@ Camera (RTSP / video file)
                          ├─ XACK immediately (before processing — see ADR-001)
                          ├─ BatchCoordinator: wait N cameras or timeout
                          └─ Reconciler (one asyncpg transaction per batch):
-                              ├─ BatchReader: classify known vs new LocalIDs
-                              ├─ ReidMatcher: cosine ReID → link/create GlobalIDs
+                              ├─ BatchReader: load local_centroids for window
+                              ├─ SpatialVoter: co-visible pair votes (≥MIN_VOTES + ≥MIN_VOTE_RATE)
+                              ├─ ReidMatcher: appearance fallback when votes are ambiguous
                               ├─ PositionSelector: score → INSERT global_tracking_history
                               └─ StateManager: ACTIVE→LOST→EXITED
 ```
@@ -1081,7 +1092,7 @@ restarts because it lives in Redis.
 |---|---|
 | `tracking_history` | `camera_id`, `local_id UUID`, `timestamp_ms BIGINT`, `floor_x/y`, `zone_id`, `bbox_confidence`, `bbox_area` |
 | `local_centroids` | `local_id UUID PK`, `store_id UUID`, `centroid BYTEA` (float32[2048]) |
-| `camera_schedules` | `store_id`, `camera_config_id`, `days_of_week`, `start_time`, `end_time`, `is_active` |
+| `store_operating_hours` | `store_id`, `day_of_week`, `open_time`, `close_time`, `is_closed` — store-level master schedule; replaced per-camera `camera_schedules` (dropped in migration 0016) |
 | `edge_agents` | `store_id UNIQUE`, `status`, `last_heartbeat_at`, `agent_version` |
 | `camera_runtime_sessions` | `store_id`, `physical_camera_id`, `started_at`, `stopped_at`, `stop_reason` |
 

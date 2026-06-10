@@ -69,7 +69,7 @@ Camera (RTSP / video file)
 IEP1  Ingestion      decode frames → JPEG to tmpfs → 60 s window manifest → Redis
    │
    ▼
-IEP2  Vision         per camera: RT-DETR detect → BoTSORT → resnet50_msmt17 ReID embedding
+IEP2  Vision         per camera: RT-DETR-x detect → BoTSORT → resnet50_msmt17 ReID embedding
    │                 → homography (pixel → floor coords) → tracking_history
    │                 → publish batch_complete
    ▼
@@ -88,7 +88,7 @@ IEP4/5/6             alerts (IEP4) · end-of-shift analytics (IEP5) · AI agent 
 | Stage | Where it runs | Cardinality | Responsibility |
 |---|---|---|---|
 | **IEP1 — Ingestion** | Edge | 1 daemon per device (all cameras) | Pull RTSP/video, sample at `target_fps`, write JPEG frames to tmpfs, emit a 60 s **window manifest** to edge-local Redis. |
-| **IEP2 — Vision** | Edge | 1 deployment **per camera** | Read the manifest, run **RT-DETR** person detection → **BoTSORT** in-frame tracking (ReID off) → **resnet50_msmt17** ReID embeddings → **homography** projection to floor coordinates. Writes `tracking_history`, publishes `batch_complete`. |
+| **IEP2 — Vision** | Edge | 1 deployment **per camera** | Read the manifest, run **RT-DETR-x** person detection → **BoTSORT** in-frame tracking (ReID off) → **resnet50_msmt17** ReID embeddings → **homography** projection to floor coordinates. Writes `tracking_history`, publishes `batch_complete`. |
 | **IEP3 — Reconciliation** | Cloud | 1 per store | The brain. Consumes every camera's `batch_complete`, waits for all cameras in a window, then uses camera-overlap spatial voting plus ReID appearance fallback to merge local tracks into **global identities** and pick one canonical floor position per person per timestamp. Manages identity state (ACTIVE → LOST → EXITED). |
 | **IEP4 — Alerts** | Cloud | 1 per store (provisioned by EEP) | Rule/threshold alerts (queue buildup, staff zone/employee) with cooldown + SMTP delivery. See `docs/services/IEP4_ALERTS.md`. |
 | **IEP5 — Analytics** | Cloud | 1 Job per (store, shift) | End-of-shift aggregation of global trajectories (visits, dwell, occupancy, heatmaps) into TimescaleDB rollups. See `docs/services/IEP5_ANALYTICS.md`. |
@@ -142,7 +142,7 @@ CLOUD (Amazon EKS)
 │    RTSP/video → JPEG → tmpfs → Redis XADD stream:iep1:{camera_id}      │
 │                                                                        │
 │  IEP2 vision (one Deployment per camera)                               │
-│    XREADGROUP → RT-DETR → BoTSORT → ReID → homography →                │
+│    XREADGROUP → RT-DETR-x → BoTSORT → ReID → homography →                │
 │    INSERT tracking_history → XADD stream:iep2:batch_complete           │
 │                                                                        │
 │  YOLO service + ReID service (GPU, ZMQ unix-socket IPC)               │
@@ -219,7 +219,7 @@ routers map directly onto the product surface:
 | `config` / `draft` | Store floor-plan config: zones, camera placement, calibration, versioned with draft → publish |
 | `members` | Org members & roles (invite, edit, remove) |
 | `employees` / `shifts` | Staff records, shift patterns, assignments, breaks |
-| `schedules` | Per-camera active windows (days/times) that drive Start/StopCamera |
+| `operating_hours` | Store open/close schedule (`store_operating_hours` table) that drives Start/StopCamera |
 | `live` | Reconciled people/KPIs plus camera and edge-agent health |
 | `alerts` | Active/history views, resolution, and per-store alert-rule CRUD |
 | `analytics` | Read-only store, zone, employee, flow, distribution, and heatmap rollups |
@@ -242,10 +242,11 @@ overlays) is built on **Konva** canvas.
 - **Live Monitoring** polls EEP's reconciled identity and camera-health APIs;
   **Analytics** reads IEP5's TimescaleDB rollups; **Alerts** reads and manages
   IEP4 output and rules. These pages do not use frontend demo fixtures.
-- The **Vite dev server** on `:5173` additionally exposes **dev pipeline screens**
-  (`/store/<slug>/dev/e2e`, `/dev/vision`) that are stripped from production
-  builds. These drive the real IEP1→IEP2→IEP3 pipeline with a CPU/GPU toggle,
-  live feeds, per-camera tracking tables, and IEP3 output for end-to-end testing.
+- The **`/store/<slug>/dev/e2e`** pipeline tester (CPU/GPU toggle, live feeds,
+  per-camera tracking tables, IEP3 output) ships in the production bundle but is
+  lazy-loaded and gated to **super-admin users only** (`<PrivateRoute adminOnly>`).
+  It is accessible from both the Docker frontend (`:3000`) and the Vite dev server
+  (`:5173`).
 
 Key onboarding flow: a 9-step wizard places the floor plan, zones, and cameras,
 then calibrates homography per camera.
@@ -260,7 +261,7 @@ then calibrates homography per camera.
 |---|---|
 | `tracking_history` | `camera_id`, `local_id`, `timestamp_ms`, `floor_x/y`, `zone_id`, `bbox_confidence`, `bbox_area` |
 | `local_centroids` | `local_id` PK, `store_id`, packed top-quality ReID embeddings (`embeddings`, `embedding_count`, `quality_scores`) |
-| `camera_schedules` | active windows per camera config |
+| `store_operating_hours` | store-level schedule (`day_of_week`, `open_time`, `close_time`, `is_closed`); replaced per-camera `camera_schedules` (dropped migration 0016) |
 | `edge_agents` | `store_id` UNIQUE, `status`, `last_heartbeat_at`, `agent_version` |
 | `camera_runtime_sessions` | start/stop bookkeeping per camera run |
 
@@ -283,7 +284,7 @@ then calibrates homography per camera.
 | **API / Control plane (EEP)** | FastAPI 0.115, SQLAlchemy 2 (async), Pydantic v2, APScheduler 3.10, Alembic migrations |
 | **Edge ↔ cloud comms** | gRPC (grpcio 1.64), bidirectional streaming, TLS + shared-secret auth |
 | **Inter-stage messaging** | Redis 7.2 streams + consumer groups (`XREADGROUP`), two-Redis topology |
-| **Computer vision** | RT-DETR (Ultralytics; TensorRT on Jetson), BoTSORT (boxmot), resnet50_msmt17 ReID (boxmot) |
+| **Computer vision** | RT-DETR-x (TRT FP16 engine on Jetson; YOLO11n as low-compute fallback), BoTSORT (boxmot), resnet50_msmt17 ReID (boxmot) |
 | **Inference IPC** | ZeroMQ unix sockets, msgpack, batched GPU inference services |
 | **Floor projection** | NumPy homography, Shapely polygons (zone hit-testing) |
 | **Database** | PostgreSQL 16 + PgBouncer 1.22, asyncpg 0.29 |
@@ -321,15 +322,16 @@ retail-edge/
 │   ├── eep/                # REST API + gRPC server + scheduler (control plane)
 │   ├── edge_agent/         # thin gRPC relay → k3s
 │   ├── iep1_ingestion/     # camera ingestion daemon (edge)
-│   ├── iep2_vision/        # per-camera RT-DETR+BoTSORT+ReID+homography worker
+│   ├── iep2_vision/        # per-camera RT-DETR-x+BoTSORT+ReID+homography worker
 │   ├── iep3_reconciliation/# cross-camera identity reconciliation (cloud)
-│   ├── iep4_alerts/        # (planned) alerting
-│   ├── iep5_analytics/     # (planned) analytics aggregation
-│   ├── iep6_agent/         # (planned) NL analytics agent
+│   ├── iep4_alerts/        # rule/threshold alerting daemon (per store)
+│   ├── iep5_analytics/     # end-of-shift analytics aggregation job (one-shot k8s Job)
+│   ├── iep6_agent/         # NL analytics agent (FastAPI :8006)
 │   ├── live_bridge/        # WebSocket live-frame relay
-│   ├── yolo_service/       # YOLO/RT-DETR inference service (GPU + CPU dev)
-│   └── reid_service/      # resnet50_msmt17 ReID embedding service (GPU + CPU dev)
+│   ├── yolo_service/       # RT-DETR-x inference service (TRT prod; YOLO11n low-compute fallback)
+│   └── reid_service/       # resnet50_msmt17 ReID embedding service (GPU + CPU dev)
 ├── docs/
+│   ├── services/           # per-service docs (EEP, IEP1-6, YOLO, ReID, Edge Agent, Live Bridge, Frontend)
 │   ├── decisions/          # ADRs (e.g. ADR-001 XACK-before-processing)
 │   ├── operations/         # runbooks (e.g. IEP3 orphan sweep)
 │   ├── security/           # mTLS migration

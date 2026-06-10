@@ -11,7 +11,7 @@ The system must process video from N cameras per store. Video is bandwidth-heavy
 ## Decision
 
 Split processing at the semantic boundary:
-- **Edge:** pixel-level work (YOLO detection, ByteTrack tracking, OSNet embedding extraction, homography projection)
+- **Edge:** pixel-level work (RT-DETR-x detection, BoTSORT tracking, resnet50_msmt17 ReID embedding extraction, homography projection)
 - **Cloud:** cross-camera reasoning (IEP3 identity reconciliation), management plane (EEP), analytics, UI
 
 ## Rationale
@@ -40,6 +40,6 @@ Only compact metadata crosses the gRPC link:
 
 ## Consequences
 
-- Edge device must have GPU (Jetson) for YOLO + OSNet
+- Edge device must have GPU (Jetson) for RT-DETR-x detection + resnet50_msmt17 ReID
 - gRPC link must be reliable — Edge Agent implements reconnect logic
 - Edge device must handle cloud connectivity loss gracefully (IEP1/IEP2 continue buffering locally)

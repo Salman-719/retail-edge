@@ -22,29 +22,30 @@
 
 ## 2. Experiment tracking (MLflow)
 
-**Tracking server:** TODO (local MLflow server, or remote URI)
+**Tracking server:** `localhost:5000` (dev) — `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres minio mlflow`. See [MLFLOW_ANALYSIS](MLFLOW_ANALYSIS.md) for the full cross-experiment synthesis.
 
 ### Experiments logged
 
-#### 2.1 YOLO variant selection
-- **MLflow experiment:** `detection-model-selection`
-- **Runs:** TODO (list run IDs or names)
-- **Metrics tracked:** latency (ms/frame), mAP@0.5, GPU memory usage
-- **Dataset:** TODO (test video clip used)
-- **Winner:** TODO
+#### 2.1 Detection model selection
+- **MLflow experiment:** `detection`
+- **Runs:** 24 (model × conf × scene combinations)
+- **Metrics tracked:** `avg_confidence`, `peak_detections_per_frame`, `false_positive_total`, `id_switches`, `peak_count_error`
+- **Dataset:** `clip_cashier.mp4` (crowded, 16 people), `clip_mannequin.mp4` (0 people), `hand_on_ad_in_store.mp4` (0 people)
+- **Winner:** `rtdetr-x`, conf=0.5 — 85.6% confidence, peak_count_error=1, 0 mannequin FPs
 
-#### 2.2 OSNet ReID variant selection
-- **MLflow experiment:** `reid-model-selection`
-- **Runs:** TODO (list run IDs or names)
-- **Metrics tracked:** Rank-1 accuracy, embedding extraction time
-- **Dataset:** TODO
-- **Winner:** TODO
+#### 2.2 ReID model selection
+- **MLflow experiment:** `reid`
+- **Runs:** 7 (3 models @ threshold 0.85 + resnet50_msmt17 threshold sweep 0.75–0.90)
+- **Metrics tracked:** `count_error`, `reid_match_rate`, `avg_recovery_similarity`, `avg_embed_ms`
+- **Dataset:** `clip_cashier.mp4` (16 people, 1810 frames; detection + tracking fixed)
+- **Winner:** `resnet50_msmt17` @ threshold 0.85 — count_error=18, match_rate=0.60, 13 ms/crop. Threshold finding: 0.75 is proxy-better (count_error=8, match_rate=0.71) — validate with labelled clip before adopting
 
-#### 2.3 Cosine similarity threshold sweep
-- **MLflow experiment:** `reid-threshold-tuning`
-- **Runs:** one run per threshold value (0.40, 0.50, 0.60, 0.70)
-- **Metrics tracked:** precision, recall, false merge rate
-- **Winner:** TODO (see TRADEOFFS.md §4)
+#### 2.3 Tracker selection
+- **MLflow experiment:** `tracking`
+- **Runs:** 7 (4 trackers @ match_thresh=0.8 + BoT-SORT sweep 0.6–0.9)
+- **Metrics tracked:** `unique_track_ids`, `id_switches`, `track_fragmentation`, `per_frame_assoc_ms`
+- **Dataset:** `clip_cashier.mp4` (1810 frames; detection fixed at rtdetr-x conf=0.5)
+- **Winner:** `BoT-SORT`, match_thresh=0.8 — unique_track_ids=57, fragmentation=3.56 (lowest of four trackers)
 
 ## 3. Model promotion logic
 

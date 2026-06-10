@@ -4,6 +4,11 @@
 
 # Monitoring and observability — RetailVision
 
+> **Full reference:** For the complete per-service metrics catalogue (9 services),
+> Grafana dashboard descriptions, alert rules, and instructions for adding new metrics,
+> see [`docs/observability.md`](observability.md). This document is a design-level
+> summary covering the ML-specific signals and alerting strategy.
+
 ## 1. Prometheus metrics — per service
 
 ### EEP (control plane)
@@ -20,7 +25,7 @@
 |---|---|---|---|
 | iep2_batch_duration_seconds | histogram | camera_id | Full vision batch time |
 | iep2_detections_per_frame | histogram | camera_id | YOLO detection count |
-| iep2_reid_extraction_seconds | histogram | camera_id | OSNet embedding time |
+| iep2_reid_extraction_seconds | histogram | camera_id | resnet50_msmt17 (ReID) embedding time |
 
 ### IEP3 (reconciliation)
 

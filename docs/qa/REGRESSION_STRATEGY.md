@@ -13,7 +13,7 @@
 **Test scenario:**
 - 3 simulated cameras
 - 2 persons walking through overlapping camera zones
-- Pre-computed OSNet embeddings (fixed, no randomness)
+- Pre-computed resnet50_msmt17 embeddings (fixed, no randomness)
 - Expected output: person A → global_id X, person B → global_id Y (no false merges)
 
 **How to run:**
@@ -25,7 +25,7 @@ pytest tests/unit/iep3/test_golden_dataset.py -v
 
 ## 2. Model version regression tests
 
-When a new YOLO or OSNet model is considered for promotion:
+When a new detection or ReID model is considered for promotion:
 1. Run it against the golden dataset
 2. Check that IEP3 still produces correct global_id assignments
 3. Verify latency benchmarks (see MLOPS_PIPELINE.md §3 for thresholds)
@@ -36,7 +36,7 @@ When a new YOLO or OSNet model is considered for promotion:
 | Check | What it validates | Where implemented |
 |---|---|---|
 | tracking_history schema | All required columns present, types correct | TODO |
-| ReID embedding dimensions | 512-dim float32 vector | TODO |
+| ReID embedding dimensions | 2048-dim float32 vector (resnet50_msmt17) | TODO |
 | Homography matrix validity | 3×3 matrix, determinant ≠ 0 | TODO |
 | Window alignment | All cameras in a batch share the same window_id | IEP3 pre-condition check |
 
