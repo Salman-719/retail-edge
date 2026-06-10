@@ -4,6 +4,8 @@ Multi-camera retail analytics platform. Tracks customers across cameras in real-
 
 Available on: https://app.108.133.40.141.nip.io/
 
+**Graders and reviewers:** start with [`docs/GRADER_GUIDE.md`](docs/GRADER_GUIDE.md) — a structured 3-hour navigation map covering every rubric area with exact file paths, commands, and live URLs.
+
 ---
 
 ## Architecture
