@@ -390,35 +390,10 @@ class IEP2Runtime:
         persistence: PostgresPersistence,
         projector: FloorProjector,
     ) -> int:
-        """Insert all confirmed detections for one frame. Returns count of rows written."""
-        rows = 0
-        for track in enriched:
-            if track["local_id"] is not None:
-                x1, y1, x2, y2 = [int(c) for c in track["bbox"]]
-                bbox_area = (x2 - x1) * (y2 - y1)
-                local_id_uuid = uuid.UUID(int=track["local_id"])
-                floor_x = track.get("floor_x")
-                floor_y = track.get("floor_y")
-                zone_id = (
-                    projector.zone_of(floor_x, floor_y)
-                    if floor_x is not None and floor_y is not None
-                    else None
-                )
-                await persistence.insert_detection(
-                    local_id=local_id_uuid,
-                    timestamp_ms=capture_ts_ms,
-                    bbox_confidence=float(track["confidence"]),
-                    bbox_area=bbox_area,
-                    floor_x=floor_x,
-                    floor_y=floor_y,
-                    zone_id=zone_id,
-                    bbox_x1=x1,
-                    bbox_y1=y1,
-                    bbox_x2=x2,
-                    bbox_y2=y2,
-                )
-                rows += 1
-        return rows
+        """Insert all confirmed detections for one frame in a single round-trip.
+        Returns count of rows written."""
+        rows = _build_detection_rows(enriched, capture_ts_ms, projector)
+        return await persistence.insert_detections_batch(rows)
 
     async def _stream_from_source(
         self,
@@ -740,6 +715,36 @@ if _Settings is not None:
     Settings = _Settings  # exported symbol
 
 
+def _build_detection_rows(enriched: list, capture_ts_ms: int, projector) -> list[tuple]:
+    """Build tracking_history row tuples for confirmed tracks in one frame.
+
+    Returns rows in the order PostgresPersistence.insert_detections_batch expects:
+      (local_id_uuid, ts_ms, confidence, bbox_area, floor_x, floor_y, zone_id,
+       x1, y1, x2, y2)
+    Pure (no DB call) so callers can accumulate a whole window and write it in a
+    single round-trip — the per-row INSERT was the dominant cost over the
+    high-latency edge->cloud link.
+    """
+    rows: list[tuple] = []
+    for track in enriched:
+        if track["local_id"] is None:
+            continue
+        x1, y1, x2, y2 = [int(c) for c in track["bbox"]]
+        floor_x = track.get("floor_x")
+        floor_y = track.get("floor_y")
+        zone_id = (
+            projector.zone_of(floor_x, floor_y)
+            if floor_x is not None and floor_y is not None
+            else None
+        )
+        rows.append((
+            uuid.UUID(int=track["local_id"]), capture_ts_ms,
+            float(track["confidence"]), (x2 - x1) * (y2 - y1),
+            floor_x, floor_y, zone_id, x1, y1, x2, y2,
+        ))
+    return rows
+
+
 def _read_frame_from_tmpfs(path: str):
     """Read a JPEG from the IEP1 tmpfs path. Returns BGR ndarray or None."""
     import cv2 as _cv2
@@ -1037,6 +1042,7 @@ async def run_daemon(settings) -> None:
                 reid_crops    = 0
                 reid_batches  = 0
                 tracker_ms     = 0.0
+                db_rows: list[tuple] = []   # accumulate the whole window → one DB round-trip
                 for frame, capture_ts_ms, detections in zip(batch_frames_data, batch_ts, batch_detections):
                     _t_frame = time.monotonic()
                     tracks   = update(tracker, detections, frame)
@@ -1050,30 +1056,10 @@ async def run_daemon(settings) -> None:
 
                     live_pub.publish_frame(frame, capture_ts_ms, enriched)
 
-                    for track in enriched:
-                        if track["local_id"] is None:
-                            continue
-                        x1, y1, x2, y2 = [int(c) for c in track["bbox"]]
-                        floor_x = track.get("floor_x")
-                        floor_y = track.get("floor_y")
-                        zone_id = (
-                            projector.zone_of(floor_x, floor_y)
-                            if floor_x is not None and floor_y is not None
-                            else None
-                        )
-                        await persistence.insert_detection(
-                            local_id=uuid.UUID(int=track["local_id"]),
-                            timestamp_ms=capture_ts_ms,
-                            bbox_confidence=float(track["confidence"]),
-                            bbox_area=(x2 - x1) * (y2 - y1),
-                            floor_x=floor_x,
-                            floor_y=floor_y,
-                            zone_id=zone_id,
-                            bbox_x1=x1,
-                            bbox_y1=y1,
-                            bbox_x2=x2,
-                            bbox_y2=y2,
-                        )
+                    # Accumulate this frame's rows; the whole window is written in
+                    # one round-trip after the loop (was ~rows*88ms of serial
+                    # cross-tunnel INSERTs — the real per-frame bottleneck).
+                    db_rows.extend(_build_detection_rows(enriched, capture_ts_ms, projector))
                     frame_count += 1
                     previous_track_ids = _record_iep2_frame_metrics(
                         camera_id=settings.camera_id,
@@ -1085,6 +1071,10 @@ async def run_daemon(settings) -> None:
                         frame_index=daemon_frame_index,
                     )
                     daemon_frame_index += 1
+
+                # Persist the whole window's detections in ONE round-trip before
+                # closing the batch (replaces ~frame_count*tracks serial INSERTs).
+                await persistence.insert_detections_batch(db_rows)
 
                 # ── Strict batch-close order: centroids → batch_complete → XACK → cleanup ──
                 await _flush_centroids_daemon(
