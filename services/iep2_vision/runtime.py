@@ -983,15 +983,18 @@ async def run_daemon(settings) -> None:
                 Returns (frames, timestamps_ms, detections_per_frame).
                 Skipped (unreadable) frames are excluded from all three lists.
                 """
-                raw_frames, raw_ts = [], []
+                raw_frames, raw_ts, raw_paths = [], [], []
                 for entry in mfst.get("frames", []):
                     f = _read_frame_from_tmpfs(entry[1])
                     if f is not None:
                         raw_frames.append(f)
                         raw_ts.append(int(entry[0]))
+                        raw_paths.append(entry[1])  # tmpfs path → frame-path transport
                 if not raw_frames:
                     return [], [], []
-                dets = await yolo_client.detect_batch(raw_frames, raw_ts)
+                # Pass paths so the detector can use the frame-path transport
+                # (YOLO_FRAME_TRANSPORT=path) and skip a full-frame re-encode.
+                dets = await yolo_client.detect_batch(raw_frames, raw_ts, raw_paths)
                 return raw_frames, raw_ts, dets
 
             # Pipeline parallelism: while we run tracker/reid/DB on batch N,
@@ -1000,6 +1003,9 @@ async def run_daemon(settings) -> None:
 
             async for message_id, manifest in consumer.manifests():
                 if manifest.get("status") == "offline":
+                    # Skipped window: IEP1 still wrote whatever frames it captured.
+                    # Reclaim them so a stream of offline windows can't grow tmpfs.
+                    await _cleanup_frames(manifest)
                     await consumer.ack(message_id)
                     continue
 

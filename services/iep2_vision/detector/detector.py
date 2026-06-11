@@ -29,6 +29,17 @@ YOLO_INPUT_SOCK = os.environ.get("YOLO_INPUT_SOCK", "ipc:///tmp/sockets/yolo_inp
 YOLO_REQUEST_TIMEOUT_S = float(os.environ.get("YOLO_REQUEST_TIMEOUT_S", "5.0"))
 YOLO_BATCH_PER_FRAME_S = float(os.environ.get("YOLO_BATCH_PER_FRAME_S", "0.1"))
 
+# Frame transport to yolo-service: "bytes" (default — JPEG-encode the full frame
+# and ship it over ZMQ) or "path" (ship the /dev/shm frame path; yolo-service
+# reads it directly, avoiding a full-frame re-encode per frame on the IEP2 side —
+# ~7 ms/frame at 854x1280). For "path", yolo-service must mount the same
+# /dev/shm/frames; the wire format always carries one of {frame_path, frame}, and
+# yolo-service falls back to bytes when frame_path is absent, so the two ends can
+# be rolled independently. Per-frame, we still fall back to a bytes encode if a
+# path is missing.
+YOLO_FRAME_TRANSPORT = os.environ.get("YOLO_FRAME_TRANSPORT", "bytes").strip().lower()
+_USE_PATH = YOLO_FRAME_TRANSPORT == "path"
+
 try:
     from ..metrics import IEP2_INFERENCE_TIMEOUTS
 except ImportError:  # pragma: no cover — bare-cwd import inside the container
@@ -104,10 +115,34 @@ class YoloClient:
             except Exception as exc:
                 log.warning("Reader loop error: %s", exc)
 
+    def _pack_request(
+        self, req_id: str, timestamp_ms: int, frame: np.ndarray, frame_path: str | None
+    ) -> bytes | None:
+        """Build the msgpack request for one frame.
+
+        Uses the frame-path transport when enabled and a path is available;
+        otherwise JPEG-encodes the frame. Returns None only when a bytes encode
+        was required and failed.
+        """
+        msg = {
+            "request_id":   req_id,
+            "camera_id":    self._camera_id,
+            "timestamp_ms": timestamp_ms,
+        }
+        if _USE_PATH and frame_path:
+            msg["frame_path"] = frame_path
+        else:
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not ok:
+                return None
+            msg["frame"] = buf.tobytes()
+        return msgpack.packb(msg, use_bin_type=True)
+
     async def detect(
         self,
         frame: np.ndarray,
         timestamp_ms: int,
+        frame_path: str | None = None,
     ) -> list[dict]:
         """Send frame to yolo-service and await person detections.
 
@@ -118,21 +153,11 @@ class YoloClient:
         fut = asyncio.get_running_loop().create_future()
         self._pending[req_id] = fut
 
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if not ok:
+        payload = self._pack_request(req_id, timestamp_ms, frame, frame_path)
+        if payload is None:
             log.warning("JPEG encode failed for camera %s — skipping frame", self._camera_id)
             del self._pending[req_id]
             return []
-
-        payload = msgpack.packb(
-            {
-                "request_id":   req_id,
-                "camera_id":    self._camera_id,
-                "timestamp_ms": timestamp_ms,
-                "frame":        buf.tobytes(),
-            },
-            use_bin_type=True,
-        )
         await self._push.send(payload)
         try:
             return await asyncio.wait_for(fut, timeout=YOLO_REQUEST_TIMEOUT_S)
@@ -151,6 +176,7 @@ class YoloClient:
         self,
         frames: list[np.ndarray],
         timestamps_ms: list[int],
+        frame_paths: list[str] | None = None,
     ) -> list[list[dict]]:
         """Send a batch of frames concurrently and await all results.
 
@@ -159,17 +185,21 @@ class YoloClient:
         order. Frames that fail JPEG encoding, or whose result misses the
         deadline, are returned as empty detection lists — one slow/lost frame
         never sinks the rest, and a wedged service never hangs the batch forever.
+
+        frame_paths (optional, aligned with frames) enables the frame-path
+        transport per frame; a None/missing path falls back to a bytes encode.
         """
         loop = asyncio.get_running_loop()
         futs: list[asyncio.Future] = []
         req_ids: list[str | None] = []  # None marks a pre-resolved (encode-failed) slot
-        for frame, ts in zip(frames, timestamps_ms):
+        paths = frame_paths if frame_paths is not None else [None] * len(frames)
+        for frame, ts, path in zip(frames, timestamps_ms, paths):
             req_id = str(uuid.uuid4())
             fut = loop.create_future()
             self._pending[req_id] = fut
 
-            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if not ok:
+            payload = self._pack_request(req_id, ts, frame, path)
+            if payload is None:
                 log.warning("JPEG encode failed for camera %s ts=%d — skipping", self._camera_id, ts)
                 del self._pending[req_id]
                 placeholder = loop.create_future()
@@ -178,15 +208,6 @@ class YoloClient:
                 req_ids.append(None)
                 continue
 
-            payload = msgpack.packb(
-                {
-                    "request_id":   req_id,
-                    "camera_id":    self._camera_id,
-                    "timestamp_ms": ts,
-                    "frame":        buf.tobytes(),
-                },
-                use_bin_type=True,
-            )
             await self._push.send(payload)
             futs.append(fut)
             req_ids.append(req_id)

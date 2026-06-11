@@ -27,8 +27,11 @@ except ImportError:
 
 # ── Constants (single source of truth) ────────────────────────────────────────
 TTL_FRAMES                 = 150   # 30 s at 5 fps
-INIT_EMBEDDINGS_COUNT      = 5     # embeddings collected before ReID attempt
-SAMPLE_INTERVAL            = 15    # frames between samples in sampled phase (REID_SAMPLE_EVERY_N)
+# ReID scheduling knobs — env-tunable so the crop volume can be dialled down as
+# camera count grows (each extraction is GPU + per-crop CPU overhead). Defaults
+# preserve prior behaviour; raise REID_SAMPLE_EVERY_N at scale to sample less often.
+INIT_EMBEDDINGS_COUNT      = int(os.environ.get("REID_INIT_COUNT", "5"))       # embeddings collected before ReID attempt
+SAMPLE_INTERVAL            = int(os.environ.get("REID_SAMPLE_EVERY_N", "15"))  # frames between samples in sampled phase
 MIN_BBOX_HEIGHT_PX         = 64    # quality gate: min bbox pixel height for a sampled crop
 MIN_BBOX_CONFIDENCE        = 0.5   # quality gate: min YOLO confidence for a sampled crop
 # Cosine threshold for lost-pool occlusion recovery (resnet50_msmt17). Tunable

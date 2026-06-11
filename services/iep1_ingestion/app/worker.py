@@ -15,9 +15,12 @@ import cv2
 import redis.asyncio as aioredis
 
 from services.iep1_ingestion.app.metrics import (
+    IEP1_BACKPRESSURE_DROPS,
+    IEP1_BACKPRESSURE_ENGAGED,
     IEP1_ENCODE_ERRORS,
     IEP1_FRAMES,
     IEP1_FRAMES_DROPPED,
+    IEP1_MEMORY_FRACTION,
     IEP1_PUBLISH_LATENCY,
 )
 from services.iep1_ingestion.app.window import WindowAccumulator
@@ -30,9 +33,76 @@ FRAME_QUEUE_SIZE = int(os.environ.get("FRAME_QUEUE_SIZE", "30"))
 STREAM_PREFIX    = "stream:iep1"
 STREAM_MAXLEN    = 1000
 
+# ── Memory backpressure ───────────────────────────────────────────────────────
+# Frames written to /dev/shm are charged to IEP1's cgroup memory; if IEP2 stalls
+# they pile up and OOM-kill IEP1 (observed: one health flap → 26-restart crash
+# loop → total pipeline death). This sheds frames *before* the OOM: when cgroup
+# memory crosses the high mark we drop frames (windows degrade gracefully), and
+# resume at the low mark. Hysteresis avoids flapping. cgroup v2 first, v1 fallback.
+BACKPRESSURE_HIGH     = float(os.environ.get("IEP1_BACKPRESSURE_HIGH", "0.85"))
+BACKPRESSURE_LOW      = float(os.environ.get("IEP1_BACKPRESSURE_LOW", "0.60"))
+BACKPRESSURE_INTERVAL = float(os.environ.get("IEP1_BACKPRESSURE_INTERVAL_S", "1.0"))
+
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _read_cgroup_mem_fraction() -> float:
+    """IEP1 container memory usage / limit in [0,1], or 0.0 if unknown/unlimited."""
+    try:  # cgroup v2
+        with open("/sys/fs/cgroup/memory.max") as fh:
+            raw = fh.read().strip()
+        if raw != "max":
+            limit = int(raw)
+            with open("/sys/fs/cgroup/memory.current") as fh:
+                cur = int(fh.read().strip())
+            return cur / limit if limit > 0 else 0.0
+    except (OSError, ValueError):
+        pass
+    try:  # cgroup v1
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as fh:
+            limit = int(fh.read().strip())
+        with open("/sys/fs/cgroup/memory/memory.usage_in_bytes") as fh:
+            cur = int(fh.read().strip())
+        if 0 < limit < (1 << 62):  # v1 uses a huge sentinel when unlimited
+            return cur / limit
+    except (OSError, ValueError):
+        pass
+    return 0.0
+
+
+class MemoryBackpressure:
+    """Process-wide memory backpressure with hysteresis (all camera workers share
+    IEP1's cgroup). should_drop() is cheap — it re-samples at most every
+    BACKPRESSURE_INTERVAL seconds and returns the cached engaged state otherwise."""
+
+    def __init__(self) -> None:
+        self._engaged = False
+        self._last_check = 0.0
+
+    def should_drop(self) -> bool:
+        now = time.monotonic()
+        if now - self._last_check >= BACKPRESSURE_INTERVAL:
+            self._last_check = now
+            frac = _read_cgroup_mem_fraction()
+            IEP1_MEMORY_FRACTION.set(frac)
+            if self._engaged and frac <= BACKPRESSURE_LOW:
+                self._engaged = False
+                IEP1_BACKPRESSURE_ENGAGED.set(0)
+                logger.warning("IEP1 backpressure RELEASED — memory=%.0f%%", frac * 100)
+            elif not self._engaged and frac >= BACKPRESSURE_HIGH:
+                self._engaged = True
+                IEP1_BACKPRESSURE_ENGAGED.set(1)
+                logger.warning(
+                    "IEP1 backpressure ENGAGED — memory=%.0f%% — shedding frames "
+                    "(IEP2 behind); windows will degrade", frac * 100,
+                )
+        return self._engaged
+
+
+# One shared monitor for the whole IEP1 process (cgroup memory is process-wide).
+_BACKPRESSURE = MemoryBackpressure()
 
 
 def _write_to_tmpfs(camera_id: str, ts_ms: int, frame) -> str | None:
@@ -46,8 +116,15 @@ def _write_to_tmpfs(camera_id: str, ts_ms: int, frame) -> str | None:
         return None
     path = f"{TMPFS_ROOT}/{camera_id}/{ts_ms}.jpg"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as fh:
-        fh.write(buf.tobytes())
+    try:
+        with open(path, "wb") as fh:
+            fh.write(buf.tobytes())
+    except OSError as exc:
+        # tmpfs full (ENOSPC) or other write failure — drop the frame, never crash
+        # the window loop (a crash here is what froze the whole pipeline before).
+        IEP1_ENCODE_ERRORS.labels(camera_id=camera_id).inc()
+        logger.warning("tmpfs write failed camera=%s ts=%d: %s", camera_id, ts_ms, exc)
+        return None
     IEP1_FRAMES.labels(camera_id=camera_id).inc()
     return path
 
@@ -270,16 +347,24 @@ class CameraWorker:
                     pass
                 else:
                     self._last_frame_ts = ts
-                    path = _write_to_tmpfs(self._config.camera_id, ts, frame)
-                    if path is not None:
-                        batch_full = accumulator.add(ts, path)
-                        if batch_full:
-                            # Frame-count trigger: flush immediately.
-                            window_end   = ts
-                            await self._flush_accumulator(accumulator, window_start, window_end)
-                            window_start = window_end
-                            accumulator  = self._make_accumulator()
-                            continue
+                    if _BACKPRESSURE.should_drop():
+                        # IEP2 is behind and IEP1 memory is high — shed this frame
+                        # instead of writing it. The window ends up with fewer
+                        # frames and flushes as "degraded" (IEP2 still processes
+                        # it); this converts the old "IEP2 stall → IEP1 OOM → total
+                        # death" into graceful degradation that self-recovers.
+                        IEP1_BACKPRESSURE_DROPS.labels(camera_id=self._config.camera_id).inc()
+                    else:
+                        path = _write_to_tmpfs(self._config.camera_id, ts, frame)
+                        if path is not None:
+                            batch_full = accumulator.add(ts, path)
+                            if batch_full:
+                                # Frame-count trigger: flush immediately.
+                                window_end   = ts
+                                await self._flush_accumulator(accumulator, window_start, window_end)
+                                window_start = window_end
+                                accumulator  = self._make_accumulator()
+                                continue
 
                 # Safety-flush: emit whatever has accumulated if the time budget
                 # expires — prevents frames from being held indefinitely when the

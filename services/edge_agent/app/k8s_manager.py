@@ -181,9 +181,18 @@ def _build_iep2_deployment(camera_id: str) -> k8s.V1Deployment:
                 )
             )
         ],
+        # Deployment-wide tuning (per-camera config comes via env_from above).
+        env=[
+            # Frame-path transport: IEP2 ships the /dev/shm frame path instead of a
+            # re-encoded JPEG; yolo-service reads it from its read-only mount.
+            k8s.V1EnvVar(name="YOLO_FRAME_TRANSPORT", value="path"),
+        ],
+        # Memory must be >=~2Gi: IEP2 buffers a full window of decoded frames for
+        # the tracker/ReID pass (512Mi OOM-killed in testing). CPU request kept low
+        # so many per-camera pods schedule on the node; limit allows bursting.
         resources=k8s.V1ResourceRequirements(
-            requests={"cpu": "200m", "memory": "256Mi"},
-            limits={"cpu": "1000m", "memory": "512Mi"},
+            requests={"cpu": "250m", "memory": "512Mi"},
+            limits={"cpu": "4", "memory": "3Gi"},
         ),
         volume_mounts=[
             k8s.V1VolumeMount(name="ipc-sockets", mount_path="/tmp/sockets"),

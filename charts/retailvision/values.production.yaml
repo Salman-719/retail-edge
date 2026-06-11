@@ -22,12 +22,18 @@ migrations:
   enabled: false
 
 eep:
-  replicas: 2
+  # PINNED TO 1 REPLICA: the edge<->EEP gRPC command stream lives in a single
+  # pod's memory (orchestrator holds the edge session in-process). With >1 replica
+  # the edge attaches to one pod while StartCamera HTTP calls load-balance to the
+  # other → "Edge agent not connected" → cameras never start (split-brain). Keep
+  # min=max=1 until shared edge-session routing exists (sticky gRPC by store_id or
+  # a Redis command bus) — tracked as a separate ticket. Re-enable HA after that.
+  replicas: 1
   grpcHost: eep.retailvision.example.com   # set the real gRPC hostname before deploy
   hpa:
     enabled: true
-    minReplicas: 2
-    maxReplicas: 4
+    minReplicas: 1
+    maxReplicas: 1
 
 iep3:
   stores: []   # set at deploy time: --set iep3.stores={uuid1,uuid2,...}
