@@ -36,7 +36,12 @@ export default function DevE2E() {
   const [zones, setZones] = useState([])
   const [floorPlan, setFloorPlan] = useState(null)
   const [frameUrls, setFrameUrls] = useState({})
-  const [running, setRunning] = useState(false)
+  // 'idle' | 'local' | 'attached'
+  //   local    — this page started a dev pipeline on the EEP host (laptop/testing)
+  //   attached — observe the pipeline the Edge Agent is ALREADY running (cloud
+  //              deployment); nothing is started or stopped, we only read.
+  const [mode, setMode] = useState('idle')
+  const running = mode !== 'idle'
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [device, setDevice] = useState('cpu')
@@ -127,7 +132,7 @@ export default function DevE2E() {
       const res = await devPipelineStart({ store_id: storeId, camera_ids: ids, target_fps: 5.0, window_seconds: 60.0, device })
       const failed = (res.cameras || []).filter((c) => !c.ok)
       if (failed.length) setError('Some cameras failed: ' + failed.map((f) => `${shortId(f.camera_id)} (${f.stage}: ${f.error})`).join('; '))
-      setRunning(true)
+      setMode('local')
     } catch (e) {
       const d = e?.response?.data?.detail
       if (d?.code === 'NO_GPU') { setError('No usable GPU — switch to CPU or run on a GPU machine.'); setDevice('cpu') }
@@ -137,8 +142,22 @@ export default function DevE2E() {
   async function handleStop() {
     setBusy(true)
     try { await devPipelineStop({ store_id: storeId, camera_ids: activeCamIds() }) } catch {}
-    setRunning(false); setBusy(false)
+    setMode('idle'); setBusy(false)
     setTimeout(() => refresh.current(), 500) // final snapshot so panels/replay survive Stop
+  }
+
+  // Observe the pipeline the Edge Agent is already running (cloud deployment).
+  // Starts NOTHING: it only turns on polling + the live WebSocket, so it is safe
+  // to click against a production store.
+  function handleAttach() {
+    setError('')
+    if (!activeCamIds().length) { setError('Select at least one camera'); return }
+    identityRef.current = makeIdentityMap()
+    setMode('attached')
+  }
+  function handleDetach() {
+    setMode('idle')
+    setTimeout(() => refresh.current(), 500)
   }
 
   const updateSlot = (i, v) => setCamSlots((prev) => prev.map((x, j) => (j === i ? v : x)))
@@ -158,6 +177,7 @@ export default function DevE2E() {
         <ControlBar
           numCams={numCams} setNumCams={setNumCams} device={device} setDevice={setDevice}
           gpu={gpu} running={running} busy={busy} storeId={storeId} onStart={handleStart} onStop={handleStop}
+          mode={mode} onAttach={handleAttach} onDetach={handleDetach}
         />
       </header>
 

@@ -284,6 +284,13 @@ def _build_configmap_data(
         "TARGET_FPS":          str(target_fps),
         "CAMERA_CONFIG_ID":    camera_config_id,
         "IEP2_METRICS_PORT":   os.environ.get("IEP2_METRICS_PORT", "9201"),
+        # Live preview for the Main Vision Debug page. Off unless explicitly set
+        # on the Edge Agent, because the publish path is a synchronous XADD to the
+        # server Redis on the pipeline's event loop — see LivePublisher for why
+        # LIVE_PUBLISH_EVERY_N matters on a split edge/cloud deployment.
+        "LIVE_STREAM_ENABLED":  os.environ.get("LIVE_STREAM_ENABLED", "false"),
+        "LIVE_EMBED_FRAME":     os.environ.get("LIVE_EMBED_FRAME", "false"),
+        "LIVE_PUBLISH_EVERY_N": os.environ.get("LIVE_PUBLISH_EVERY_N", "5"),
     }
 
 
