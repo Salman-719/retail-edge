@@ -60,6 +60,11 @@ LOCAL_REDIS_URL      = os.environ.get("LOCAL_REDIS_URL",     "redis://localhost:
 SERVER_REDIS_URL     = os.environ.get("SERVER_REDIS_URL",    "")
 DATABASE_URL_SERVER  = os.environ.get("DATABASE_URL_SERVER", "")
 HEARTBEAT_INTERVAL_S = int(os.environ.get("HEARTBEAT_INTERVAL_S", "30"))
+# How long to wait for a freshly-created IEP2 pod to report SERVING before
+# StartCamera gives up. GPU edges need this generous: the iep2 pod cold-loads its
+# detector/ReID clients and connects to the cloud DB. 60s was too short (observed
+# StartCamera failing → IEP1 AddCamera never called). Env-tunable; default 240s.
+IEP2_HEALTH_TIMEOUT_S = int(os.environ.get("IEP2_HEALTH_TIMEOUT_S", "240"))
 
 # TLS — CA cert used to verify EEP server certificate
 GRPC_CA_CERT_PATH = os.environ.get("GRPC_CA_CERT_PATH", "/etc/retailvision/certs/ca.crt")
@@ -105,7 +110,7 @@ async def _wait_for_health(name: str, sock: str, timeout: int) -> None:
     raise RuntimeError(f"{name} did not become SERVING within {timeout}s")
 
 
-async def _wait_for_iep2_health(camera_id: str, timeout: int = 60) -> None:
+async def _wait_for_iep2_health(camera_id: str, timeout: int = IEP2_HEALTH_TIMEOUT_S) -> None:
     sock = f"unix://{IPC_SOCKETS_HOST_PATH}/iep2_health_{camera_id}.sock"
     await _wait_for_health(f"iep2-{camera_id}", sock, timeout)
 
@@ -236,6 +241,9 @@ async def _add_camera_to_iep1(
                     target_fps=target_fps,
                     window_seconds=window_seconds or WINDOW_SECONDS,
                     store_id=store_id,
+                    # Without this the proto default (0) makes IEP1 set expected_frames=0
+                    # → every manifest "offline" → IEP2 skips it. Use the full window.
+                    batch_frames=int(round((window_seconds or WINDOW_SECONDS) * (target_fps if target_fps > 0 else 5.0))),
                 ),
                 timeout=5.0,
             )
@@ -336,7 +344,7 @@ async def _handle_start_camera(cmd) -> None:
         await loop.run_in_executor(_exec, _mgr.apply_iep2_deployment, camera_id)
 
         # Step 2: wait for IEP2 to report SERVING on its unix health socket
-        await _wait_for_iep2_health(camera_id, timeout=60)
+        await _wait_for_iep2_health(camera_id)
 
         # Step 3: add to IEP1 — IEP2 is now ready to consume from the Redis stream
         window_seconds = cmd.window_seconds or WINDOW_SECONDS

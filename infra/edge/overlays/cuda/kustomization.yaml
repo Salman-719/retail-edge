@@ -25,6 +25,9 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value: { name: INFERENCE_DEVICE, value: "gpu" }
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: DETECTOR_MODEL, value: "rtdetr-x.pt" }
   - target: { kind: Deployment, name: reid-service }
     patch: |
       - op: add

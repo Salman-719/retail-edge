@@ -42,6 +42,13 @@ spec:
           volumeMounts:
             - name: ipc-sockets
               mountPath: /tmp/sockets
+            # Shared IEP1 tmpfs frames — read-only. Enables the frame-path
+            # transport (YOLO_FRAME_TRANSPORT=path on IEP2): yolo-service reads the
+            # frame from /dev/shm directly instead of receiving a re-encoded JPEG.
+            # Harmless when unused (bytes transport ignores it).
+            - name: edge-frames
+              mountPath: /dev/shm/frames
+              readOnly: true
           livenessProbe:
             exec:
               command: ["grpc_health_probe",
@@ -53,4 +60,8 @@ spec:
         - name: ipc-sockets
           hostPath:
             path: /dev/shm/sockets
+            type: DirectoryOrCreate
+        - name: edge-frames
+          hostPath:
+            path: /dev/shm/frames
             type: DirectoryOrCreate
