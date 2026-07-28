@@ -44,6 +44,17 @@ class LivePublisher:
         self._embed_frame = embed_frame
         self._max_width = max_width
         self._redis = None
+        # Publish only every Nth frame. This XADD is SYNCHRONOUS and runs on the
+        # pipeline's event loop, against the *server* Redis — which on a split
+        # edge/cloud deployment is a WAN round-trip (~85 ms). Unthrottled at 5 fps
+        # that is ~26 s of blocking per 60 s window, per camera, which pushes the
+        # window past its budget and backlogs the whole pipeline. 1 = every frame.
+        import os as _os
+        try:
+            self._every_n = max(1, int(_os.environ.get("LIVE_PUBLISH_EVERY_N", "5")))
+        except ValueError:
+            self._every_n = 5
+        self._seq = 0
         if enabled:
             try:
                 import redis as _redis_lib  # lazy — safe to import even if not installed
@@ -62,6 +73,10 @@ class LivePublisher:
         align in the browser. Never raises.
         """
         if not self._enabled or self._redis is None:
+            return
+        # Drop frames before doing any encode/network work.
+        self._seq += 1
+        if self._every_n > 1 and (self._seq % self._every_n) != 0:
             return
         try:
             import cv2

@@ -1,0 +1,30 @@
+# TLS termination for the cloud box. Certificates are issued automatically by
+# Let's Encrypt; {$PUBLIC_HOST} is e.g. 63.34.241.126.nip.io.
+#
+# Caddy passes the original Host header upstream by default — MinIO presigned
+# URLs are signed against s3.{$PUBLIC_HOST}, so that must not be rewritten.
+
+{
+	email {$LETSENCRYPT_EMAIL}
+}
+
+# ── Application (React SPA; its nginx proxies /api/ -> eep and /ws/ -> live_bridge)
+app.{$PUBLIC_HOST} {
+	encode gzip
+	reverse_proxy frontend:80
+}
+
+# ── Object storage (floor plans, calibration frames, live frames)
+s3.{$PUBLIC_HOST} {
+	# Floor-plan uploads are large; do not buffer them.
+	request_body {
+		max_size 500MB
+	}
+	reverse_proxy minio:9000
+}
+
+# ── Dashboards
+grafana.{$PUBLIC_HOST} {
+	encode gzip
+	reverse_proxy grafana:3000
+}

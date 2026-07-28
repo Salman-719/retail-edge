@@ -187,6 +187,32 @@ class PostgresPersistence:
             local_id, timestamp_ms, bbox_confidence, bbox_area,
         )
 
+    async def insert_detections_batch(self, rows: list[tuple]) -> int:
+        """Batch-insert tracking_history rows in ONE round-trip (asyncpg
+        executemany) instead of one awaited INSERT per track per frame.
+
+        On a high-latency edge->cloud link (~88 ms RTT over WireGuard), the old
+        per-row pattern cost ~rows * 88 ms per window and was the dominant per-
+        frame cost (GPU sat idle). Batching the whole window collapses it to a
+        single round-trip.
+
+        Each row is the per-detection tuple, store/camera prepended here:
+          (local_id, timestamp_ms, bbox_confidence, bbox_area,
+           floor_x, floor_y, zone_id, bbox_x1, bbox_y1, bbox_x2, bbox_y2)
+        Returns the number of rows submitted.
+        """
+        if not rows:
+            return 0
+        records = [
+            (self._store_id, self._camera_id, local_id, ts,
+             floor_x, floor_y, zone_id, conf, area, x1, y1, x2, y2)
+            for (local_id, ts, conf, area, floor_x, floor_y, zone_id,
+                 x1, y1, x2, y2) in rows
+        ]
+        await self._pool.executemany(_INSERT_SQL, records)
+        log.debug("DB batch write  rows=%d  camera=%s", len(records), self._camera_id)
+        return len(records)
+
     async def __aenter__(self):
         await self.connect()
         return self

@@ -1,0 +1,146 @@
+# Cloud-tier overlay — single rented CPU box (AWS EC2).
+#
+# Runs the control plane + storage + UI. The vision tier (IEP1/IEP2/yolo/reid)
+# lives on the rented GPU box and talks to this host over the internet:
+#   edge_agent -> EEP gRPC :50051,  IEP2 -> postgres :5432 + redis :6379.
+# Those three ports are opened in the AWS security group to the GPU box IP ONLY.
+#
+# IEP3/IEP4/IEP5 are NOT started here — EEP provisions them as Docker containers
+# per store at runtime (it already mounts /var/run/docker.sock in the base file).
+#
+# Usage (from the repo root, with .env present):
+#   docker compose -f docker-compose.yml -f docker-compose.cloud.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.cloud.yml build frontend
+#   docker compose -f docker-compose.yml -f docker-compose.cloud.yml up -d --no-build \
+#     postgres pgbouncer redis minio eep frontend live_bridge iep6_agent \
+#     prometheus grafana redis_exporter postgres_exporter node_exporter caddy
+
+services:
+
+  # ── Pinned release images (no local builds) ────────────────────────────────
+
+  eep:
+    image: ghcr.io/salman-719/retailvision/eep:${RV_TAG:-1.5.1}
+    environment:
+      # Images EEP spawns per store. Must be the same release as EEP itself.
+      IEP3_IMAGE: ghcr.io/salman-719/retailvision/iep3:${RV_TAG:-1.5.1}
+      IEP4_IMAGE: ghcr.io/salman-719/retailvision/iep4:${RV_TAG:-1.5.1}
+      IEP5_IMAGE: ghcr.io/salman-719/retailvision/iep5:${RV_TAG:-1.5.1}
+      DOCKER_NETWORK: ${DOCKER_NETWORK:-retail-edge_default}
+      # Browser-visible MinIO endpoint — presigned floor-plan/frame URLs are
+      # signed against THIS host, so it must match what the browser requests.
+      S3_PUBLIC_URL: https://s3.${PUBLIC_HOST}
+      DEBUG_MODE: "false"
+      # TLS on the edge->cloud gRPC stream. Without these the server falls back
+      # to an INSECURE port and AGENT_SECRET crosses the public internet in the
+      # clear. certs/ are generated on the box; the edge gets certs/ca.crt.
+      GRPC_SERVER_CERT_PATH: /certs/server.crt
+      GRPC_SERVER_KEY_PATH: /certs/server.key
+    volumes:
+      - ./certs:/certs:ro
+    # yolo/reid are stubbed below; EEP only needs them for its own local IEP2
+    # spawner, which this topology does not use (edge_agent spawns IEP2).
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  live_bridge:
+    image: ghcr.io/salman-719/retailvision/live-bridge:${RV_TAG:-1.5.1}
+    environment:
+      S3_PUBLIC_URL: https://s3.${PUBLIC_HOST}
+
+  iep6_agent:
+    image: ghcr.io/salman-719/retailvision/iep6:${RV_TAG:-1.5.1}
+    environment:
+      # Read-only analytics connection (asyncpg dialect), via pgbouncer.
+      DATABASE_URL_AGENT: "postgresql+asyncpg://${POSTGRES_USER:-retailvision}:${POSTGRES_PASSWORD}@pgbouncer:5432/${POSTGRES_DB:-retailvision}"
+      REDIS_URL: "redis://redis:6379/0"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      EEP_BASE_URL: "http://eep:8000"
+      # Single replica here, so this instance owns the schedule. Never run a
+      # second scheduler-enabled replica: duplicate insights + duplicate spend.
+      ENABLE_SCHEDULER: "true"
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+    restart: on-failure
+
+  frontend:
+    # Built locally, NOT pulled: VITE_LIVE_BRIDGE_URL is baked at build time and
+    # the CI image bakes it EMPTY (falls back to ws://localhost:8010, which
+    # breaks in-browser live video on any real deployment).
+    image: retailvision-frontend:${PUBLIC_HOST}
+    build:
+      args:
+        # ORIGIN ONLY — no /ws/ suffix. CameraTile builds the URL as
+        # `${VITE_LIVE_BRIDGE_URL}/ws/live/{camera_id}`, so a trailing /ws/ here
+        # yields wss://host/ws//ws/live/... which nginx forwards verbatim and
+        # live_bridge (route /ws/live/{camera_id}) rejects.
+        VITE_LIVE_BRIDGE_URL: "wss://app.${PUBLIC_HOST}"
+    # nginx resolves `eep` and `live_bridge` at STARTUP and exits if either name
+    # does not resolve yet ("host not found in upstream"). depends_on orders the
+    # first boot; the restart policy covers a host reboot where eep is slower.
+    depends_on:
+      - eep
+      - live_bridge
+    restart: unless-stopped
+
+  # ── Services that do NOT belong on this box ────────────────────────────────
+  # Stubbed to a tiny image that exits 0: they satisfy compose `depends_on`
+  # without pulling multi-GB CUDA images. Same idiom the repo already uses for
+  # iep3_reconciliation in docker-compose.production-local.yml.
+
+  yolo-service:
+    image: busybox:1.36
+    entrypoint: ["true"]
+    restart: "no"
+    deploy: {}
+
+  reid-service:
+    image: busybox:1.36
+    entrypoint: ["true"]
+    restart: "no"
+    deploy: {}
+
+  # IEP1 runs on the GPU box next to IEP2 (shared /dev/shm frame store).
+  iep1-daemon:
+    image: busybox:1.36
+    entrypoint: ["true"]
+    restart: "no"
+
+  # EEP provisions IEP3 and IEP4 per store at runtime.
+  iep3_reconciliation:
+    image: busybox:1.36
+    entrypoint: ["true"]
+    restart: "no"
+
+  iep4_alerts:
+    image: busybox:1.36
+    entrypoint: ["true"]
+    restart: "no"
+
+  # ── TLS termination ────────────────────────────────────────────────────────
+  # Let's Encrypt via nip.io. Caddy preserves the Host header, which the MinIO
+  # presigned-URL signature depends on.
+  caddy:
+    image: caddy:2.8-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

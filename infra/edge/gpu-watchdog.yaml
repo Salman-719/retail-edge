@@ -1,0 +1,72 @@
+# GPU watchdog (Phase 5.2) — self-heals the "GPU access blocked by the OS"
+# device-plugin failure that advertised nvidia.com/gpu allocatable=0 and stranded
+# yolo/reid (they couldn't reschedule). Persistence mode (Phase 0.1 systemd unit)
+# is the PRIMARY fix; this is the backstop: every 2 min, if GPU allocatable is 0
+# or missing, it deletes the nvidia-device-plugin pod so it re-scans and re-
+# advertises. Image is pinned to the k3s server version.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-watchdog
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gpu-watchdog
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gpu-watchdog
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gpu-watchdog
+subjects:
+  - kind: ServiceAccount
+    name: gpu-watchdog
+    namespace: kube-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gpu-watchdog
+  namespace: kube-system
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 60
+      template:
+        spec:
+          serviceAccountName: gpu-watchdog
+          restartPolicy: Never
+          containers:
+            - name: watchdog
+              image: rancher/kubectl:v1.29.4
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  alloc=$(kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}' 2>/dev/null || echo "")
+                  echo "nvidia.com/gpu allocatable=[$alloc]"
+                  if [ -z "$alloc" ] || [ "$alloc" = "0" ]; then
+                    echo "GPU allocatable is 0/empty — restarting nvidia-device-plugin"
+                    for p in $(kubectl -n kube-system get pods -o name | grep nvidia-device-plugin); do
+                      kubectl -n kube-system delete "$p" --grace-period=0 --force || true
+                    done
+                  else
+                    echo "GPU healthy — no action"
+                  fi

@@ -43,6 +43,29 @@ def _container_name(camera_id: str) -> str:
     return f"iep2-prod-{camera_id}"
 
 
+def _iep2_volumes() -> dict:
+    """Volumes for a spawned IEP2 container.
+
+    IEP2_SOURCE_PATCH_DIR is an ESCAPE HATCH, empty by default: when set to a host
+    directory it is mounted read-only over the image's own
+    /workspace/services/iep2_vision, so a fix can be validated before the image is
+    rebuilt. Leave it unset in steady state — a stale patch dir silently shadows
+    whatever the image ships, which is exactly the trap it exists to get out of.
+    """
+    volumes = {
+        IPC_SOCKETS_VOLUME: {"bind": "/tmp/sockets",    "mode": "rw"},
+        FRAME_STORE_VOLUME: {"bind": "/dev/shm/frames", "mode": "rw"},
+    }
+    patch_dir = os.environ.get("IEP2_SOURCE_PATCH_DIR", "").strip()
+    if patch_dir:
+        volumes[patch_dir] = {"bind": "/workspace/services/iep2_vision", "mode": "ro"}
+        log.warning(
+            "docker_manager: mounting IEP2 source patch dir %s over the image — "
+            "TEMPORARY, remove once the iep2 image is rebuilt", patch_dir,
+        )
+    return volumes
+
+
 # ── ConfigMap equivalent ───────────────────────────────────────────────────────
 
 def apply_camera_configmap(camera_id: str, env_data: dict) -> None:
@@ -72,10 +95,26 @@ def apply_iep2_deployment(camera_id: str) -> None:
         image=IEP2_IMAGE,
         name=name,
         environment=env,
-        volumes={
-            IPC_SOCKETS_VOLUME: {"bind": "/tmp/sockets",    "mode": "rw"},
-            FRAME_STORE_VOLUME: {"bind": "/dev/shm/frames", "mode": "rw"},
-        },
+        # Explicit entrypoint, matching k8s_manager so both backends launch IEP2
+        # identically. It also pins the import style: every sibling module is
+        # imported top-level, so metrics.py is loaded exactly once. The image's
+        # default CMD used to load it twice (as `services.iep2_vision.metrics` and
+        # again as top-level `metrics`), re-registering every Counter and killing
+        # the process with "Duplicated timeseries in CollectorRegistry:
+        # iep2_frames_processed". main.py is fixed too; this keeps the guarantee
+        # at the call site regardless of which image tag is deployed.
+        command=[
+            "python", "-c",
+            "import sys,os,asyncio,logging;"
+            "sys.path.insert(0,'/workspace/services/iep2_vision');"
+            "logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO').upper(),"
+            "format='%(asctime)s %(levelname)s %(name)s %(message)s');"
+            "from metrics import start_metrics_server;"
+            "from runtime import Settings,run_daemon;"
+            "start_metrics_server(int(os.environ.get('IEP2_METRICS_PORT','9201')));"
+            "asyncio.run(run_daemon(Settings()))",
+        ],
+        volumes=_iep2_volumes(),
         network=DOCKER_NETWORK,
         detach=True,
         restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},

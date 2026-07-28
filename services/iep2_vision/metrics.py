@@ -21,6 +21,10 @@ from prometheus_client import Counter, Gauge, Histogram, start_http_server
 # A canary deployment sets MODEL_VERSION=canary so Prometheus automatically
 # separates production and canary time-series for ML-signal metrics.
 _MODEL_VERSION = os.environ.get("MODEL_VERSION", "production")
+# Public alias: runtime.py / detector.py / reid.py import `MODEL_VERSION`. Keep both
+# names in sync so those imports resolve (the rename left them referencing the
+# un-prefixed name, which crashed IEP2 on import).
+MODEL_VERSION = _MODEL_VERSION
 
 # Total frames processed by this IEP2 instance. Rate == 0 means the pipeline
 # has stalled for this camera.
@@ -103,6 +107,34 @@ IEP2_INFERENCE_TIMEOUTS = Counter(
     "iep2_inference_timeouts_total",
     "Inference requests that exceeded their deadline and returned a fallback",
     ["camera_id", "service"],  # service = "yolo" | "reid"
+)
+
+# ── Per-window phase breakdown ────────────────────────────────────────────────
+# IEP2 must finish a window in less than the window duration; if it does not, the
+# backlog is permanent (manifests are consumed oldest-first with no skip-ahead),
+# the camera falls behind its peers, and IEP3 stops reconciling them together.
+# Until now only two coarse numbers were logged — a residual YOLO await and a
+# lumped tracker figure — which together accounted for ~48s of a measured ~65s
+# window, leaving ~17s unattributed. Everything outside those two (live publish,
+# row building, per-frame metrics, the DB writes, batch_complete, cleanup) was
+# invisible. Seconds are accumulated per phase across the window and observed
+# ONCE at batch close, so the instrumentation itself costs ~nothing per frame.
+IEP2_PHASE_SECONDS = Histogram(
+    "iep2_phase_seconds",
+    "Wall time spent in one pipeline phase over a single window",
+    ["camera_id", "phase"],
+    buckets=[0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 40.0, 60.0],
+)
+
+# Total wall time for one window, end to end. Compare against the sum of
+# IEP2_PHASE_SECONDS to prove the breakdown is complete: a growing residual means
+# time is being spent somewhere still uninstrumented. Values at or above the
+# window duration mean this camera cannot keep up and is accumulating lag.
+IEP2_WINDOW_WALL_SECONDS = Histogram(
+    "iep2_window_wall_seconds",
+    "End-to-end wall time to process one window",
+    ["camera_id"],
+    buckets=[10, 20, 30, 40, 50, 55, 60, 65, 70, 80, 100, 150],
 )
 
 

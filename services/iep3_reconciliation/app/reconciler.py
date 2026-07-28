@@ -236,9 +236,13 @@ class Reconciler:
         IEP3_TRANSITIONS.labels(transition="lost").inc(cleanup_stats.get("newly_lost", 0))
         IEP3_TRANSITIONS.labels(transition="exited").inc(cleanup_stats.get("newly_exited", 0))
         IEP3_CAMERAS_REPORTING.observe(len(reporting_cameras))
-        total_locals = len(known) + n_new_globals
+        # ReID match rate = identities matched to an existing global / total
+        # resolved identities this batch. component_members is keyed by global_id,
+        # so its size is the total; n_new_globals of those were freshly created.
+        n_known = len(component_members) - n_new_globals
+        total_locals = len(component_members)
         if total_locals > 0:
-            IEP3_REID_MATCH_RATE.set(len(known) / total_locals)
+            IEP3_REID_MATCH_RATE.set(n_known / total_locals)
 
         logger.info("Batch %d reconciled: %s", batch_number, stats)
 

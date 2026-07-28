@@ -217,10 +217,27 @@ def _decode_frame(jpeg_bytes: bytes) -> np.ndarray:
     return frame
 
 
+def _get_frame(item: dict) -> np.ndarray:
+    """Resolve one request's frame: read from the shared /dev/shm ``frame_path``
+    when present (the frame-path transport — avoids an IEP2-side re-encode), else
+    decode the JPEG ``frame`` bytes carried in the message. Falls back to bytes if
+    the path is unreadable, so a mount glitch degrades instead of dropping frames."""
+    path = item.get("frame_path")
+    if path:
+        frame = cv2.imread(path)
+        if frame is not None:
+            return frame
+        log.warning("frame_path unreadable (%s) — falling back to bytes", path)
+    data = item.get("frame")
+    if data:
+        return _decode_frame(data)
+    return np.zeros((640, 640, 3), dtype=np.uint8)
+
+
 def _infer_batch(model, batch_items: list[dict]) -> list[dict]:
     """Batch inference — R4 filters to class 0 (person) only. Identical to service.py."""
     DETECTOR_BATCH.observe(len(batch_items))
-    frames = [_decode_frame(item["frame"]) for item in batch_items]
+    frames = [_get_frame(item) for item in batch_items]
     with DETECTOR_INFER.time():
         results = model(
             frames,

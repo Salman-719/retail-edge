@@ -9,6 +9,7 @@ Swap BoTSORT for another tracker here and nothing outside this file changes.
 Config values are named constants at the top; they must never be buried as
 magic numbers inside the functions below.
 """
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,13 @@ MATCH_THRESH        = 0.8
 NEW_TRACK_THRESH    = 0.7
 TRACK_HIGH_THRESH   = 0.6
 FRAME_RATE          = 5
+
+# Global motion compensation (camera-motion). For FIXED/static camera mounts it
+# is wasted work and measured quality-neutral (validated: identical tracks with
+# GMC off). TRACKER_GMC=off (default) disables it; set "sof" to re-enable for
+# moving/PTZ cameras. cmc_method=None disables CMC in boxmot.
+_GMC = os.environ.get("TRACKER_GMC", "off").strip().lower()
+CMC_METHOD = None if _GMC in ("off", "none", "0", "false", "disabled", "") else _GMC
 
 
 def create_tracker() -> BoTSORT:
@@ -45,7 +53,7 @@ def create_tracker() -> BoTSORT:
         new_track_thresh=NEW_TRACK_THRESH,
         track_high_thresh=TRACK_HIGH_THRESH,
         with_reid=False,
-        cmc_method="sof",
+        cmc_method=CMC_METHOD,
         frame_rate=FRAME_RATE,
     )
     tracker._id_map = {}

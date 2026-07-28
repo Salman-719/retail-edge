@@ -29,6 +29,16 @@ class WindowManifest:
 
 
 class WindowAccumulator:
+    """Collects frames for ONE window and renders the manifest.
+
+    Deliberately knows nothing about when a window starts or ends: boundaries are
+    wall-clock aligned and owned by the caller (ADR-003 — "governed by wall clock,
+    not relative timers"). `batch_frames` is a SIZING hint only; it must never
+    trigger a flush. Letting it close the window re-anchored `window_start` to a
+    frame timestamp, so every camera drifted off the shared grid at its own rate
+    and cameras silently stopped landing in the same IEP3 reconciliation bucket.
+    """
+
     def __init__(
         self,
         sample_fps: float,
@@ -37,17 +47,19 @@ class WindowAccumulator:
     ) -> None:
         self.sample_fps = sample_fps
         self.batch_window_seconds = batch_window_seconds
-        # When set, a batch is closed as soon as this many frames accumulate.
-        # batch_window_seconds then acts only as a safety-flush timeout so a
-        # partial batch is not held indefinitely when the source runs dry.
+        # Expected frame count for a FULL window, used only for the status ratio.
         self.batch_frames = batch_frames
         self._sample_interval_ms: float = 1000.0 / sample_fps
         self._expected_frames: int = batch_frames if batch_frames is not None else round(batch_window_seconds * sample_fps)
         self._frames: List[Tuple[int, str]] = []
         self._gaps: List[Gap] = []
 
-    def add(self, capture_ts_ms: int, s3_key: str) -> bool:
-        """Add a frame. Returns True when the batch is full and should be flushed."""
+    def add(self, capture_ts_ms: int, s3_key: str) -> None:
+        """Add a frame to the current window.
+
+        Returns nothing: the window closes on the wall clock, never on frame
+        count. (This used to return True at `batch_frames` to signal a flush.)
+        """
         if self._frames:
             prev_ts = self._frames[-1][0]
             elapsed = capture_ts_ms - prev_ts
@@ -57,15 +69,29 @@ class WindowAccumulator:
             # than flooding the window. The 0.9 factor tolerates capture jitter
             # without systematically under-sampling.
             if elapsed < self._sample_interval_ms * 0.9:
-                return False
+                return
             if elapsed > GAP_MULTIPLIER * self._sample_interval_ms:
                 self._gaps.append(Gap(start_ts_ms=prev_ts, end_ts_ms=capture_ts_ms))
         self._frames.append((capture_ts_ms, s3_key))
-        return self.batch_frames is not None and len(self._frames) >= self.batch_frames
+
+    def expected_for_span(self, span_ms: int) -> int:
+        """Frames expected for a window covering `span_ms`.
+
+        A window shorter than nominal — the first one after a camera starts
+        mid-grid, or the final partial one at shutdown — is prorated. Without
+        this every camera start would emit a spurious "offline" window (a short
+        window can never reach 80% of a full window's frame count), and IEP2
+        skips offline windows outright.
+        """
+        nominal_ms = int(self.batch_window_seconds * 1000)
+        if nominal_ms <= 0 or span_ms >= nominal_ms or span_ms <= 0:
+            return self._expected_frames
+        return max(1, round(self._expected_frames * span_ms / nominal_ms))
 
     def close(self, window_start_ms: int, window_end_ms: int, batch_number: int) -> WindowManifest:
         frame_count = len(self._frames)
-        ratio = frame_count / self._expected_frames if self._expected_frames > 0 else 0.0
+        expected = self.expected_for_span(window_end_ms - window_start_ms)
+        ratio = frame_count / expected if expected > 0 else 0.0
 
         if ratio >= ONLINE_FRAME_RATIO:
             status = "online"
@@ -82,7 +108,7 @@ class WindowAccumulator:
             frames=list(self._frames),
             gaps=list(self._gaps),
             frame_count=frame_count,
-            expected_frames=self._expected_frames,
+            expected_frames=expected,
         )
 
     def reset(self) -> None:
