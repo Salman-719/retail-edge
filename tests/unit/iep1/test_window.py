@@ -78,11 +78,57 @@ def test_status_from_frame_ratio(n_frames, expected_status):
     assert m.status == expected_status
 
 
-def test_batch_frames_triggers_close_signal():
+def test_batch_frames_never_signals_a_flush():
+    """batch_frames is a SIZING hint, not a boundary.
+
+    It used to return True at the Nth frame, and the caller then set
+    window_start to that frame's timestamp. Each window therefore lasted
+    frames/actual_fps instead of window_seconds, so every camera drifted off the
+    shared wall-clock grid at its own rate (measured: 43 ms per window between
+    two cameras) until pairs of cameras landed in different IEP3 buckets and
+    cross-camera identity merging silently stopped. Boundaries are now the
+    caller's, taken from the clock — see ADR-003.
+    """
     acc = _acc(batch_frames=3)
-    assert acc.add(BASE, "f0.jpg") is False
-    assert acc.add(BASE + 200, "f1.jpg") is False
-    assert acc.add(BASE + 400, "f2.jpg") is True  # 3rd frame -> batch ready
+    for i in range(5):
+        assert acc.add(BASE + i * 200, f"f{i}.jpg") is None
+    assert acc.close(BASE, BASE + 10_000, 1).frame_count == 5
+
+
+def test_batch_frames_sets_expected_frames():
+    acc = _acc(batch_frames=3)
+    for i in range(3):
+        acc.add(BASE + i * 200, f"f{i}.jpg")
+    m = acc.close(BASE, BASE + 10_000, 1)
+    assert m.expected_frames == 3
+    assert m.status == "online"          # 3/3
+
+
+def test_short_window_prorates_expected_frames():
+    """A window covering a fraction of the nominal span expects that fraction.
+
+    Without proration the first window after a camera starts mid-grid can never
+    reach the 80% online threshold, so it is published "offline" — and IEP2
+    skips offline windows outright, silently discarding real footage.
+    """
+    acc = _acc()                          # nominal 10s @5fps -> 50 frames
+    for i in range(10):                   # 2s of frames at cadence
+        acc.add(BASE + i * 200, f"f{i}.jpg")
+    m = acc.close(BASE, BASE + 2_000, 1)  # 2s window -> expect 10
+    assert m.expected_frames == 10
+    assert m.status == "online"
+
+
+def test_full_window_is_not_prorated():
+    acc = _acc()
+    m = acc.close(BASE, BASE + 10_000, 1)
+    assert m.expected_frames == 50
+
+
+def test_oversized_span_does_not_inflate_expected():
+    acc = _acc()
+    m = acc.close(BASE, BASE + 30_000, 1)
+    assert m.expected_frames == 50
 
 
 def test_reset_clears_frames_and_gaps():

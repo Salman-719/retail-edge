@@ -20,8 +20,10 @@ from services.iep1_ingestion.app.metrics import (
     IEP1_ENCODE_ERRORS,
     IEP1_FRAMES,
     IEP1_FRAMES_DROPPED,
+    IEP1_LATE_FRAMES,
     IEP1_MEMORY_FRACTION,
     IEP1_PUBLISH_LATENCY,
+    IEP1_WINDOW_FLUSH_LAG,
 )
 from services.iep1_ingestion.app.window import WindowAccumulator
 
@@ -32,6 +34,11 @@ JPEG_QUALITY     = int(os.environ.get("JPEG_QUALITY", "85"))
 FRAME_QUEUE_SIZE = int(os.environ.get("FRAME_QUEUE_SIZE", "30"))
 STREAM_PREFIX    = "stream:iep1"
 STREAM_MAXLEN    = 1000
+
+# How long past a window's wall-clock end we keep accepting frames for it, to
+# cover capture→enqueue latency. Must exceed that latency or trailing frames get
+# counted as late; must stay well under one window or flushes bunch up.
+WINDOW_GRACE_MS  = int(os.environ.get("IEP1_WINDOW_GRACE_MS", "1000"))
 
 # ── Memory backpressure ───────────────────────────────────────────────────────
 # Frames written to /dev/shm are charged to IEP1's cgroup memory; if IEP2 stalls
@@ -333,20 +340,61 @@ class CameraWorker:
         self._batch_number += 1
 
     async def _window_loop(self) -> None:
-        window_seconds_ms = int(self._config.window_seconds * 1000) + 3500
+        """Emit one manifest per wall-clock window, on a fixed epoch-aligned grid.
+
+        ADR-003 requires every camera to share identical window boundaries
+        "defined by wall clock, aligned to the minute … not relative timers", so
+        IEP3 can group cameras by rounded window_start. Boundaries here are
+        therefore derived only from the clock: floor(now / W) * W, advancing by
+        exactly W. They are never re-anchored to a frame timestamp — doing that
+        made each window last (frames / actual_fps) instead of W, so every camera
+        slid off the grid at its own rate and pairs of cameras periodically fell
+        into different IEP3 buckets, losing all cross-camera identity merging for
+        those windows with no error raised.
+        """
+        W = int(self._config.window_seconds * 1000)
         accumulator  = self._make_accumulator()
-        window_start = now_ms()
+        window_start = (now_ms() // W) * W
+        window_end   = window_start + W
+
+        async def _close_window() -> None:
+            """Emit the current window and step to the next grid slot."""
+            nonlocal accumulator, window_start, window_end
+            IEP1_WINDOW_FLUSH_LAG.labels(camera_id=self._config.camera_id).observe(
+                max(0, now_ms() - window_end) / 1000.0
+            )
+            await self._flush_accumulator(accumulator, window_start, window_end)
+            window_start = window_end
+            window_end   = window_start + W
+            accumulator  = self._make_accumulator()
 
         try:
             while True:
+                ts = frame = None
                 try:
                     ts, frame = await asyncio.wait_for(
                         self._frame_queue.get(), timeout=1.0
                     )
                 except asyncio.TimeoutError:
                     pass
-                else:
+
+                # Close every window whose deadline has passed, even with no
+                # frames arriving — a dead source still produces "offline"
+                # windows on the grid instead of leaving a hole in the timeline.
+                while now_ms() >= window_end + WINDOW_GRACE_MS:
+                    await _close_window()
+
+                if ts is not None:
                     self._last_frame_ts = ts
+                    # Frame belongs to a later slot: close windows until it fits.
+                    while ts >= window_end:
+                        await _close_window()
+                    # Frame belongs to a window already published. Dropped, not
+                    # back-dated: IEP3 matches co-visibility within 150 ms, so a
+                    # frame filed under the wrong window corrupts that matching.
+                    if ts < window_start:
+                        IEP1_LATE_FRAMES.labels(camera_id=self._config.camera_id).inc()
+                        continue
                     if _BACKPRESSURE.should_drop():
                         # IEP2 is behind and IEP1 memory is high — shed this frame
                         # instead of writing it. The window ends up with fewer
@@ -357,29 +405,14 @@ class CameraWorker:
                     else:
                         path = _write_to_tmpfs(self._config.camera_id, ts, frame)
                         if path is not None:
-                            batch_full = accumulator.add(ts, path)
-                            if batch_full:
-                                # Frame-count trigger: flush immediately.
-                                window_end   = ts
-                                await self._flush_accumulator(accumulator, window_start, window_end)
-                                window_start = window_end
-                                accumulator  = self._make_accumulator()
-                                continue
-
-                # Safety-flush: emit whatever has accumulated if the time budget
-                # expires — prevents frames from being held indefinitely when the
-                # source delivers fewer than batch_frames in window_seconds.
-                if now_ms() - window_start >= window_seconds_ms:
-                    window_end = window_start + window_seconds_ms
-                    await self._flush_accumulator(accumulator, window_start, window_end)
-                    window_start += window_seconds_ms  # fixed advance, no drift
-                    accumulator   = self._make_accumulator()
+                            accumulator.add(ts, path)
 
         except asyncio.CancelledError:
-            # publish partial window before exiting (R8)
+            # publish partial window before exiting (R8). Ends at "now" rather
+            # than the grid boundary, so close() prorates expected_frames and the
+            # short window is not mislabelled offline.
             if accumulator._frames:
-                window_end = now_ms()
-                manifest = accumulator.close(window_start, window_end, self._batch_number)
+                manifest = accumulator.close(window_start, min(now_ms(), window_end), self._batch_number)
                 manifest_dict = self._manifest_to_dict(manifest)
                 manifest_dict["status"] = "partial"
                 await self._xadd(manifest_dict)

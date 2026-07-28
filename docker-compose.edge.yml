@@ -104,19 +104,14 @@ services:
       LIVE_STREAM_ENABLED: ${LIVE_STREAM_ENABLED:-false}
       LIVE_EMBED_FRAME: ${LIVE_EMBED_FRAME:-false}
       LIVE_PUBLISH_EVERY_N: ${LIVE_PUBLISH_EVERY_N:-5}
-      # TEMPORARY: mounts this repo's iep2 source over the 1.5.1 image so the
-      # LIVE_PUBLISH_EVERY_N throttle applies without a rebuild. Unset after the
-      # iep2 image is rebuilt.
+      # Escape hatch for validating an iep2 fix before its image is rebuilt.
+      # MUST stay empty in steady state — a stale patch dir silently shadows
+      # whatever the image ships. See docker_manager._iep2_volumes().
       IEP2_SOURCE_PATCH_DIR: ${IEP2_SOURCE_PATCH_DIR:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ipc-sockets:/tmp/ipc-sockets
       - ./certs:/etc/retailvision/certs:ro
-      # TEMPORARY until an edge-agent image newer than 1.5.1 is built: carries the
-      # explicit IEP2 `command` that avoids the "Duplicated timeseries in
-      # CollectorRegistry" crash. Drop this line once the rebuilt image ships it.
-      - ./services/edge_agent/app/docker_manager.py:/workspace/services/edge_agent/app/docker_manager.py:ro
-      - ./services/edge_agent/app/agent.py:/workspace/services/edge_agent/app/agent.py:ro
     restart: unless-stopped
 
   # ── Cloud-tier services that do NOT run here ───────────────────────────────
