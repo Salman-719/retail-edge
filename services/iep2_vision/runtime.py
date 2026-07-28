@@ -21,7 +21,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator, Iterator, Tuple
 
@@ -40,6 +40,8 @@ try:
         IEP2_IDENTITY_SWITCHES,
         IEP2_TRACK_AGE,
         IEP2_TRACKS_ACTIVE,
+        IEP2_PHASE_SECONDS,
+        IEP2_WINDOW_WALL_SECONDS,
         _MODEL_VERSION,
     )
 except ImportError:
@@ -51,6 +53,8 @@ except ImportError:
         IEP2_IDENTITY_SWITCHES,
         IEP2_TRACK_AGE,
         IEP2_TRACKS_ACTIVE,
+        IEP2_PHASE_SECONDS,
+        IEP2_WINDOW_WALL_SECONDS,
         _MODEL_VERSION,
     )
 
@@ -1031,9 +1035,15 @@ async def run_daemon(settings) -> None:
                     except Exception as exc:
                         log.warning("Previous YOLO task error: %s", exc)
 
-                # Await current batch YOLO results — measure wall time.
+                phases = _PhaseTimer()
+                _t_window_start = time.monotonic()
+
+                # Await current batch YOLO results — measure wall time. This is
+                # the RESIDUAL wait only: the task was launched a window early to
+                # overlap, so it under-reports the true load+detect cost.
                 _t_yolo_start = time.monotonic()
-                batch_frames_data, batch_ts, batch_detections = await this_yolo_task
+                with phases("detect_await"):
+                    batch_frames_data, batch_ts, batch_detections = await this_yolo_task
                 yolo_ms = (time.monotonic() - _t_yolo_start) * 1000
                 yolo_task = None
 
@@ -1045,59 +1055,69 @@ async def run_daemon(settings) -> None:
                 db_rows: list[tuple] = []   # accumulate the whole window → one DB round-trip
                 for frame, capture_ts_ms, detections in zip(batch_frames_data, batch_ts, batch_detections):
                     _t_frame = time.monotonic()
-                    tracks   = update(tracker, detections, frame)
-                    _project_tracks(tracks, projector)
-                    enriched, _crops, _batches = await manager.process_frame(
-                        frame, tracks, timestamp_ms=capture_ts_ms
-                    )
+                    with phases("track"):
+                        tracks = update(tracker, detections, frame)
+                    with phases("project"):
+                        _project_tracks(tracks, projector)
+                    with phases("reid_identity"):
+                        enriched, _crops, _batches = await manager.process_frame(
+                            frame, tracks, timestamp_ms=capture_ts_ms
+                        )
                     tracker_ms    += (time.monotonic() - _t_frame) * 1000
                     reid_crops   += _crops
                     reid_batches += _batches
 
-                    live_pub.publish_frame(frame, capture_ts_ms, enriched)
+                    with phases("live_publish"):
+                        live_pub.publish_frame(frame, capture_ts_ms, enriched)
 
                     # Accumulate this frame's rows; the whole window is written in
                     # one round-trip after the loop (was ~rows*88ms of serial
                     # cross-tunnel INSERTs — the real per-frame bottleneck).
-                    db_rows.extend(_build_detection_rows(enriched, capture_ts_ms, projector))
+                    with phases("build_rows"):
+                        db_rows.extend(_build_detection_rows(enriched, capture_ts_ms, projector))
                     frame_count += 1
-                    previous_track_ids = _record_iep2_frame_metrics(
-                        camera_id=settings.camera_id,
-                        detections=detections,
-                        tracks=enriched,
-                        elapsed_seconds=time.monotonic() - _t_frame,
-                        track_ages=track_ages,
-                        previous_track_ids=previous_track_ids,
-                        frame_index=daemon_frame_index,
-                    )
+                    with phases("frame_metrics"):
+                        previous_track_ids = _record_iep2_frame_metrics(
+                            camera_id=settings.camera_id,
+                            detections=detections,
+                            tracks=enriched,
+                            elapsed_seconds=time.monotonic() - _t_frame,
+                            track_ages=track_ages,
+                            previous_track_ids=previous_track_ids,
+                            frame_index=daemon_frame_index,
+                        )
                     daemon_frame_index += 1
 
                 # Persist the whole window's detections in ONE round-trip before
                 # closing the batch (replaces ~frame_count*tracks serial INSERTs).
-                await persistence.insert_detections_batch(db_rows)
+                with phases("db_detections"):
+                    await persistence.insert_detections_batch(db_rows)
 
                 # ── Strict batch-close order: centroids → batch_complete → XACK → cleanup ──
-                await _flush_centroids_daemon(
-                    manager, persistence,
-                    settings.camera_id, settings.store_id,
-                    manifest.get("batch_number", 0),
-                )
+                with phases("db_centroids"):
+                    await _flush_centroids_daemon(
+                        manager, persistence,
+                        settings.camera_id, settings.store_id,
+                        manifest.get("batch_number", 0),
+                    )
 
-                await server_redis.xadd(
-                    "stream:iep2:batch_complete",
-                    {
-                        "camera_id":       settings.camera_id,
-                        "store_id":        settings.store_id,
-                        "batch_number":    str(manifest.get("batch_number", 0)),
-                        "window_start_ms": str(manifest.get("window_start_ms", 0)),
-                        "window_end_ms":   str(manifest.get("window_end_ms", 0)),
-                        "frame_count":     str(frame_count),
-                    },
-                    maxlen=500,
-                    approximate=True,
-                )
-                await consumer.ack(message_id)
-                await _cleanup_frames(manifest)
+                with phases("batch_complete"):
+                    await server_redis.xadd(
+                        "stream:iep2:batch_complete",
+                        {
+                            "camera_id":       settings.camera_id,
+                            "store_id":        settings.store_id,
+                            "batch_number":    str(manifest.get("batch_number", 0)),
+                            "window_start_ms": str(manifest.get("window_start_ms", 0)),
+                            "window_end_ms":   str(manifest.get("window_end_ms", 0)),
+                            "frame_count":     str(frame_count),
+                        },
+                        maxlen=500,
+                        approximate=True,
+                    )
+                with phases("ack_cleanup"):
+                    await consumer.ack(message_id)
+                    await _cleanup_frames(manifest)
 
                 avg_tracker = (tracker_ms / frame_count) if frame_count else 0.0
                 log.info(
@@ -1107,6 +1127,23 @@ async def run_daemon(settings) -> None:
                     settings.camera_id, manifest.get("batch_number"), frame_count,
                     yolo_ms, tracker_ms, reid_crops, reid_batches, avg_tracker,
                 )
+                # Full phase breakdown. `wall` is what actually matters: it must
+                # stay under window_seconds or this camera accumulates permanent
+                # lag (manifests are consumed oldest-first, nothing skips ahead)
+                # and IEP3 eventually stops reconciling it with its peers.
+                _wall = time.monotonic() - _t_window_start
+                log.info(
+                    "Phase breakdown  camera=%s  batch=%s  %s",
+                    settings.camera_id, manifest.get("batch_number"),
+                    phases.publish(settings.camera_id, _wall),
+                )
+                if _wall >= settings.window_seconds:
+                    log.warning(
+                        "Window OVERRUN  camera=%s  batch=%s  wall=%.1fs >= window=%.1fs "
+                        "— this camera is falling behind and will desynchronise from its peers",
+                        settings.camera_id, manifest.get("batch_number"),
+                        _wall, settings.window_seconds,
+                    )
 
         except asyncio.CancelledError:
             log.info("IEP2 daemon cancelled  camera=%s", settings.camera_id)
@@ -1135,6 +1172,46 @@ async def run_daemon(settings) -> None:
             await local_redis.aclose()
             await server_redis.aclose()
             sync_redis.close()
+
+
+class _PhaseTimer:
+    """Accumulates wall time per pipeline phase for ONE window.
+
+    Per-frame phases are entered ~300 times a window, so the timings are summed
+    into plain floats and pushed to Prometheus once at batch close rather than
+    observed per frame. Nested use is fine — each phase is measured
+    independently, so overlapping phases will sum to more than the wall time;
+    only sibling phases are meant to be added up.
+    """
+
+    __slots__ = ("totals",)
+
+    def __init__(self) -> None:
+        self.totals: dict[str, float] = {}
+
+    @contextmanager
+    def __call__(self, phase: str):
+        t0 = time.monotonic()
+        try:
+            yield
+        finally:
+            self.totals[phase] = self.totals.get(phase, 0.0) + (time.monotonic() - t0)
+
+    def publish(self, camera_id: str, wall_s: float) -> str:
+        """Emit the breakdown and return a log-friendly summary.
+
+        Prometheus cannot currently scrape the edge box, so the same numbers are
+        returned for the batch-close log line — that is the primary delivery
+        path, not a convenience.
+        """
+        for phase, secs in self.totals.items():
+            IEP2_PHASE_SECONDS.labels(camera_id=camera_id, phase=phase).observe(secs)
+        IEP2_WINDOW_WALL_SECONDS.labels(camera_id=camera_id).observe(wall_s)
+        accounted = sum(self.totals.values())
+        parts = " ".join(
+            f"{p}={s:.1f}" for p, s in sorted(self.totals.items(), key=lambda kv: -kv[1])
+        )
+        return f"wall={wall_s:.1f} accounted={accounted:.1f} residual={wall_s - accounted:.1f} | {parts}"
 
 
 async def _flush_centroids_daemon(
