@@ -1,0 +1,133 @@
+# Edge-tier overlay — rented GPU box (Hyperstack L40).
+#
+# Runs the vision tier only. IEP1 and IEP2 MUST stay on this host together:
+# IEP1 writes JPEGs to the shared tmpfs frame-store and puts the local FILE PATH
+# in the Redis manifest, which IEP2 reads back. Splitting them needs the S3 frame
+# path, which is orphaned code (see docs) — do not attempt it with this overlay.
+#
+# Talks to the cloud box over the public internet:
+#   edge_agent -> EEP gRPC (TLS, CA-pinned)   IEP2 -> postgres + redis (SG-locked)
+#
+# IEP2 is NOT declared here: edge_agent spawns one container per camera via the
+# Docker backend (services/edge_agent/app/docker_manager.py) on StartCamera.
+#
+# Usage (from the repo root, with .env present):
+#   docker compose -f docker-compose.yml -f docker-compose.edge.yml pull redis iep1-daemon yolo-service reid-service edge_agent_dev
+#   docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d --no-build redis iep1-daemon yolo-service reid-service
+#   # then, once STORE_ID is known:
+#   docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d --no-build edge_agent_dev
+
+services:
+
+  # Edge-local Redis: carries stream:iep1:{camera_id} between IEP1 and IEP2.
+  # Deliberately NOT the cloud Redis — one XADD per frame-window stays local.
+  redis:
+    # No host port at all: IEP1 and the IEP2 containers reach it by service name
+    # on the compose network. Publishing it only invited a port clash with stale
+    # docker-proxy state, and nothing off-box should ever touch the edge Redis.
+    ports: !override []
+
+  iep1-daemon:
+    image: ghcr.io/salman-719/retailvision/iep1:${RV_TAG:-1.5.1}
+    environment:
+      LOCAL_REDIS_URL: "redis://redis:6379/0"
+      TMPFS_FRAME_ROOT: /dev/shm/frames
+      JPEG_QUALITY: ${JPEG_QUALITY:-85}
+      # v1.5.0 memory backpressure: sheds frames instead of OOM-looping when
+      # IEP2 falls behind (tmpfs frames are charged to this cgroup).
+      IEP1_BACKPRESSURE_HIGH: ${IEP1_BACKPRESSURE_HIGH:-0.85}
+      IEP1_BACKPRESSURE_LOW: ${IEP1_BACKPRESSURE_LOW:-0.60}
+    restart: unless-stopped
+
+  yolo-service:
+    image: ghcr.io/salman-719/retailvision/yolo:${RV_TAG:-1.5.1}-cuda
+    environment:
+      INFERENCE_DEVICE: "gpu"
+      DETECTOR_MODEL: ${DETECTOR_MODEL:-rtdetr-x.pt}
+      # Batching is the dominant throughput lever (bench: bs16 ~155 fps vs
+      # bs1 ~28 fps on this GPU). TRT is deliberately deferred.
+      YOLO_MAX_BATCH_SIZE: ${YOLO_MAX_BATCH_SIZE:-32}
+      YOLO_BATCH_TIMEOUT_MS: ${YOLO_BATCH_TIMEOUT_MS:-20}
+      EXPORT_TRT: "false"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  reid-service:
+    image: ghcr.io/salman-719/retailvision/reid:${RV_TAG:-1.5.1}-cuda
+    environment:
+      INFERENCE_DEVICE: "gpu"
+      REID_MAX_BATCH_SIZE: ${REID_MAX_BATCH_SIZE:-64}
+      REID_BATCH_TIMEOUT_MS: ${REID_BATCH_TIMEOUT_MS:-50}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  edge_agent_dev:
+    image: ghcr.io/salman-719/retailvision/edge-agent:${RV_TAG:-1.5.1}
+    profiles: []          # drop the 'edge' profile gate
+    environment:
+      EEP_GRPC_URL: "eep.${PUBLIC_HOST}:50051"
+      STORE_ID: ${STORE_ID}
+      AGENT_SECRET: ${AGENT_SECRET}
+      # TLS to EEP. agent.py silently falls back to an INSECURE channel if this
+      # file is missing, so the mount below is load-bearing, not decorative.
+      GRPC_CA_CERT_PATH: /etc/retailvision/certs/ca.crt
+      # Passed straight through to every IEP2 container it spawns.
+      LOCAL_REDIS_URL: "redis://redis:6379/0"
+      SERVER_REDIS_URL: ${SERVER_REDIS_URL}
+      DATABASE_URL_SERVER: ${DATABASE_URL_SERVER}
+      IEP2_IMAGE: ghcr.io/salman-719/retailvision/iep2:${RV_TAG:-1.5.1}
+      DOCKER_NETWORK: retail-edge_default
+      IPC_SOCKETS_VOLUME: retail-edge_ipc-sockets
+      FRAME_STORE_VOLUME: retail-edge_frame-store
+      # agent.py reads IEP2 health sockets at unix://{IPC_SOCKETS_HOST_PATH}/...
+      IPC_SOCKETS_HOST_PATH: "/tmp/ipc-sockets"
+      # RT-DETR-X + resnet50 cold-load on GPU takes >60s; on timeout the agent
+      # skips IEP1 AddCamera entirely and the camera silently never starts.
+      IEP2_HEALTH_TIMEOUT_S: ${IEP2_HEALTH_TIMEOUT_S:-240}
+      # Live preview for the Main Vision Debug page. The publish path is a
+      # SYNCHRONOUS Redis XADD to the cloud on the pipeline's event loop, so at
+      # 5 fps unthrottled it would add ~26 s to every 60 s window. EVERY_N=5
+      # gives ~1 fps preview for ~5 s of blocking. Set LIVE_STREAM_ENABLED=false
+      # to turn the whole thing off instantly.
+      LIVE_STREAM_ENABLED: ${LIVE_STREAM_ENABLED:-false}
+      LIVE_EMBED_FRAME: ${LIVE_EMBED_FRAME:-false}
+      LIVE_PUBLISH_EVERY_N: ${LIVE_PUBLISH_EVERY_N:-5}
+      # TEMPORARY: mounts this repo's iep2 source over the 1.5.1 image so the
+      # LIVE_PUBLISH_EVERY_N throttle applies without a rebuild. Unset after the
+      # iep2 image is rebuilt.
+      IEP2_SOURCE_PATCH_DIR: ${IEP2_SOURCE_PATCH_DIR:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ipc-sockets:/tmp/ipc-sockets
+      - ./certs:/etc/retailvision/certs:ro
+      # TEMPORARY until an edge-agent image newer than 1.5.1 is built: carries the
+      # explicit IEP2 `command` that avoids the "Duplicated timeseries in
+      # CollectorRegistry" crash. Drop this line once the rebuilt image ships it.
+      - ./services/edge_agent/app/docker_manager.py:/workspace/services/edge_agent/app/docker_manager.py:ro
+      - ./services/edge_agent/app/agent.py:/workspace/services/edge_agent/app/agent.py:ro
+    restart: unless-stopped
+
+  # ── Cloud-tier services that do NOT run here ───────────────────────────────
+  # edge_agent_dev depends_on eep; stub it so compose is satisfied without
+  # pulling the real image.
+  eep:
+    image: busybox:1.36
+    entrypoint: ["true"]
+    restart: "no"
+    volumes: []
+    # Without this override, eep's base depends_on (pgbouncer + redis healthy)
+    # drags a full postgres AND pgbouncer onto the GPU box — both useless here,
+    # since the real database lives on the cloud box.
+    depends_on: !override []

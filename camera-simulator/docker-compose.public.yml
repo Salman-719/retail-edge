@@ -1,0 +1,18 @@
+# Public overlay for the camera simulator when it runs on a box with a public IP.
+#
+# The base file only publishes RTSP :8554 (what IEP1 consumes). MediaMTX also
+# serves the same streams as HLS on :8888, which is what makes the feed viewable
+# in a browser:  http://<public-ip>:8888/test3-cam1
+#
+# Usage (from camera-simulator/):
+#   docker compose -f docker-compose.yml -f docker-compose.public.yml up -d
+
+services:
+  rtsp-server:
+    ports:
+      - "${HLS_PORT:-8888}:8888/tcp"
+    environment:
+      MTX_HLS: "yes"
+      MTX_HLSADDRESS: ":8888"
+      # Low-latency HLS so the browser view tracks the RTSP feed closely.
+      MTX_HLSVARIANT: "lowLatency"

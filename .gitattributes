@@ -1,0 +1,24 @@
+# Shell scripts and container entrypoints MUST keep LF endings.
+#
+# This repo is developed on Windows with core.autocrlf=true, which rewrites
+# checked-out files to CRLF. Those files are then bind-mounted into Linux
+# containers (e.g. camera-simulator mounts scripts/publish-streams.sh into the
+# ffmpeg image), where `sh` fails on the trailing \r with
+# "set: line 2: illegal option -". `git archive` applies the same conversion,
+# so deployment tarballs inherit the problem.
+*.sh            text eol=lf
+Dockerfile*     text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+Caddyfile       text eol=lf
+*.ini           text eol=lf
+*.conf          text eol=lf
+
+# Binary assets — never convert.
+*.mp4           binary
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.pt            binary
+*.engine        binary
+*.onnx          binary
